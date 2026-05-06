@@ -1,0 +1,562 @@
+from core.models import LocalConfig, ProcessExecutionRequest, SiteExecutionResult
+from services.process_service import ProcessService
+
+
+class StubLogRecord:
+    def __init__(self, log_id: int) -> None:
+        self.id = log_id
+
+
+class StubLogService:
+    def __init__(self) -> None:
+        self.start_calls = []
+        self.update_calls = []
+        self.finish_calls = []
+        self.info_calls = []
+        self.start_error = None
+
+    def start_process(self, **kwargs):
+        if self.start_error is not None:
+            raise self.start_error
+        self.start_calls.append(kwargs)
+        return StubLogRecord(77)
+
+    def update_process(self, log_id, **kwargs):
+        self.update_calls.append((log_id, kwargs))
+        return StubLogRecord(log_id)
+
+    def finish_process(self, log_id, **kwargs):
+        self.finish_calls.append((log_id, kwargs))
+        return StubLogRecord(log_id)
+
+    def log_info(self, **kwargs):
+        self.info_calls.append(kwargs)
+        return StubLogRecord(15)
+
+
+class StubLocalConfigService:
+    def load(self) -> LocalConfig:
+        return LocalConfig(
+            agent_name="Agente Local",
+            flow_engine="traditional",
+            page_timeout_seconds=45,
+            action_timeout_seconds=25,
+            max_selfie_retries=10,
+            theme_mode="light",
+        )
+
+
+class StubLastResultService:
+    def __init__(self) -> None:
+        self.saved_results = []
+
+    def save_result(self, result) -> None:
+        self.saved_results.append(result)
+
+
+class StubCompincheSite:
+    def __init__(self, result: SiteExecutionResult) -> None:
+        self.result = result
+        self.execute_calls = []
+
+    def execute_traditional(self, request, *, local_config, progress_callback):
+        self.execute_calls.append(("traditional", request, local_config))
+        progress_callback("photo_upload", "Subiendo foto reservada...")
+        return self.result
+
+    def execute_extension(self, request, *, local_config, progress_callback):
+        self.execute_calls.append(("extension", request, local_config))
+        progress_callback("photo_upload", "Subiendo foto reservada...")
+        return self.result
+
+
+class StubParipeSite:
+    def __init__(self, result: SiteExecutionResult) -> None:
+        self.result = result
+        self.execute_calls = []
+
+    def execute_traditional(self, request, *, local_config, progress_callback):
+        self.execute_calls.append(("traditional", request, local_config))
+        progress_callback("block_read", "Leyendo bloque de paripe...")
+        return self.result
+
+    def execute_extension(self, request, *, local_config, progress_callback):
+        self.execute_calls.append(("extension", request, local_config))
+        progress_callback("block_read", "Leyendo bloque de paripe...")
+        return self.result
+
+
+class StubReady4DriveSite:
+    def __init__(self, result: SiteExecutionResult) -> None:
+        self.result = result
+        self.execute_calls = []
+
+    def execute_traditional(self, request, *, local_config, progress_callback):
+        self.execute_calls.append(("traditional", request, local_config))
+        progress_callback("site_bootstrap", "Base inicial de ready4drive.")
+        return self.result
+
+    def execute_extension(self, request, *, local_config, progress_callback):
+        self.execute_calls.append(("extension", request, local_config))
+        progress_callback("site_bootstrap", "Base inicial de ready4drive.")
+        return self.result
+
+
+def test_execute_compinche_runs_real_site_and_finishes_log() -> None:
+    log_service = StubLogService()
+    last_result_service = StubLastResultService()
+    site = StubCompincheSite(
+        SiteExecutionResult(
+            success=True,
+            message="Proceso completado correctamente en compinche.io.",
+            final_status="success",
+            phase="final_result",
+            station_name="Estacion Central",
+            block_price="RD$ 300",
+            block_time="3:30 PM",
+            block_duration="3 horas",
+            deepfakescore_retries=2,
+            reserved_photo_id="photo-1",
+        )
+    )
+    service = ProcessService(
+        log_service=log_service,
+        local_config_service=StubLocalConfigService(),
+        last_result_service=last_result_service,
+        compinche_site=site,
+        paripe_site=StubParipeSite(
+            SiteExecutionResult(
+                success=True,
+                message="unused",
+                final_status="success",
+                phase="final_result",
+            )
+        ),
+    )
+    progress_events = []
+
+    result = service.execute(
+        ProcessExecutionRequest(
+            page_name="Compinche",
+            action_name="He llegado",
+            phone_number="+1 (809) 555-1234",
+            password="secret",
+            agent_name="Agente Local",
+            execution_mode="normal",
+        ),
+        progress_callback=lambda phase, message: progress_events.append((phase, message)),
+    )
+
+    assert result.process_log_id == 77
+    assert result.success is True
+    assert result.final_status == "success"
+    assert result.station_name == "Estacion Central"
+    assert log_service.start_calls[0]["site"] == "compinche.io"
+    assert log_service.update_calls[0][1]["phase"] == "login"
+    assert log_service.update_calls[1][1]["phase"] == "photo_upload"
+    assert log_service.finish_calls[0][1]["final_status"] == "success"
+    assert last_result_service.saved_results[0].phone_number == "8095551234"
+    assert last_result_service.saved_results[0].action_name == "He llegado"
+    assert last_result_service.saved_results[0].deepfakescore_retries == 2
+    assert progress_events == [
+        ("login", "Preparando navegador limpio para compinche.io... Motor: Tradicional."),
+        ("photo_upload", "Subiendo foto reservada..."),
+    ]
+
+
+def test_execute_ready4drive_uses_initial_site_base_and_does_not_fallback_to_stub() -> None:
+    log_service = StubLogService()
+    ready4drive_site = StubReady4DriveSite(
+        SiteExecutionResult(
+            success=False,
+            message="Base inicial de ready4drive.",
+            final_status="not_implemented",
+            phase="site_bootstrap",
+        )
+    )
+    service = ProcessService(
+        log_service=log_service,
+        local_config_service=StubLocalConfigService(),
+        compinche_site=StubCompincheSite(
+            SiteExecutionResult(
+                success=True,
+                message="unused",
+                final_status="success",
+                phase="final_result",
+            )
+        ),
+        paripe_site=StubParipeSite(
+            SiteExecutionResult(
+                success=True,
+                message="unused",
+                final_status="success",
+                phase="final_result",
+            )
+        ),
+        ready4drive_site=ready4drive_site,
+    )
+
+    result = service.execute(
+        ProcessExecutionRequest(
+            page_name="Ready4Drive",
+            action_name="He llegado",
+            phone_number="8095551234",
+            password="secret",
+            agent_name="Agente Local",
+            execution_mode="normal",
+        )
+    )
+
+    assert result.success is False
+    assert result.phase == "site_bootstrap"
+    assert log_service.start_calls[0]["site"] == "ready4drive.com"
+    assert ready4drive_site.execute_calls[0][0] == "traditional"
+    assert ready4drive_site.execute_calls[0][1].page_name == "Ready4Drive"
+
+
+def test_execute_compinche_stops_cleanly_when_initial_log_creation_fails() -> None:
+    log_service = StubLogService()
+    log_service.start_error = RuntimeError("insert without returned id")
+    site = StubCompincheSite(
+        SiteExecutionResult(
+            success=True,
+            message="unused",
+            final_status="success",
+            phase="final_result",
+        )
+    )
+    service = ProcessService(
+        log_service=log_service,
+        local_config_service=StubLocalConfigService(),
+        compinche_site=site,
+        paripe_site=StubParipeSite(
+            SiteExecutionResult(
+                success=True,
+                message="unused",
+                final_status="success",
+                phase="final_result",
+            )
+        ),
+    )
+
+    result = service.execute(
+        ProcessExecutionRequest(
+            page_name="Compinche",
+            action_name="He llegado",
+            phone_number="8095551234",
+            password="secret",
+            agent_name="Agente Local",
+            execution_mode="normal",
+        )
+    )
+
+    assert result.success is False
+    assert result.process_log_id is None
+    assert "creación del log inicial" in result.message or "creacion del log inicial" in result.message
+    assert site.execute_calls == []
+
+
+def test_execute_compinche_uses_configured_traditional_mode_when_request_uses_testing() -> None:
+    log_service = StubLogService()
+    site = StubCompincheSite(
+        SiteExecutionResult(
+            success=True,
+            message="Proceso real completado.",
+            final_status="success",
+            phase="final_result",
+        )
+    )
+    service = ProcessService(
+        log_service=log_service,
+        local_config_service=StubLocalConfigService(),
+        compinche_site=site,
+        paripe_site=StubParipeSite(
+            SiteExecutionResult(
+                success=True,
+                message="unused",
+                final_status="success",
+                phase="final_result",
+            )
+        ),
+    )
+
+    result = service.execute(
+        ProcessExecutionRequest(
+            page_name="Compinche",
+            action_name="He llegado",
+            phone_number="8095551234",
+            password="secret",
+            agent_name="Agente Local",
+            execution_mode="testing",
+        )
+    )
+
+    assert result.success is True
+    assert result.execution_mode == "traditional"
+    assert result.phase == "final_result"
+    assert log_service.start_calls[0]["phase"] == "login"
+    assert site.execute_calls[0][0] == "traditional"
+    assert site.execute_calls[0][1].execution_mode == "traditional"
+    assert log_service.finish_calls[0][1]["phase"] == "final_result"
+
+
+def test_execute_paripe_runs_real_site_and_returns_block_duration() -> None:
+    log_service = StubLogService()
+    paripe_site = StubParipeSite(
+        SiteExecutionResult(
+            success=True,
+            message="Proceso completado correctamente en paripe.io.",
+            final_status="success",
+            phase="final_result",
+            station_name="Bronx NY (VNY2) - Sub Same-Day",
+            block_price="$93",
+            block_time="5:00 15/04/2026",
+            block_duration="05:00 am - 08:00 am (3 horas)",
+            reserved_photo_id="photo-9",
+        )
+    )
+    service = ProcessService(
+        log_service=log_service,
+        local_config_service=StubLocalConfigService(),
+        compinche_site=StubCompincheSite(
+            SiteExecutionResult(
+                success=True,
+                message="unused",
+                final_status="success",
+                phase="final_result",
+            )
+        ),
+        paripe_site=paripe_site,
+    )
+
+    result = service.execute(
+        ProcessExecutionRequest(
+            page_name="Paripe",
+            action_name="He llegado",
+            phone_number="8095551234",
+            password="secret",
+            agent_name="Agente Local",
+            execution_mode="normal",
+        )
+    )
+
+    assert result.success is True
+    assert result.phase == "final_result"
+    assert result.block_duration == "05:00 am - 08:00 am (3 horas)"
+    assert log_service.start_calls[0]["site"] == "paripe.io"
+    assert log_service.update_calls[0][1]["message"] == "Preparando navegador limpio para paripe.io... Motor: Tradicional."
+    assert log_service.finish_calls[0][1]["final_status"] == "success"
+    assert paripe_site.execute_calls[0][0] == "traditional"
+    assert paripe_site.execute_calls[0][1].page_name == "Paripe"
+
+
+def test_execute_paripe_uses_extension_engine_when_configured() -> None:
+    class ExtensionConfigService(StubLocalConfigService):
+        def load(self) -> LocalConfig:
+            config = super().load()
+            return config.model_copy(update={"flow_engine": "extension"})
+
+    paripe_site = StubParipeSite(
+        SiteExecutionResult(
+            success=True,
+            message="Proceso completado correctamente en paripe.io.",
+            final_status="success",
+            phase="final_result",
+        )
+    )
+    service = ProcessService(
+        log_service=StubLogService(),
+        local_config_service=ExtensionConfigService(),
+        compinche_site=StubCompincheSite(
+            SiteExecutionResult(success=True, message="unused", final_status="success", phase="final_result")
+        ),
+        paripe_site=paripe_site,
+    )
+
+    result = service.execute(
+        ProcessExecutionRequest(
+            page_name="Paripe",
+            action_name="He llegado",
+            phone_number="8095551234",
+            password="secret",
+            agent_name="Agente Local",
+            execution_mode="testing",
+        )
+    )
+
+    assert result.execution_mode == "extension"
+    assert paripe_site.execute_calls[0][0] == "extension"
+    assert paripe_site.execute_calls[0][1].execution_mode == "extension"
+
+
+def test_execute_paripe_keeps_instant_action_name_in_results() -> None:
+    log_service = StubLogService()
+    last_result_service = StubLastResultService()
+    paripe_site = StubParipeSite(
+        SiteExecutionResult(
+            success=True,
+            message="Proceso completado correctamente en paripe.io.",
+            final_status="success",
+            phase="final_result",
+            station_name="Estacion Instant",
+            block_price="RD$ 450",
+            block_time="15/04/2026 05:00 am - 08:00 am",
+            block_duration="3 horas",
+            selfie_retry_count=1,
+            deepfakescore_activated=True,
+        )
+    )
+    service = ProcessService(
+        log_service=log_service,
+        local_config_service=StubLocalConfigService(),
+        last_result_service=last_result_service,
+        compinche_site=StubCompincheSite(
+            SiteExecutionResult(success=True, message="unused", final_status="success", phase="final_result")
+        ),
+        paripe_site=paripe_site,
+    )
+
+    result = service.execute(
+        ProcessExecutionRequest(
+            page_name="Paripe",
+            action_name="He llegado Instantaneas",
+            phone_number="8095551234",
+            password="secret",
+            agent_name="Agente Local",
+            execution_mode="normal",
+        )
+    )
+
+    assert result.success is True
+    assert result.action_name == "He llegado instantáneo"
+    assert paripe_site.execute_calls[0][0] == "traditional"
+    assert paripe_site.execute_calls[0][1].action_name == "He llegado instantáneo"
+    assert last_result_service.saved_results[0].action_name == "He llegado instantáneo"
+
+
+def test_execute_paripe_preserves_canonical_instant_action_name_when_already_accented() -> None:
+    service = ProcessService(
+        log_service=StubLogService(),
+        local_config_service=StubLocalConfigService(),
+        last_result_service=StubLastResultService(),
+        compinche_site=StubCompincheSite(
+            SiteExecutionResult(success=True, message="unused", final_status="success", phase="final_result")
+        ),
+        paripe_site=StubParipeSite(
+            SiteExecutionResult(success=True, message="Proceso completado", final_status="success", phase="final_result")
+        ),
+    )
+
+    result = service.execute(
+        ProcessExecutionRequest(
+            page_name="Paripe",
+            action_name="He llegado instantáneo",
+            phone_number="8095551234",
+            password="secret",
+            agent_name="Agente Local",
+            execution_mode="normal",
+        )
+    )
+
+    assert result.action_name == "He llegado instantáneo"
+
+
+def test_execute_paripe_persists_login_failed_result() -> None:
+    log_service = StubLogService()
+    paripe_site = StubParipeSite(
+        SiteExecutionResult(
+            success=False,
+            message="Login fallido: paripe.io no acepto el telefono o la contrasena.",
+            final_status="login_failed",
+            phase="login",
+        )
+    )
+    service = ProcessService(
+        log_service=log_service,
+        local_config_service=StubLocalConfigService(),
+        compinche_site=StubCompincheSite(
+            SiteExecutionResult(success=True, message="unused", final_status="success", phase="final_result")
+        ),
+        paripe_site=paripe_site,
+    )
+
+    result = service.execute(
+        ProcessExecutionRequest(
+            page_name="Paripe",
+            action_name="He llegado",
+            phone_number="8095551234",
+            password="bad-secret",
+            agent_name="Agente Local",
+            execution_mode="normal",
+        )
+    )
+
+    assert result.success is False
+    assert result.final_status == "login_failed"
+    assert result.phase == "login"
+    assert log_service.finish_calls[0][1]["final_status"] == "login_failed"
+
+
+def test_execute_paripe_persists_timeout_and_no_block_results() -> None:
+    log_service = StubLogService()
+    timeout_service = ProcessService(
+        log_service=log_service,
+        local_config_service=StubLocalConfigService(),
+        compinche_site=StubCompincheSite(
+            SiteExecutionResult(success=True, message="unused", final_status="success", phase="final_result")
+        ),
+        paripe_site=StubParipeSite(
+            SiteExecutionResult(
+                success=False,
+                message="No aparecio la informacion del bloque dentro del timeout esperado.",
+                final_status="timeout",
+                phase="block_read",
+            )
+        ),
+    )
+
+    timeout_result = timeout_service.execute(
+        ProcessExecutionRequest(
+            page_name="Paripe",
+            action_name="He llegado",
+            phone_number="8095551234",
+            password="secret",
+            agent_name="Agente Local",
+            execution_mode="normal",
+        )
+    )
+
+    assert timeout_result.final_status == "timeout"
+    assert log_service.finish_calls[0][1]["final_status"] == "timeout"
+
+    no_block_log_service = StubLogService()
+    no_block_service = ProcessService(
+        log_service=no_block_log_service,
+        local_config_service=StubLocalConfigService(),
+        compinche_site=StubCompincheSite(
+            SiteExecutionResult(success=True, message="unused", final_status="success", phase="final_result")
+        ),
+        paripe_site=StubParipeSite(
+            SiteExecutionResult(
+                success=False,
+                message="Paripe.io reporto que no hay bloque disponible para completar el flujo.",
+                final_status="no_block",
+                phase="block_read",
+            )
+        ),
+    )
+
+    no_block_result = no_block_service.execute(
+        ProcessExecutionRequest(
+            page_name="Paripe",
+            action_name="He llegado",
+            phone_number="8095551234",
+            password="secret",
+            agent_name="Agente Local",
+            execution_mode="normal",
+        )
+    )
+
+    assert no_block_result.final_status == "no_block"
+    assert no_block_result.phase == "block_read"
+    assert no_block_log_service.finish_calls[0][1]["final_status"] == "no_block"

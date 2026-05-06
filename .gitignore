@@ -1,0 +1,75 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+
+# Virtual env
+.venv/
+venv/
+env/
+
+# Environment files
+.env
+
+# IDE / editor
+.vscode/
+.idea/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Test / coverage
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Build / packaging
+build/
+dist/
+release/
+
+# Local app data
+local_data/config/*
+!local_data/config/.gitkeep
+
+local_data/temp/*
+!local_data/temp/.gitkeep
+
+local_data/temp_photos/*
+!local_data/temp_photos/.gitkeep
+
+local_data/failed_uploads/*
+!local_data/failed_uploads/.gitkeep
+
+local_data/logs/*
+!local_data/logs/.gitkeep
+
+.venv/
+venv/
+env/
+
+chrome_profiles/
+local_data/
+
+__pycache__/
+*.pyc
+
+.env
+.env.*
+
+*.log
+*.tmp
+
+node_modules/
+dist/
+build/
+
+*.zip
+*.rar
+*.7z
+*.mp4
+*.bin
+*.db
