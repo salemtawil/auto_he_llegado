@@ -360,10 +360,14 @@ class BrowserSession:
             return "paripe"
         if "compinche.io" in normalized:
             return "compinche"
+        if "ready4drive.com" in normalized:
+            return "ready4drive"
         if "paripe" in normalized:
             return "paripe"
         if "compinche" in normalized:
             return "compinche"
+        if "ready4drive" in normalized:
+            return "ready4drive"
         return "unknown"
 
     def read_extension_ping_from_all_frames(self, page: object | None = None) -> dict:
@@ -1422,7 +1426,7 @@ class BrowserManager:
             pages = list(getattr(context, "pages", []) or [])
             for page in reversed(pages):
                 url = str(getattr(page, "url", "") or "")
-                if "paripe.io" in url or "compinche.io" in url:
+                if "paripe.io" in url or "compinche.io" in url or "ready4drive.com" in url:
                     with suppress(Exception):
                         page.bring_to_front()
                     return page

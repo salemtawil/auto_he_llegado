@@ -8,6 +8,7 @@ class PhotoStatus(StrEnum):
     AVAILABLE = "available"
     RESERVED = "reserved"
     CONSUMED = "consumed"
+    DISCARDED = "discarded"
     UPLOADED = "uploaded"
     FAILED = "failed"
     ARCHIVED = "archived"

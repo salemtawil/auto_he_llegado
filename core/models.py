@@ -47,6 +47,10 @@ class PhotoRecord(PhotoCreate):
     reserved_at: datetime | None = None
     consumed_at: datetime | None = None
     reserved_by_process_id: str | None = None
+    storage_deleted_at: datetime | None = None
+    cleanup_reason: str | None = None
+    cleanup_error: str | None = None
+    cleaned_by: str | None = None
     created_at: datetime | None = None
 
 
@@ -57,6 +61,10 @@ class PhotoUpdate(DomainModel):
     consumed_at: datetime | None = None
     reserved_by_process_id: str | None = None
     error_message: str | None = None
+    storage_deleted_at: datetime | None = None
+    cleanup_reason: str | None = None
+    cleanup_error: str | None = None
+    cleaned_by: str | None = None
 
     @field_validator("storage_path")
     @classmethod
@@ -65,10 +73,65 @@ class PhotoUpdate(DomainModel):
             return None
         return validate_image_path(value, "storage_path")
 
-    @field_validator("reserved_by_process_id", "error_message")
+    @field_validator(
+        "reserved_by_process_id",
+        "error_message",
+        "cleanup_reason",
+        "cleanup_error",
+        "cleaned_by",
+    )
     @classmethod
     def _validate_optional_text(cls, value: str | None) -> str | None:
         return validate_optional_string(value, "optional_text")
+
+
+class PhotoCleanupAudit(DomainModel):
+    available_count: int = 0
+    reserved_count: int = 0
+    consumed_count: int = 0
+    discarded_count: int = 0
+    consumed_pending_storage_cleanup: int = 0
+    consumed_cleanable_pending_storage_cleanup: int = 0
+    stale_reserved_pending_storage_cleanup: int = 0
+    stale_reserved_cleanable_pending_storage_cleanup: int = 0
+    storage_cleaned_count: int = 0
+    consumed_storage_cleaned_count: int = 0
+    stale_reserved_storage_cleaned_count: int = 0
+    cleanup_error_count: int = 0
+    older_than_hours: int = 2
+
+
+class PhotoCleanupResult(DomainModel):
+    action: str
+    older_than_hours: int | None = None
+    limit: int = 100
+    dry_run: bool = False
+    matched_count: int = 0
+    deleted_count: int = 0
+    error_count: int = 0
+    skipped_count: int = 0
+    items: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class PhotoCleanupBatchProgress(DomainModel):
+    kind: str
+    batch_size: int = 100
+    total_initial: int = 0
+    pending_current: int = 0
+    processed_count: int = 0
+    deleted_count: int = 0
+    error_count: int = 0
+    skipped_count: int = 0
+    batch_index: int = 0
+    last_batch_matched: int = 0
+    last_batch_deleted: int = 0
+    last_batch_errors: int = 0
+    last_batch_skipped: int = 0
+    is_complete: bool = False
+    is_cancelled: bool = False
+    stop_reason: str | None = None
+    elapsed_seconds: float = 0.0
+    photos_per_minute: float = 0.0
 
 
 class ProcessLogCreate(DomainModel):
@@ -172,6 +235,7 @@ class UploadBatchProgress(DomainModel):
     total_files: int = 0
     processed_count: int = 0
     success_count: int = 0
+    pending_count: int = 0
     failed_count: int = 0
     current_index: int = 0
     status_text: str = "Listo para cargar."

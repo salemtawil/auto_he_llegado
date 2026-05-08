@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from pathlib import Path
 import threading
+import time
 import tkinter.filedialog as fd
+from collections import deque
 
 import customtkinter as ctk
 
@@ -42,6 +44,17 @@ class UploaderPanel(ctk.CTkFrame):
         self._selected_files: list[str] = []
         self._is_running = False
         self._last_progress = UploadBatchProgress()
+        self._pending_progress: UploadBatchProgress | None = None
+        self._pending_result_updates: dict[str, UploadItemResult] = {}
+        self._pending_file_statuses: dict[str, str] = {}
+        self._progress_update_scheduled = False
+        self._last_ui_update_at = 0.0
+        self._ui_update_interval_ms = 300
+        self._upload_started_at: float | None = None
+        self._progress_callbacks_received = 0
+        self._ui_updates_applied = 0
+        self._processed_milestones: dict[int, float] = {}
+        self._recent_progress_samples: deque[tuple[float, int]] = deque(maxlen=8)
 
         self.grid_columnconfigure(0, weight=1)
         self.grid_rowconfigure(1, weight=1)
@@ -184,6 +197,7 @@ class UploaderPanel(ctk.CTkFrame):
         self._set_controls_state("disabled")
         self.result_panel.clear()
         self._reset_progress_state(total_files=len(self._selected_files))
+        self.file_list_panel.set_upload_active(True)
         self.status_label.configure(text="Preparando archivos...", text_color=TEXT_PRIMARY)
         thread = threading.Thread(target=self._run_upload, daemon=True)
         thread.start()
@@ -200,56 +214,110 @@ class UploaderPanel(ctk.CTkFrame):
             self.after(0, lambda: self._handle_unexpected_error(exc))
 
     def _schedule_progress_update(self, progress: UploadBatchProgress) -> None:
-        self.after(0, lambda: self._apply_progress_update(progress))
+        self._progress_callbacks_received += 1
+        self._pending_progress = progress
+        if progress.result is not None:
+            self._pending_result_updates[progress.result.source_path] = progress.result
+            self._pending_file_statuses[progress.result.source_path] = (
+                progress.result.processing_status
+            )
+        if self._progress_update_scheduled:
+            return
+        force_immediate = (
+            progress.current_index == 0
+            or progress.total_files == 0
+            or progress.processed_count == progress.total_files
+            or progress.status_text == "Finalizado"
+        )
+        delay_ms = 0
+        if not force_immediate:
+            elapsed_ms = int((time.monotonic() - self._last_ui_update_at) * 1000)
+            delay_ms = max(self._ui_update_interval_ms - elapsed_ms, 0)
+        self._progress_update_scheduled = True
+        self.after(delay_ms, self._drain_pending_progress)
 
-    def _apply_progress_update(self, progress: UploadBatchProgress) -> None:
+    def _drain_pending_progress(self) -> None:
+        self._progress_update_scheduled = False
+        progress = self._pending_progress
+        self._pending_progress = None
+        if progress is None:
+            return
+        result_updates = list(self._pending_result_updates.values())
+        file_statuses = dict(self._pending_file_statuses)
+        self._pending_result_updates.clear()
+        self._pending_file_statuses.clear()
+        self._apply_progress_update(
+            progress,
+            result_updates=result_updates,
+            file_statuses=file_statuses,
+        )
+
+    def _apply_progress_update(
+        self,
+        progress: UploadBatchProgress,
+        *,
+        result_updates: list[UploadItemResult],
+        file_statuses: dict[str, str],
+    ) -> None:
         self._last_progress = progress
+        self._last_ui_update_at = time.monotonic()
+        self._ui_updates_applied += 1
         total = max(progress.total_files, 1)
         self.progress_bar.set(progress.processed_count / total)
         self.progress_label.configure(
             text=f"Progreso: {progress.processed_count}/{progress.total_files}"
         )
+        self._record_metrics(progress)
         self.result_panel.update_progress(progress)
+        self.result_panel.apply_result_updates(result_updates)
+        self.file_list_panel.apply_status_updates(file_statuses)
 
-        if progress.result is not None:
-            self.file_list_panel.update_file_status(
-                progress.result.source_path,
-                progress.result.processing_status,
-            )
-
-        status_color = TEXT_PRIMARY
-        if progress.failed_count:
-            status_color = ERROR
-        elif progress.processed_count and progress.processed_count == progress.total_files:
-            status_color = SUCCESS
-        self.status_label.configure(text=progress.status_text, text_color=status_color)
+        self.status_label.configure(
+            text=self._build_status_text(progress),
+            text_color=self._resolve_status_color(progress),
+        )
 
     def _finish_upload(self, results: list[UploadItemResult]) -> None:
+        if self._pending_progress is not None:
+            self._drain_pending_progress()
         self._is_running = False
         self._set_controls_state("normal")
+        self.file_list_panel.set_upload_active(False)
         self.result_panel.set_results(results)
 
         success_count = sum(1 for item in results if item.success)
-        failed_count = len(results) - success_count
+        failed_count = sum(1 for item in results if self._is_failed_result(item))
+        pending_count = sum(1 for item in results if self._is_pending_db_result(item))
         warning_count = sum(
             1 for item in results if item.success and item.local_cleanup_error
         )
+        elapsed_seconds = self._elapsed_seconds()
+        average_speed = self._calculate_average_speed(len(results))
         if failed_count:
             self.status_label.configure(
-                text=f"Proceso completado con {failed_count} fallo(s).",
+                text=(
+                    f"Proceso completado | OK {success_count} | Pendientes DB {pending_count} | "
+                    f"Fallos {failed_count} | "
+                    f"Tiempo {elapsed_seconds:.1f}s | Velocidad {average_speed:.1f} fotos/min"
+                ),
                 text_color=ERROR,
             )
         elif warning_count:
             self.status_label.configure(
                 text=(
-                    "Proceso completado con "
-                    f"{warning_count} advertencia(s) de local cleanup."
+                    f"Proceso completado | OK {success_count} | Pendientes DB {pending_count} | "
+                    f"Advertencias {warning_count} | "
+                    f"Tiempo {elapsed_seconds:.1f}s | Velocidad {average_speed:.1f} fotos/min"
                 ),
                 text_color=TEXT_PRIMARY,
             )
         else:
             self.status_label.configure(
-                text=f"Proceso completado. {success_count} archivo(s) subidos.",
+                text=(
+                    f"Proceso completado | OK {success_count} | Pendientes DB {pending_count} | "
+                    f"Fallos 0 | "
+                    f"Tiempo {elapsed_seconds:.1f}s | Velocidad {average_speed:.1f} fotos/min"
+                ),
                 text_color=SUCCESS,
             )
 
@@ -264,6 +332,7 @@ class UploaderPanel(ctk.CTkFrame):
     def _handle_unexpected_error(self, exc: Exception) -> None:
         self._is_running = False
         self._set_controls_state("normal")
+        self.file_list_panel.set_upload_active(False)
         self.status_label.configure(text=f"Error inesperado: {exc}", text_color=ERROR)
 
     def _set_controls_state(self, state: str) -> None:
@@ -273,5 +342,78 @@ class UploaderPanel(ctk.CTkFrame):
 
     def _reset_progress_state(self, *, total_files: int = 0) -> None:
         self._last_progress = UploadBatchProgress(total_files=total_files)
+        self._pending_progress = None
+        self._pending_result_updates = {}
+        self._pending_file_statuses = {}
+        self._progress_update_scheduled = False
+        self._last_ui_update_at = 0.0
+        self._upload_started_at = time.monotonic() if total_files else None
+        self._progress_callbacks_received = 0
+        self._ui_updates_applied = 0
+        self._processed_milestones = {}
+        self._recent_progress_samples.clear()
         self.progress_bar.set(0)
         self.progress_label.configure(text=f"Progreso: 0/{total_files}")
+
+    def _record_metrics(self, progress: UploadBatchProgress) -> None:
+        elapsed_seconds = self._elapsed_seconds()
+        self._recent_progress_samples.append((time.monotonic(), progress.processed_count))
+        previous_processed = self._last_progress.processed_count
+        for milestone in range(50, progress.processed_count + 1, 50):
+            if milestone > previous_processed:
+                self._processed_milestones.setdefault(milestone, elapsed_seconds)
+
+    def _build_status_text(self, progress: UploadBatchProgress) -> str:
+        recent_speed = self._calculate_recent_speed()
+        return (
+            f"Subidas {progress.processed_count}/{progress.total_files} | "
+            f"OK {progress.success_count} | Pendientes DB {progress.pending_count} | "
+            f"Fallos {progress.failed_count} | "
+            f"Velocidad: {recent_speed:.1f} fotos/min | "
+            f"Callbacks {self._progress_callbacks_received} | UI {self._ui_updates_applied}"
+        )
+
+    def _resolve_status_color(self, progress: UploadBatchProgress) -> str:
+        if progress.failed_count:
+            return ERROR
+        if progress.processed_count and progress.processed_count == progress.total_files:
+            return SUCCESS
+        return TEXT_PRIMARY
+
+    def _elapsed_seconds(self) -> float:
+        if self._upload_started_at is None:
+            return 0.0
+        return max(time.monotonic() - self._upload_started_at, 0.0)
+
+    def _calculate_average_speed(self, processed_count: int) -> float:
+        elapsed_seconds = self._elapsed_seconds()
+        if processed_count <= 0 or elapsed_seconds <= 0:
+            return 0.0
+        return (processed_count / elapsed_seconds) * 60
+
+    def _calculate_recent_speed(self) -> float:
+        if len(self._recent_progress_samples) < 2:
+            return self._calculate_average_speed(self._last_progress.processed_count)
+        first_time, first_count = self._recent_progress_samples[0]
+        last_time, last_count = self._recent_progress_samples[-1]
+        delta_seconds = max(last_time - first_time, 0.0)
+        delta_count = max(last_count - first_count, 0)
+        if delta_seconds <= 0 or delta_count <= 0:
+            return self._calculate_average_speed(self._last_progress.processed_count)
+        return (delta_count / delta_seconds) * 60
+
+    @staticmethod
+    def _is_pending_db_result(item: UploadItemResult) -> bool:
+        return (
+            item.storage_uploaded
+            and not item.database_inserted
+            and item.database_error is None
+        )
+
+    @staticmethod
+    def _is_failed_result(item: UploadItemResult) -> bool:
+        return (
+            item.storage_error is not None
+            or item.database_error is not None
+            or item.processing_status in {"Error", "Movido a failed_uploads"}
+        )

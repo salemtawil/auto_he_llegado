@@ -7,6 +7,8 @@ from ui.theme import BORDER, CARD_ALT_BG, TEXT_MUTED, TEXT_PRIMARY
 
 
 class UploadResultPanel(ctk.CTkFrame):
+    _RECENT_SUCCESS_LIMIT = 100
+
     def __init__(self, master, **kwargs) -> None:
         super().__init__(master, fg_color=CARD_ALT_BG, corner_radius=18, **kwargs)
         self.grid_columnconfigure(0, weight=1)
@@ -47,64 +49,109 @@ class UploadResultPanel(ctk.CTkFrame):
         self.textbox.grid(row=3, column=0, padx=18, pady=(0, 18), sticky="nsew")
         self.textbox.configure(state="disabled")
         self._results_by_path: dict[str, UploadItemResult] = {}
+        self._result_order: list[str] = []
 
     def set_results(self, results: list[UploadItemResult]) -> None:
-        self._results_by_path = {
-            item.source_path: item.model_copy(deep=True) for item in results
-        }
+        self._results_by_path = {}
+        self._result_order = []
+        self.apply_result_updates(results)
         self._render_results()
 
     def update_progress(self, progress: UploadBatchProgress) -> None:
         self.summary_label.configure(
             text=(
                 f"Procesadas: {progress.processed_count}/{progress.total_files} | "
-                f"Exitosas: {progress.success_count} | Fallidas: {progress.failed_count}"
+                f"Exitosas: {progress.success_count} | "
+                f"Pendientes DB: {progress.pending_count} | "
+                f"Fallidas: {progress.failed_count}"
             )
         )
         self.progress_label.configure(text=progress.status_text, text_color=TEXT_PRIMARY)
-        if progress.result is not None:
-            self._results_by_path[progress.result.source_path] = progress.result.model_copy(
-                deep=True
-            )
-            self._render_results()
+
+    def apply_result_updates(self, results: list[UploadItemResult]) -> None:
+        if not results:
+            return
+        for item in results:
+            if item.source_path not in self._results_by_path:
+                self._result_order.append(item.source_path)
+            self._results_by_path[item.source_path] = item
+        self._render_results()
 
     def _render_results(self) -> None:
-        results = list(self._results_by_path.values())
+        results = [self._results_by_path[path] for path in self._result_order]
         total = len(results)
-        success_count = sum(1 for item in results if item.success)
+        success_count = sum(1 for item in results if self._is_success(item))
+        pending_count = sum(1 for item in results if self._is_pending_db(item))
         warning_count = sum(
             1 for item in results if item.success and item.local_cleanup_error
         )
-        failed_count = total - success_count
+        failed_count = sum(1 for item in results if self._is_failed(item))
         self.summary_label.configure(
             text=(
                 f"Procesadas: {total} | Exitosas: {success_count} | "
+                f"Pendientes DB: {pending_count} | "
                 f"Fallidas: {failed_count} | Advertencias: {warning_count}"
             )
         )
+        noteworthy = [
+            item
+            for item in results
+            if self._is_pending_db(item) or self._is_failed(item) or item.local_cleanup_error
+        ]
+        recent_ok = [
+            item
+            for item in results
+            if item.success and not item.local_cleanup_error
+        ][-self._RECENT_SUCCESS_LIMIT :]
+        noteworthy_paths = {entry.source_path for entry in noteworthy}
+        display_results = noteworthy + [
+            item for item in recent_ok if item.source_path not in noteworthy_paths
+        ]
         self.textbox.configure(state="normal")
         self.textbox.delete("1.0", "end")
-        for item in results:
+        if not display_results:
+            self.textbox.insert("end", "Todavia no hay resultados.\n")
+        else:
+            self.textbox.insert(
+                "end",
+                (
+                    f"Mostrando {len(display_results)} resultado(s): "
+                    f"{len(noteworthy)} incidencia(s) + hasta {self._RECENT_SUCCESS_LIMIT} exitos recientes.\n\n"
+                ),
+            )
+        for item in display_results:
             state = "OK"
-            if not item.success:
+            if self._is_failed(item):
                 state = "ERROR"
             elif item.local_cleanup_error:
                 state = "WARN"
+            elif self._is_pending_db(item):
+                state = "PENDIENTE DB"
             self.textbox.insert(
                 "end",
                 f"[{state}] {item.original_filename}\n",
             )
             self.textbox.insert("end", f"Mensaje: {item.message}\n")
+            storage_state = "OK" if item.storage_uploaded else "ERROR"
+            if not item.storage_uploaded and item.storage_error is None:
+                storage_state = "PENDIENTE"
             self.textbox.insert(
                 "end",
                 "Storage upload: "
-                f"{'OK' if item.storage_uploaded else 'ERROR'}"
+                f"{storage_state}"
                 f"{f' | {item.storage_error}' if item.storage_error else ''}\n",
             )
+            database_state = "SKIPPED"
+            if item.database_inserted:
+                database_state = "OK"
+            elif item.database_error:
+                database_state = "ERROR"
+            elif item.storage_uploaded:
+                database_state = "PENDIENTE"
             self.textbox.insert(
                 "end",
                 "Database insert: "
-                f"{'OK' if item.database_inserted else 'ERROR'}"
+                f"{database_state}"
                 f"{f' | {item.database_error}' if item.database_error else ''}\n",
             )
             local_cleanup_state = "OK"
@@ -132,8 +179,29 @@ class UploadResultPanel(ctk.CTkFrame):
             self.textbox.insert("end", "\n")
         self.textbox.configure(state="disabled")
 
+    @staticmethod
+    def _is_success(item: UploadItemResult) -> bool:
+        return item.success and item.database_inserted
+
+    @staticmethod
+    def _is_pending_db(item: UploadItemResult) -> bool:
+        return (
+            item.storage_uploaded
+            and not item.database_inserted
+            and item.database_error is None
+        )
+
+    @staticmethod
+    def _is_failed(item: UploadItemResult) -> bool:
+        return (
+            item.storage_error is not None
+            or item.database_error is not None
+            or item.processing_status in {"Error", "Movido a failed_uploads"}
+        )
+
     def clear(self) -> None:
         self._results_by_path = {}
+        self._result_order = []
         self.summary_label.configure(text="Sin ejecucion.", text_color=TEXT_MUTED)
         self.progress_label.configure(text="Esperando seleccion.", text_color=TEXT_MUTED)
         self.textbox.configure(state="normal")

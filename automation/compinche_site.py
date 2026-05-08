@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import threading
+from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
