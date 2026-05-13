@@ -14,6 +14,8 @@ class StubLogService:
         self.finish_calls = []
         self.info_calls = []
         self.start_error = None
+        self.update_error = None
+        self.finish_error = None
 
     def start_process(self, **kwargs):
         if self.start_error is not None:
@@ -22,10 +24,14 @@ class StubLogService:
         return StubLogRecord(77)
 
     def update_process(self, log_id, **kwargs):
+        if self.update_error is not None:
+            raise self.update_error
         self.update_calls.append((log_id, kwargs))
         return StubLogRecord(log_id)
 
     def finish_process(self, log_id, **kwargs):
+        if self.finish_error is not None:
+            raise self.finish_error
         self.finish_calls.append((log_id, kwargs))
         return StubLogRecord(log_id)
 
@@ -214,13 +220,13 @@ def test_execute_ready4drive_uses_initial_site_base_and_does_not_fallback_to_stu
     assert ready4drive_site.execute_calls[0][1].page_name == "Ready4Drive"
 
 
-def test_execute_compinche_stops_cleanly_when_initial_log_creation_fails() -> None:
+def test_execute_compinche_continues_when_initial_log_creation_fails() -> None:
     log_service = StubLogService()
-    log_service.start_error = RuntimeError("insert without returned id")
+    log_service.start_error = RuntimeError("Server disconnected")
     site = StubCompincheSite(
         SiteExecutionResult(
             success=True,
-            message="unused",
+            message="Proceso completado sin process_logs.",
             final_status="success",
             phase="final_result",
         )
@@ -250,10 +256,233 @@ def test_execute_compinche_stops_cleanly_when_initial_log_creation_fails() -> No
         )
     )
 
-    assert result.success is False
+    assert result.success is True
     assert result.process_log_id is None
-    assert "creación del log inicial" in result.message or "creacion del log inicial" in result.message
-    assert site.execute_calls == []
+    assert result.message == "Proceso completado sin process_logs."
+    assert site.execute_calls[0][0] == "traditional"
+
+
+def test_execute_compinche_reports_log_warning_when_initial_log_creation_fails() -> None:
+    log_service = StubLogService()
+    log_service.start_error = RuntimeError("Server disconnected")
+    service = ProcessService(
+        log_service=log_service,
+        local_config_service=StubLocalConfigService(),
+        compinche_site=StubCompincheSite(
+            SiteExecutionResult(
+                success=True,
+                message="Proceso completado sin process_logs.",
+                final_status="success",
+                phase="final_result",
+            )
+        ),
+        paripe_site=StubParipeSite(
+            SiteExecutionResult(success=True, message="unused", final_status="success", phase="final_result")
+        ),
+    )
+    progress_events = []
+
+    result = service.execute(
+        ProcessExecutionRequest(
+            page_name="Compinche",
+            action_name="He llegado",
+            phone_number="8095551234",
+            password="secret",
+            agent_name="Agente Local",
+            execution_mode="normal",
+        ),
+        progress_callback=lambda phase, message: progress_events.append((phase, message)),
+    )
+
+    assert result.success is True
+    assert result.process_log_id is None
+    assert progress_events[0][0] == "log_warning"
+    assert "No se pudo crear process_logs inicial" in progress_events[0][1]
+    assert progress_events[1][0] == "login"
+
+
+def test_execute_compinche_continues_when_log_updates_fail() -> None:
+    log_service = StubLogService()
+    log_service.update_error = RuntimeError("Server disconnected")
+    service = ProcessService(
+        log_service=log_service,
+        local_config_service=StubLocalConfigService(),
+        compinche_site=StubCompincheSite(
+            SiteExecutionResult(
+                success=True,
+                message="Proceso completado correctamente en compinche.io.",
+                final_status="success",
+                phase="final_result",
+            )
+        ),
+        paripe_site=StubParipeSite(
+            SiteExecutionResult(success=True, message="unused", final_status="success", phase="final_result")
+        ),
+    )
+    progress_events = []
+
+    result = service.execute(
+        ProcessExecutionRequest(
+            page_name="Compinche",
+            action_name="He llegado",
+            phone_number="8095551234",
+            password="secret",
+            agent_name="Agente Local",
+            execution_mode="normal",
+        ),
+        progress_callback=lambda phase, message: progress_events.append((phase, message)),
+    )
+
+    assert result.success is True
+    assert result.process_log_id == 77
+    assert progress_events[0][0] == "login"
+    assert progress_events[1][0] == "log_warning"
+    assert "updates" in progress_events[1][1]
+    assert progress_events[2][0] == "photo_upload"
+    assert log_service.finish_calls[0][1]["final_status"] == "success"
+
+
+def test_execute_compinche_keeps_site_success_when_finish_log_fails() -> None:
+    log_service = StubLogService()
+    log_service.finish_error = RuntimeError("Server disconnected")
+    service = ProcessService(
+        log_service=log_service,
+        local_config_service=StubLocalConfigService(),
+        compinche_site=StubCompincheSite(
+            SiteExecutionResult(
+                success=True,
+                message="Proceso completado correctamente en compinche.io.",
+                final_status="success",
+                phase="final_result",
+            )
+        ),
+        paripe_site=StubParipeSite(
+            SiteExecutionResult(success=True, message="unused", final_status="success", phase="final_result")
+        ),
+    )
+    progress_events = []
+
+    result = service.execute(
+        ProcessExecutionRequest(
+            page_name="Compinche",
+            action_name="He llegado",
+            phone_number="8095551234",
+            password="secret",
+            agent_name="Agente Local",
+            execution_mode="normal",
+        ),
+        progress_callback=lambda phase, message: progress_events.append((phase, message)),
+    )
+
+    assert result.success is True
+    assert result.process_log_id is None
+    assert progress_events[-1][0] == "log_warning"
+    assert "cerrar process_logs" in progress_events[-1][1]
+
+
+def test_execute_creates_separate_log_service_per_run_when_factory_is_provided() -> None:
+    created_services = []
+
+    def build_log_service():
+        service = StubLogService()
+        created_services.append(service)
+        return service
+
+    service = ProcessService(
+        log_service_factory=build_log_service,
+        local_config_service=StubLocalConfigService(),
+        compinche_site=StubCompincheSite(
+            SiteExecutionResult(
+                success=True,
+                message="Proceso completado correctamente en compinche.io.",
+                final_status="success",
+                phase="final_result",
+            )
+        ),
+        paripe_site=StubParipeSite(
+            SiteExecutionResult(success=True, message="unused", final_status="success", phase="final_result")
+        ),
+    )
+
+    first = service.execute(
+        ProcessExecutionRequest(
+            page_name="Compinche",
+            action_name="He llegado",
+            phone_number="8095551234",
+            password="secret",
+            agent_name="Agente Local",
+            execution_mode="normal",
+        )
+    )
+    second = service.execute(
+        ProcessExecutionRequest(
+            page_name="Compinche",
+            action_name="He llegado",
+            phone_number="8095551235",
+            password="secret",
+            agent_name="Agente Local",
+            execution_mode="normal",
+        )
+    )
+
+    assert first.success is True
+    assert second.success is True
+    assert len(created_services) == 2
+    assert created_services[0] is not created_services[1]
+    assert len(created_services[0].start_calls) == 1
+    assert len(created_services[1].start_calls) == 1
+
+
+def test_execute_throttles_non_critical_process_log_updates_without_hiding_progress() -> None:
+    class ChattyCompincheSite(StubCompincheSite):
+        def execute_traditional(self, request, *, local_config, progress_callback):
+            self.execute_calls.append(("traditional", request, local_config))
+            progress_callback("micro_step", "Paso 1")
+            progress_callback("micro_step", "Paso 2")
+            progress_callback("micro_step", "Paso 3")
+            progress_callback("final_result", "Resultado final visible")
+            return self.result
+
+    log_service = StubLogService()
+    progress_events = []
+    service = ProcessService(
+        log_service=log_service,
+        local_config_service=StubLocalConfigService(),
+        compinche_site=ChattyCompincheSite(
+            SiteExecutionResult(
+                success=True,
+                message="Proceso completado correctamente en compinche.io.",
+                final_status="success",
+                phase="final_result",
+            )
+        ),
+        paripe_site=StubParipeSite(
+            SiteExecutionResult(success=True, message="unused", final_status="success", phase="final_result")
+        ),
+    )
+
+    result = service.execute(
+        ProcessExecutionRequest(
+            page_name="Compinche",
+            action_name="He llegado",
+            phone_number="8095551234",
+            password="secret",
+            agent_name="Agente Local",
+            execution_mode="normal",
+        ),
+        progress_callback=lambda phase, message: progress_events.append((phase, message)),
+    )
+
+    assert result.success is True
+    assert len(progress_events) == 5
+    assert [phase for phase, _message in progress_events] == [
+        "login",
+        "micro_step",
+        "micro_step",
+        "micro_step",
+        "final_result",
+    ]
+    assert [call[1]["phase"] for call in log_service.update_calls] == ["login", "final_result"]
 
 
 def test_execute_compinche_uses_configured_traditional_mode_when_request_uses_testing() -> None:

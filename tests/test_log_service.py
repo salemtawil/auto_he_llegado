@@ -21,6 +21,13 @@ class StubLogsRepository:
         return type("StubLogRecord", (), {"id": log_id})()
 
 
+class FlakyLogsRepository(StubLogsRepository):
+    def __init__(self, *, create_error: Exception | None = None, update_error: Exception | None = None) -> None:
+        super().__init__()
+        self.create_error = create_error
+        self.update_error = update_error
+
+
 def test_insert_test_log_builds_expected_payload() -> None:
     repository = StubLogsRepository()
     service = LogService(logs_repository=repository)
@@ -111,3 +118,59 @@ def test_start_process_wraps_repository_failure_with_phase_context() -> None:
         assert "fase 'login'" in str(exc)
     else:
         raise AssertionError("Expected start_process to raise a contextual RuntimeError.")
+
+
+def test_start_process_retries_with_fresh_repository_when_error_is_transient() -> None:
+    created_repositories = []
+
+    def build_repository():
+        repository = FlakyLogsRepository(
+            create_error=RuntimeError("Supabase operation failed: Server disconnected")
+            if not created_repositories
+            else None
+        )
+        created_repositories.append(repository)
+        return repository
+
+    service = LogService(logs_repository_factory=build_repository, sleep_func=lambda _: None)
+
+    result = service.start_process(
+        site="compinche.io",
+        action="He llegado",
+        phone="18095551234",
+        agent_name="Agente Local",
+        device_name="PC-01",
+        phase="login",
+        message="Iniciando",
+    )
+
+    assert result.id == 123
+    assert len(created_repositories) == 2
+    assert len(created_repositories[0].created_entries) == 0
+    assert len(created_repositories[1].created_entries) == 1
+
+
+def test_update_process_retries_with_fresh_repository_when_error_is_transient() -> None:
+    created_repositories = []
+
+    def build_repository():
+        repository = FlakyLogsRepository(
+            update_error=RuntimeError("Supabase operation failed: timeout")
+            if not created_repositories
+            else None
+        )
+        created_repositories.append(repository)
+        return repository
+
+    service = LogService(logs_repository_factory=build_repository, sleep_func=lambda _: None)
+
+    result = service.update_process(
+        99,
+        phase="photo_upload",
+        message="Subiendo foto",
+    )
+
+    assert result.id == 99
+    assert len(created_repositories) == 2
+    assert len(created_repositories[0].updated_entries) == 0
+    assert created_repositories[1].updated_entries[0][0] == 99

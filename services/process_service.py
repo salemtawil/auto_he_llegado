@@ -6,11 +6,12 @@ import threading
 import unicodedata
 from collections.abc import Callable
 from datetime import datetime, timezone
+from time import monotonic
 
 from automation.browser_manager import BrowserManager
+from automation.compinche_site import CompincheSite
 from automation.engine_router import FlowEngineRouter
 from automation.engines.common import RegisteredSiteRunner
-from automation.compinche_site import CompincheSite
 from automation.paripe_site import ParipeSite
 from automation.ready4drive_site import Ready4DriveSite
 from core.models import ProcessExecutionRequest, ProcessExecutionResult, SiteExecutionResult
@@ -21,6 +22,17 @@ from services.log_service import LogService
 
 
 class ProcessService:
+    _LOG_UPDATE_MIN_INTERVAL_SECONDS = 0.5
+    _IMPORTANT_LOG_PHASES = {
+        "login",
+        "selfie_stage",
+        "photo_upload",
+        "block_read",
+        "final_submit",
+        "final_result",
+        "unexpected",
+        "finished",
+    }
     _ACTION_CANONICAL_NAMES = {
         "he llegado instantaneas": "He llegado instantáneo",
         "he llegado instantaneo": "He llegado instantáneo",
@@ -29,6 +41,7 @@ class ProcessService:
     def __init__(
         self,
         log_service: LogService | None = None,
+        log_service_factory: Callable[[], LogService] | None = None,
         local_config_service: LocalConfigService | None = None,
         compinche_site: CompincheSite | None = None,
         paripe_site: ParipeSite | None = None,
@@ -37,6 +50,9 @@ class ProcessService:
         engine_router: FlowEngineRouter | None = None,
     ) -> None:
         self._log_service = log_service or LogService()
+        self._log_service_factory = log_service_factory or (
+            (lambda: log_service) if log_service is not None else LogService
+        )
         self._local_config_service = local_config_service or LocalConfigService()
         self._last_result_service = last_result_service or LastResultService()
         self._engine_router = engine_router or FlowEngineRouter()
@@ -76,6 +92,7 @@ class ProcessService:
         *,
         progress_callback: Callable[[str, str], None] | None = None,
     ) -> ProcessExecutionResult:
+        run_log_service = self._create_run_log_service()
         sanitized_phone = sanitize_phone_number(request.phone_number)
         local_config = self._local_config_service.load()
         canonical_action_name = self._canonicalize_action_name(request.action_name)
@@ -95,8 +112,22 @@ class ProcessService:
         site_runner = self._build_site_runner(site_label)
         if site_runner is None:
             return self._execute_stub(normalized_request)
+
+        log_record = None
+        log_updates_disabled = False
+        log_warnings: list[str] = []
+        last_log_update_at: float | None = None
+
+        def emit_progress(phase: str, message: str) -> None:
+            if progress_callback is not None:
+                progress_callback(phase, message)
+
+        def register_log_warning(message: str) -> None:
+            log_warnings.append(message)
+            emit_progress("log_warning", message)
+
         try:
-            log_record = self._log_service.start_process(
+            log_record = run_log_service.start_process(
                 site=site_runner.site_host,
                 action=normalized_request.action_name,
                 phone=sanitized_phone,
@@ -106,26 +137,31 @@ class ProcessService:
                 message=f"Iniciando automatizacion real de {site_runner.site_host}.",
             )
         except Exception as exc:
-            return ProcessExecutionResult(
-                process_log_id=None,
-                process_id=normalized_request.process_id,
-                page_name=normalized_request.page_name,
-                action_name=normalized_request.action_name,
-                phone_number=sanitized_phone,
-                execution_mode=normalized_request.execution_mode,
-                success=False,
-                message=(
-                    "No se pudo iniciar el proceso porque falló la creación del log inicial "
-                    f"en process_logs: {exc}"
-                ),
-                final_status="failed",
-                phase=initial_phase,
-            )
+            register_log_warning(f"No se pudo crear process_logs inicial: {exc}")
+
+        def should_write_log_update(phase: str) -> bool:
+            nonlocal last_log_update_at
+            now = monotonic()
+            if phase in self._IMPORTANT_LOG_PHASES or last_log_update_at is None:
+                last_log_update_at = now
+                return True
+            if (now - last_log_update_at) >= self._LOG_UPDATE_MIN_INTERVAL_SECONDS:
+                last_log_update_at = now
+                return True
+            return False
 
         def emit(phase: str, message: str) -> None:
-            self._log_service.update_process(log_record.id, phase=phase, message=message)
-            if progress_callback is not None:
-                progress_callback(phase, message)
+            nonlocal log_updates_disabled
+            emit_progress(phase, message)
+            if log_record is None or log_updates_disabled or not should_write_log_update(phase):
+                return
+            try:
+                run_log_service.update_process(log_record.id, phase=phase, message=message)
+            except Exception as exc:
+                log_updates_disabled = True
+                register_log_warning(
+                    f"process_logs no disponible para updates en esta ejecucion: {exc}"
+                )
 
         try:
             emit(
@@ -140,22 +176,27 @@ class ProcessService:
             )
         except Exception as exc:
             message = f"Error durante la automatizacion de {site_runner.site_host}: {exc}"
-            self._store_process_debug_export(normalized_request.process_id, site_runner.runner)
-            try:
-                self._log_service.finish_process(
-                    log_record.id,
-                    phase="unexpected",
-                    final_status="failed",
-                    message=message,
-                    error_message=message,
-                )
-            except Exception as finish_exc:
-                message = (
-                    f"{message} Ademas no se pudo cerrar el process_log {log_record.id}: "
-                    f"{finish_exc}"
-                )
+            finished_log = None
+            if log_record is not None:
+                try:
+                    finished_log = run_log_service.finish_process(
+                        log_record.id,
+                        phase="unexpected",
+                        final_status="failed",
+                        message=message,
+                        error_message=message,
+                    )
+                except Exception as finish_exc:
+                    register_log_warning(
+                        f"No se pudo cerrar process_logs para esta ejecucion: {finish_exc}"
+                    )
+            self._store_process_debug_export(
+                normalized_request.process_id,
+                site_runner.runner,
+                extras={"log_warnings": list(log_warnings)},
+            )
             return ProcessExecutionResult(
-                process_log_id=log_record.id,
+                process_log_id=finished_log.id if finished_log is not None else None,
                 process_id=normalized_request.process_id,
                 page_name=normalized_request.page_name,
                 action_name=normalized_request.action_name,
@@ -168,11 +209,33 @@ class ProcessService:
             )
 
         completed_at = self._utcnow()
-        finished_log = self._finish_site_log(log_record.id, site_result, completed_at=completed_at)
-        self._store_process_debug_export(normalized_request.process_id, site_runner.runner)
+        finished_log = None
+        if log_record is not None:
+            try:
+                finished_log = run_log_service.finish_process(
+                    log_record.id,
+                    phase=site_result.phase,
+                    final_status=site_result.final_status,
+                    message=self._build_finish_message(site_result),
+                    station_name=site_result.station_name,
+                    block_price=site_result.block_price,
+                    block_time=site_result.block_time,
+                    error_message=site_result.message if not site_result.success else None,
+                    finished_at=completed_at,
+                )
+            except Exception as finish_exc:
+                register_log_warning(
+                    f"No se pudo cerrar process_logs para esta ejecucion: {finish_exc}"
+                )
+
+        self._store_process_debug_export(
+            normalized_request.process_id,
+            site_runner.runner,
+            extras={"log_warnings": list(log_warnings)},
+        )
         result = ProcessExecutionResult(
             process_id=normalized_request.process_id,
-            process_log_id=finished_log.id,
+            process_log_id=finished_log.id if finished_log is not None else None,
             page_name=normalized_request.page_name,
             action_name=normalized_request.action_name,
             phone_number=sanitized_phone,
@@ -194,23 +257,12 @@ class ProcessService:
         self._last_result_service.save_result(result)
         return result
 
-    def _finish_site_log(self, log_id: int, site_result: SiteExecutionResult, *, completed_at: datetime):
-        error_message = site_result.message if not site_result.success else None
+    def _build_finish_message(self, site_result: SiteExecutionResult) -> str:
         retry_suffix = (
             f" Reintentos selfie: {site_result.selfie_retry_count}. "
             f"Deepfakescore: {'activado' if site_result.deepfakescore_activated else 'no activado'}."
         )
-        return self._log_service.finish_process(
-            log_id,
-            phase=site_result.phase,
-            final_status=site_result.final_status,
-            message=f"{site_result.message}{retry_suffix}",
-            station_name=site_result.station_name,
-            block_price=site_result.block_price,
-            block_time=site_result.block_time,
-            error_message=error_message,
-            finished_at=completed_at,
-        )
+        return f"{site_result.message}{retry_suffix}"
 
     def _execute_stub(self, request: ProcessExecutionRequest) -> ProcessExecutionResult:
         log_record = self._log_service.log_info(
@@ -252,7 +304,10 @@ class ProcessService:
             return None
         return factory()
 
-    def _store_process_debug_export(self, process_id: str | None, runner) -> None:
+    def _create_run_log_service(self) -> LogService:
+        return self._log_service_factory()
+
+    def _store_process_debug_export(self, process_id: str | None, runner, *, extras: dict | None = None) -> None:
         if not process_id:
             return
         payload: dict = {}
@@ -264,17 +319,15 @@ class ProcessService:
                 exported = {}
             if isinstance(exported, dict):
                 payload = dict(exported)
+        if isinstance(extras, dict):
+            payload.update(extras)
         payload["process_id"] = process_id
         with self._process_debug_lock:
             self._process_debug_exports[process_id] = payload
 
     @staticmethod
     def _get_local_device_name() -> str:
-        return (
-            os.getenv("COMPUTERNAME")
-            or platform.node().strip()
-            or "UNKNOWN_DEVICE"
-        )
+        return os.getenv("COMPUTERNAME") or platform.node().strip() or "UNKNOWN_DEVICE"
 
     @staticmethod
     def _utcnow() -> datetime:

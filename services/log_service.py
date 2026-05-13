@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from time import sleep
+from typing import Callable
 
 from core.models import ProcessLogCreate, ProcessLogRecord, ProcessLogUpdate
 from core.validators import validate_non_empty_string
@@ -8,8 +10,35 @@ from storage.logs_repository import ProcessLogsRepository
 
 
 class LogService:
-    def __init__(self, logs_repository: ProcessLogsRepository | None = None) -> None:
-        self._logs_repository = logs_repository or ProcessLogsRepository()
+    _WRITE_RETRY_DELAYS = (0.2, 0.5, 1.0)
+    _TRANSIENT_ERROR_MARKERS = (
+        "server disconnected",
+        "connection reset",
+        "timeout",
+        "temporarily unavailable",
+        "network error",
+        "httpx",
+        "httpcore",
+        "remoteprotocolerror",
+        "readerror",
+        "writeerror",
+        "connecterror",
+    )
+
+    def __init__(
+        self,
+        logs_repository: ProcessLogsRepository | None = None,
+        logs_repository_factory: Callable[[], ProcessLogsRepository] | None = None,
+        sleep_func: Callable[[float], None] = sleep,
+    ) -> None:
+        if logs_repository is not None and logs_repository_factory is not None:
+            raise ValueError("Provide either 'logs_repository' or 'logs_repository_factory', not both.")
+        self._logs_repository_factory = logs_repository_factory or (
+            (lambda: logs_repository) if logs_repository is not None else ProcessLogsRepository
+        )
+        self._logs_repository = logs_repository or self._logs_repository_factory()
+        self._next_write_repository = self._logs_repository
+        self._sleep = sleep_func
 
     def start_process(
         self,
@@ -24,22 +53,24 @@ class LogService:
     ) -> ProcessLogRecord:
         timestamp = self._utcnow()
         try:
-            return self._logs_repository.create(
-                ProcessLogCreate(
-                    started_at=timestamp,
-                    finished_at=None,
-                    site=site,
-                    action=action,
-                    phone=phone,
-                    agent_name=agent_name,
-                    device_name=device_name,
-                    station_name="N/A",
-                    block_price="N/A",
-                    block_time="N/A",
-                    final_status="started",
-                    phase=phase,
-                    page_message=message,
-                    error_message=None,
+            return self._run_write_with_retry(
+                lambda repository: repository.create(
+                    ProcessLogCreate(
+                        started_at=timestamp,
+                        finished_at=None,
+                        site=site,
+                        action=action,
+                        phone=phone,
+                        agent_name=agent_name,
+                        device_name=device_name,
+                        station_name="N/A",
+                        block_price="N/A",
+                        block_time="N/A",
+                        final_status="started",
+                        phase=phase,
+                        page_message=message,
+                        error_message=None,
+                    )
                 )
             )
         except Exception as exc:
@@ -58,14 +89,16 @@ class LogService:
         block_time: str | None = None,
     ) -> ProcessLogRecord:
         try:
-            return self._logs_repository.update(
-                log_id,
-                ProcessLogUpdate(
-                    phase=phase,
-                    page_message=message,
-                    station_name=station_name,
-                    block_price=block_price,
-                    block_time=block_time,
+            return self._run_write_with_retry(
+                lambda repository: repository.update(
+                    log_id,
+                    ProcessLogUpdate(
+                        phase=phase,
+                        page_message=message,
+                        station_name=station_name,
+                        block_price=block_price,
+                        block_time=block_time,
+                    ),
                 ),
             )
         except Exception as exc:
@@ -87,17 +120,19 @@ class LogService:
         finished_at: datetime | None = None,
     ) -> ProcessLogRecord:
         try:
-            return self._logs_repository.update(
-                log_id,
-                ProcessLogUpdate(
-                    finished_at=finished_at or self._utcnow(),
-                    phase=phase,
-                    final_status=final_status,
-                    page_message=message,
-                    error_message=error_message,
-                    station_name=station_name,
-                    block_price=block_price,
-                    block_time=block_time,
+            return self._run_write_with_retry(
+                lambda repository: repository.update(
+                    log_id,
+                    ProcessLogUpdate(
+                        finished_at=finished_at or self._utcnow(),
+                        phase=phase,
+                        final_status=final_status,
+                        page_message=message,
+                        error_message=error_message,
+                        station_name=station_name,
+                        block_price=block_price,
+                        block_time=block_time,
+                    ),
                 ),
             )
         except Exception as exc:
@@ -214,3 +249,34 @@ class LogService:
     @staticmethod
     def _utcnow() -> datetime:
         return datetime.now(timezone.utc)
+
+    def _run_write_with_retry(
+        self,
+        operation: Callable[[ProcessLogsRepository], ProcessLogRecord],
+    ) -> ProcessLogRecord:
+        attempts = len(self._WRITE_RETRY_DELAYS) + 1
+        last_error: Exception | None = None
+        for attempt_index in range(attempts):
+            repository = self._create_write_repository()
+            try:
+                return operation(repository)
+            except Exception as exc:
+                last_error = exc
+                if attempt_index >= len(self._WRITE_RETRY_DELAYS) or not self._is_transient_error(exc):
+                    raise
+                self._sleep(self._WRITE_RETRY_DELAYS[attempt_index])
+        if last_error is not None:
+            raise last_error
+        raise RuntimeError("Log write retry finished without a result or captured error.")
+
+    def _create_write_repository(self) -> ProcessLogsRepository:
+        if self._next_write_repository is not None:
+            repository = self._next_write_repository
+            self._next_write_repository = None
+            return repository
+        return self._logs_repository_factory()
+
+    @classmethod
+    def _is_transient_error(cls, exc: Exception) -> bool:
+        message = str(exc).lower()
+        return any(marker in message for marker in cls._TRANSIENT_ERROR_MARKERS)

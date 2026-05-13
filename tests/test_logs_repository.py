@@ -77,6 +77,18 @@ class FakeSettings:
     supabase_process_logs_table = "process_logs"
 
 
+def test_repositories_keep_distinct_client_providers() -> None:
+    first_provider = FakeClientProvider({}, {"insert": [], "update": [], "select": []})
+    second_provider = FakeClientProvider({}, {"insert": [], "update": [], "select": []})
+
+    first_repository = ProcessLogsRepository(client_provider=first_provider, settings=FakeSettings())
+    second_repository = ProcessLogsRepository(client_provider=second_provider, settings=FakeSettings())
+
+    assert first_repository._client_provider is first_provider
+    assert second_repository._client_provider is second_provider
+    assert first_repository._client_provider is not second_repository._client_provider
+
+
 def test_create_only_sends_real_process_logs_columns() -> None:
     sink: dict = {}
     timestamp = datetime.fromisoformat("2026-04-13T12:00:00")
