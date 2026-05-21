@@ -1307,7 +1307,7 @@ class BrowserManager:
         return resolved
 
     def _get_configured_chrome_executable_path(self) -> Path:
-        executable_path = self._settings.chrome_executable_path
+        executable_path = getattr(self._settings, "chrome_executable_path", None)
         if executable_path is None:
             raise RuntimeError(
                 "AUTO_HE_LLEGADO_CHROME_EXECUTABLE_PATH is required for installed_profile extension mode."
@@ -1326,7 +1326,8 @@ class BrowserManager:
         return resolved
 
     def _get_optional_real_chrome_executable_path(self) -> Path | None:
-        if self._settings.chrome_executable_path is None:
+        executable_path = getattr(self._settings, "chrome_executable_path", None)
+        if executable_path in (None, ""):
             return None
         return self._get_configured_chrome_executable_path()
 

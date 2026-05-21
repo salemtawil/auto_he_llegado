@@ -1,6 +1,7 @@
 from automation.browser_manager import BrowserManager, BrowserSession
 from config.settings import Settings
 from pathlib import Path
+from types import SimpleNamespace
 
 
 class StubPage:
@@ -215,6 +216,31 @@ def test_browser_manager_optional_real_chrome_executable_path_uses_configured_va
 
 def test_browser_manager_optional_real_chrome_executable_path_returns_none_when_unset(tmp_path) -> None:
     manager = BrowserManager(settings=build_settings(tmp_path))
+
+    assert manager._get_optional_real_chrome_executable_path() is None  # noqa: SLF001
+
+
+def test_browser_manager_optional_real_chrome_executable_path_returns_none_when_setting_missing(tmp_path) -> None:
+    legacy_settings = SimpleNamespace(
+        project_root=tmp_path,
+        local_data_dir=tmp_path / "local_data",
+        use_chrome_profile_extension=False,
+        chrome_profile_dir=None,
+    )
+    manager = BrowserManager(settings=legacy_settings)
+
+    assert manager._get_optional_real_chrome_executable_path() is None  # noqa: SLF001
+
+
+def test_browser_manager_optional_real_chrome_executable_path_returns_none_when_empty(tmp_path) -> None:
+    legacy_settings = SimpleNamespace(
+        project_root=tmp_path,
+        local_data_dir=tmp_path / "local_data",
+        use_chrome_profile_extension=False,
+        chrome_profile_dir=None,
+        chrome_executable_path="",
+    )
+    manager = BrowserManager(settings=legacy_settings)
 
     assert manager._get_optional_real_chrome_executable_path() is None  # noqa: SLF001
 
