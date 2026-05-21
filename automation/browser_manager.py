@@ -460,10 +460,27 @@ class BrowserSession:
         extension_path = Path(self.extension_path).resolve() if self.extension_path else None
         manifest_path = extension_path / "manifest.json" if extension_path is not None else None
         latest_debug = BrowserManager.get_latest_extension_debug() or {}
+        last_debug = self.get_last_extension_debug() or {}
         browser_args = list(latest_debug.get("browser_args") or [])
-        marker_report = self.read_content_markers_from_all_frames(page=page)
-        ping_report = self.read_extension_ping_from_all_frames(page=page)
-        frame_debug_report = self.debug_list_all_frames(page=page)
+        marker_report = dict(last_debug.get("marker_report") or latest_debug.get("marker_report") or {})
+        ping_report = dict(last_debug.get("ping_report") or latest_debug.get("ping_report") or {})
+        frame_debug_report = dict(last_debug.get("frame_debug_report") or latest_debug.get("frame_debug_report") or {})
+        frame_debug_error = None
+        with suppress(Exception):
+            marker_report = self.read_content_markers_from_all_frames(page=page)
+        with suppress(Exception):
+            ping_report = self.read_extension_ping_from_all_frames(page=page)
+        try:
+            frame_debug_report = self.debug_list_all_frames(page=page)
+        except Exception as exc:  # noqa: BLE001
+            frame_debug_error = str(exc)
+            if not frame_debug_report:
+                frame_debug_report = {"total_frames": 0, "frames": [], "error": frame_debug_error}
+            else:
+                frame_debug_report = {
+                    **frame_debug_report,
+                    "error": frame_debug_error,
+                }
         marker_selected = marker_report.get("selected_frame") or {}
         marker_active = bool(marker_selected.get("content_loaded")) and BrowserManager._marker_frame_has_useful_state(marker_selected)
         effective_extension_loaded = bool(self.extension_loaded or marker_active)
@@ -503,6 +520,7 @@ class BrowserSession:
             "engine_phase_history": engine_history,
             "ping_report": ping_report,
             "frame_debug_report": frame_debug_report,
+            "frame_debug_error": frame_debug_error,
             **snapshot,
         }
         self.extension_loaded = effective_extension_loaded

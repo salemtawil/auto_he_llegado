@@ -1,5 +1,6 @@
 from core.models import LocalConfig, ProcessExecutionRequest, SiteExecutionResult
 from services.process_service import ProcessService
+from services.process_run_context import RunStatsRecorder
 
 
 class StubLogRecord:
@@ -64,6 +65,7 @@ class StubCompincheSite:
     def __init__(self, result: SiteExecutionResult) -> None:
         self.result = result
         self.execute_calls = []
+        self.debug_export = {}
 
     def execute_traditional(self, request, *, local_config, progress_callback):
         self.execute_calls.append(("traditional", request, local_config))
@@ -74,12 +76,16 @@ class StubCompincheSite:
         self.execute_calls.append(("extension", request, local_config))
         progress_callback("photo_upload", "Subiendo foto reservada...")
         return self.result
+
+    def export_process_debug_state(self):
+        return dict(self.debug_export)
 
 
 class StubParipeSite:
     def __init__(self, result: SiteExecutionResult) -> None:
         self.result = result
         self.execute_calls = []
+        self.debug_export = {}
 
     def execute_traditional(self, request, *, local_config, progress_callback):
         self.execute_calls.append(("traditional", request, local_config))
@@ -90,12 +96,16 @@ class StubParipeSite:
         self.execute_calls.append(("extension", request, local_config))
         progress_callback("block_read", "Leyendo bloque de paripe...")
         return self.result
+
+    def export_process_debug_state(self):
+        return dict(self.debug_export)
 
 
 class StubReady4DriveSite:
     def __init__(self, result: SiteExecutionResult) -> None:
         self.result = result
         self.execute_calls = []
+        self.debug_export = {}
 
     def execute_traditional(self, request, *, local_config, progress_callback):
         self.execute_calls.append(("traditional", request, local_config))
@@ -106,6 +116,129 @@ class StubReady4DriveSite:
         self.execute_calls.append(("extension", request, local_config))
         progress_callback("site_bootstrap", "Base inicial de ready4drive.")
         return self.result
+
+    def export_process_debug_state(self):
+        return dict(self.debug_export)
+
+
+class StubDebugRunner:
+    def __init__(self, export_payload: dict | None = None) -> None:
+        self.debug_export = dict(export_payload or {})
+
+    def export_process_debug_state(self):
+        return dict(self.debug_export)
+
+
+def test_execute_finish_message_prioritizes_run_stats_summary_over_local_timing_summary() -> None:
+    log_service = StubLogService()
+    site = StubCompincheSite(
+        SiteExecutionResult(
+            success=True,
+            message="Proceso completado correctamente en compinche.io.",
+            final_status="success",
+            phase="final_result",
+        )
+    )
+    site.debug_export = {"timing_summary_text": "Resumen tiempos: fallback local"}
+    service = ProcessService(
+        log_service_factory=build_log_service_factory(log_service),
+        local_config_service=StubLocalConfigService(),
+        compinche_site=site,
+        paripe_site=StubParipeSite(
+            SiteExecutionResult(success=True, message="unused", final_status="success", phase="final_result")
+        ),
+    )
+
+    result = service.execute(
+        ProcessExecutionRequest(
+            page_name="Compinche",
+            action_name="He llegado",
+            phone_number="8095551234",
+            password="secret",
+            agent_name="Agente Local",
+            execution_mode="normal",
+        )
+    )
+
+    assert result.success is True
+    finish_message = log_service.finish_calls[0][1]["message"]
+    assert "Resumen tiempos:" in finish_message
+    assert "fallback local" not in finish_message
+    assert "login" in finish_message
+
+
+def test_run_stats_common_summary_text_includes_intermediate_phases_when_available() -> None:
+    recorder = RunStatsRecorder()
+    for event in (
+        "process_started",
+        "login_started",
+        "login_done",
+        "photo_prepare_started",
+        "photo_prepare_done",
+        "selfie_input_detected",
+        "photo_upload_started",
+        "photo_upload_done",
+        "continue_clicked",
+        "block_visual_detected",
+        "final_click_done",
+        "final_result_done",
+        "process_finished",
+    ):
+        recorder.record(event)
+
+    summary = recorder.build_common_timing_summary()
+    summary_text = recorder.build_common_timing_summary_text()
+
+    assert summary["login"] != "N/A"
+    assert summary["foto_prep"] != "N/A"
+    assert summary["inputupload"] != "N/A"
+    assert summary["photo_upload"] != "N/A"
+    assert summary["validacion_sitio"] != "N/A"
+    assert summary["bloqueclick"] != "N/A"
+    assert summary["resultado_final"] != "N/A"
+    assert "photo upload" in summary_text
+    assert "validacion sitio" in summary_text
+    assert "bloqueclick" in summary_text
+
+
+def test_run_stats_common_summary_uses_fallback_events_without_old_duplicate_labels() -> None:
+    recorder = RunStatsRecorder()
+    for event in (
+        "process_started",
+        "login_started",
+        "login_done",
+        "continue_clicked",
+        "block_detected",
+        "final_click_done",
+        "final_result_started",
+        "final_result_done",
+        "process_finished",
+    ):
+        recorder.record(event)
+
+    summary = recorder.build_common_timing_summary()
+    summary_text = recorder.build_common_timing_summary_text()
+
+    assert summary["validacion_sitio"] != "N/A"
+    assert summary["bloqueclick"] != "N/A"
+    assert summary["resultado_final"] != "N/A"
+    assert "selfie " not in summary_text
+    assert "bloque " not in summary_text
+
+
+def test_run_stats_total_prefers_final_result_done_over_late_process_finished() -> None:
+    recorder = RunStatsRecorder()
+    recorder.record("process_started")
+    recorder.record("final_result_done")
+    recorder.record("process_finished")
+
+    summary = recorder.build_common_timing_summary()
+
+    assert summary["total"] != "N/A"
+
+
+def build_log_service_factory(log_service: StubLogService):
+    return lambda: log_service
 
 
 def test_execute_compinche_runs_real_site_and_finishes_log() -> None:
@@ -126,7 +259,7 @@ def test_execute_compinche_runs_real_site_and_finishes_log() -> None:
         )
     )
     service = ProcessService(
-        log_service=log_service,
+        log_service_factory=build_log_service_factory(log_service),
         local_config_service=StubLocalConfigService(),
         last_result_service=last_result_service,
         compinche_site=site,
@@ -181,7 +314,7 @@ def test_execute_ready4drive_uses_initial_site_base_and_does_not_fallback_to_stu
         )
     )
     service = ProcessService(
-        log_service=log_service,
+        log_service_factory=build_log_service_factory(log_service),
         local_config_service=StubLocalConfigService(),
         compinche_site=StubCompincheSite(
             SiteExecutionResult(
@@ -232,7 +365,7 @@ def test_execute_compinche_continues_when_initial_log_creation_fails() -> None:
         )
     )
     service = ProcessService(
-        log_service=log_service,
+        log_service_factory=build_log_service_factory(log_service),
         local_config_service=StubLocalConfigService(),
         compinche_site=site,
         paripe_site=StubParipeSite(
@@ -266,7 +399,7 @@ def test_execute_compinche_reports_log_warning_when_initial_log_creation_fails()
     log_service = StubLogService()
     log_service.start_error = RuntimeError("Server disconnected")
     service = ProcessService(
-        log_service=log_service,
+        log_service_factory=build_log_service_factory(log_service),
         local_config_service=StubLocalConfigService(),
         compinche_site=StubCompincheSite(
             SiteExecutionResult(
@@ -305,7 +438,7 @@ def test_execute_compinche_continues_when_log_updates_fail() -> None:
     log_service = StubLogService()
     log_service.update_error = RuntimeError("Server disconnected")
     service = ProcessService(
-        log_service=log_service,
+        log_service_factory=build_log_service_factory(log_service),
         local_config_service=StubLocalConfigService(),
         compinche_site=StubCompincheSite(
             SiteExecutionResult(
@@ -346,7 +479,7 @@ def test_execute_compinche_keeps_site_success_when_finish_log_fails() -> None:
     log_service = StubLogService()
     log_service.finish_error = RuntimeError("Server disconnected")
     service = ProcessService(
-        log_service=log_service,
+        log_service_factory=build_log_service_factory(log_service),
         local_config_service=StubLocalConfigService(),
         compinche_site=StubCompincheSite(
             SiteExecutionResult(
@@ -446,7 +579,7 @@ def test_execute_throttles_non_critical_process_log_updates_without_hiding_progr
     log_service = StubLogService()
     progress_events = []
     service = ProcessService(
-        log_service=log_service,
+        log_service_factory=build_log_service_factory(log_service),
         local_config_service=StubLocalConfigService(),
         compinche_site=ChattyCompincheSite(
             SiteExecutionResult(
@@ -496,7 +629,7 @@ def test_execute_compinche_uses_configured_traditional_mode_when_request_uses_te
         )
     )
     service = ProcessService(
-        log_service=log_service,
+        log_service_factory=build_log_service_factory(log_service),
         local_config_service=StubLocalConfigService(),
         compinche_site=site,
         paripe_site=StubParipeSite(
@@ -545,7 +678,7 @@ def test_execute_paripe_runs_real_site_and_returns_block_duration() -> None:
         )
     )
     service = ProcessService(
-        log_service=log_service,
+        log_service_factory=build_log_service_factory(log_service),
         local_config_service=StubLocalConfigService(),
         compinche_site=StubCompincheSite(
             SiteExecutionResult(
@@ -594,7 +727,7 @@ def test_execute_paripe_uses_extension_engine_when_configured() -> None:
         )
     )
     service = ProcessService(
-        log_service=StubLogService(),
+        log_service_factory=build_log_service_factory(StubLogService()),
         local_config_service=ExtensionConfigService(),
         compinche_site=StubCompincheSite(
             SiteExecutionResult(success=True, message="unused", final_status="success", phase="final_result")
@@ -636,7 +769,7 @@ def test_execute_paripe_keeps_instant_action_name_in_results() -> None:
         )
     )
     service = ProcessService(
-        log_service=log_service,
+        log_service_factory=build_log_service_factory(log_service),
         local_config_service=StubLocalConfigService(),
         last_result_service=last_result_service,
         compinche_site=StubCompincheSite(
@@ -665,7 +798,7 @@ def test_execute_paripe_keeps_instant_action_name_in_results() -> None:
 
 def test_execute_paripe_preserves_canonical_instant_action_name_when_already_accented() -> None:
     service = ProcessService(
-        log_service=StubLogService(),
+        log_service_factory=build_log_service_factory(StubLogService()),
         local_config_service=StubLocalConfigService(),
         last_result_service=StubLastResultService(),
         compinche_site=StubCompincheSite(
@@ -701,7 +834,7 @@ def test_execute_paripe_persists_login_failed_result() -> None:
         )
     )
     service = ProcessService(
-        log_service=log_service,
+        log_service_factory=build_log_service_factory(log_service),
         local_config_service=StubLocalConfigService(),
         compinche_site=StubCompincheSite(
             SiteExecutionResult(success=True, message="unused", final_status="success", phase="final_result")
@@ -729,7 +862,7 @@ def test_execute_paripe_persists_login_failed_result() -> None:
 def test_execute_paripe_persists_timeout_and_no_block_results() -> None:
     log_service = StubLogService()
     timeout_service = ProcessService(
-        log_service=log_service,
+        log_service_factory=build_log_service_factory(log_service),
         local_config_service=StubLocalConfigService(),
         compinche_site=StubCompincheSite(
             SiteExecutionResult(success=True, message="unused", final_status="success", phase="final_result")
@@ -760,7 +893,7 @@ def test_execute_paripe_persists_timeout_and_no_block_results() -> None:
 
     no_block_log_service = StubLogService()
     no_block_service = ProcessService(
-        log_service=no_block_log_service,
+        log_service_factory=build_log_service_factory(no_block_log_service),
         local_config_service=StubLocalConfigService(),
         compinche_site=StubCompincheSite(
             SiteExecutionResult(success=True, message="unused", final_status="success", phase="final_result")
@@ -789,3 +922,216 @@ def test_execute_paripe_persists_timeout_and_no_block_results() -> None:
     assert no_block_result.final_status == "no_block"
     assert no_block_result.phase == "block_read"
     assert no_block_log_service.finish_calls[0][1]["final_status"] == "no_block"
+
+
+def test_process_service_stores_runner_debug_export_with_run_stats_and_metadata() -> None:
+    log_service = StubLogService()
+    site = StubParipeSite(
+        SiteExecutionResult(
+            success=True,
+            message="Proceso completado correctamente en paripe.io.",
+            final_status="success",
+            phase="final_result",
+        )
+    )
+    site.debug_export = {
+        "timeline": [{"event": "flow_detector_state"}],
+        "flow_state_detector": {"last_state": "FINAL_RESULT"},
+        "timing_summary_text": "Resumen tiempos: local",
+        "last_final_button_candidate": {"text": "He llegado"},
+    }
+    service = ProcessService(
+        log_service_factory=build_log_service_factory(log_service),
+        local_config_service=StubLocalConfigService(),
+        compinche_site=StubCompincheSite(
+            SiteExecutionResult(success=True, message="unused", final_status="success", phase="final_result")
+        ),
+        paripe_site=site,
+    )
+
+    result = service.execute(
+        ProcessExecutionRequest(
+            process_id="proc-debug-1",
+            page_name="Paripe",
+            action_name="He llegado",
+            phone_number="8095551234",
+            password="secret",
+            agent_name="Agente Local",
+            execution_mode="normal",
+        )
+    )
+
+    process_debug = service.get_process_debug_export(result.process_id)
+
+    assert process_debug["process_id"] == "proc-debug-1"
+    assert process_debug["page_name"] == "Paripe"
+    assert "flow_state_detector" in process_debug
+    assert process_debug["timeline"] == [{"event": "flow_detector_state"}]
+    assert "run_stats_timeline" in process_debug
+    assert "run_stats_summary_text" in process_debug
+    assert process_debug["last_final_button_candidate"] == {"text": "He llegado"}
+
+
+def test_process_service_can_retrieve_debug_by_slot_id_when_process_lookup_is_not_used() -> None:
+    log_service = StubLogService()
+    site = StubParipeSite(
+        SiteExecutionResult(
+            success=True,
+            message="Proceso completado correctamente en paripe.io.",
+            final_status="success",
+            phase="final_result",
+        )
+    )
+    site.debug_export = {"flow_state_detector": {"last_state": "FINAL_RESULT"}, "timeline": [{"event": "done"}]}
+    service = ProcessService(
+        log_service_factory=build_log_service_factory(log_service),
+        local_config_service=StubLocalConfigService(),
+        compinche_site=StubCompincheSite(
+            SiteExecutionResult(success=True, message="unused", final_status="success", phase="final_result")
+        ),
+        paripe_site=site,
+    )
+    service.register_process_slot("proc-debug-slot", "slot_1")
+
+    service.execute(
+        ProcessExecutionRequest(
+            process_id="proc-debug-slot",
+            page_name="Paripe",
+            action_name="He llegado",
+            phone_number="8095551234",
+            password="secret",
+            agent_name="Agente Local",
+            execution_mode="normal",
+        )
+    )
+
+    process_debug = service.get_process_debug_export(None, slot_id="slot_1")
+
+    assert process_debug["slot_id"] == "slot_1"
+    assert process_debug["process_id"] == "proc-debug-slot"
+    assert process_debug["flow_state_detector"]["last_state"] == "FINAL_RESULT"
+
+
+def test_process_service_limits_process_debug_exports_to_recent_entries() -> None:
+    service = ProcessService(
+        log_service_factory=build_log_service_factory(StubLogService()),
+        local_config_service=StubLocalConfigService(),
+    )
+
+    for index in range(60):
+        runner = StubDebugRunner({"timeline": [{"event": f"process-{index}"}]})
+        service._store_process_debug_export(
+            f"proc-{index}",
+            runner,
+            extras={
+                "process_id": f"proc-{index}",
+                "slot_id": f"slot-{index % 3}",
+                "page_name": "Paripe",
+                "action_name": "He llegado",
+                "execution_mode": "traditional",
+            },
+        )
+
+    assert len(service._process_debug_exports) == 50
+    assert service.get_process_debug_export("proc-0") == {}
+    latest = service.get_process_debug_export("proc-59")
+    assert latest["process_id"] == "proc-59"
+    assert latest["slot_id"] == "slot-2"
+    assert "recorded_at" in latest
+
+
+def test_process_service_limits_slot_debug_exports_and_keeps_latest_per_slot() -> None:
+    service = ProcessService(
+        log_service_factory=build_log_service_factory(StubLogService()),
+        local_config_service=StubLocalConfigService(),
+    )
+
+    for index in range(55):
+        process_id = f"proc-slot-{index}"
+        slot_id = f"slot-{index}"
+        service.register_process_slot(process_id, slot_id)
+        runner = StubDebugRunner({"timeline": [{"event": f"slot-{index}"}]})
+        service._store_process_debug_export(
+            process_id,
+            runner,
+            extras={
+                "process_id": process_id,
+                "slot_id": slot_id,
+                "page_name": "Compinche",
+                "action_name": "He llegado",
+                "execution_mode": "traditional",
+            },
+        )
+
+    assert len(service._slot_debug_exports) == 50
+    assert service.get_process_debug_export(None, slot_id="slot-0") == {}
+    latest_slot = service.get_process_debug_export(None, slot_id="slot-54")
+    assert latest_slot["process_id"] == "proc-slot-54"
+    assert latest_slot["slot_id"] == "slot-54"
+    assert latest_slot["timeline"] == [{"event": "slot-54"}]
+
+
+def test_process_service_store_debug_export_merges_previous_payload_and_preserves_latest_slot() -> None:
+    service = ProcessService(
+        log_service_factory=build_log_service_factory(StubLogService()),
+        local_config_service=StubLocalConfigService(),
+    )
+    service.register_process_slot("proc-merge", "slot-merge")
+
+    first_runner = StubDebugRunner({"timeline": [{"event": "first"}], "flow_state_detector": {"last_state": "LOGIN"}})
+    service._store_process_debug_export(
+        "proc-merge",
+        first_runner,
+        extras={
+            "page_name": "Paripe",
+            "action_name": "He llegado",
+            "execution_mode": "traditional",
+        },
+    )
+
+    second_runner = StubDebugRunner({"last_final_button_candidate": {"text": "He llegado"}})
+    service._store_process_debug_export(
+        "proc-merge",
+        second_runner,
+        extras={
+            "page_name": "Paripe",
+            "action_name": "He llegado",
+            "execution_mode": "extension",
+        },
+    )
+
+    payload = service.get_process_debug_export("proc-merge")
+    slot_payload = service.get_process_debug_export(None, slot_id="slot-merge")
+
+    assert payload["timeline"] == [{"event": "first"}]
+    assert payload["flow_state_detector"] == {"last_state": "LOGIN"}
+    assert payload["last_final_button_candidate"] == {"text": "He llegado"}
+    assert payload["execution_mode"] == "extension"
+    assert slot_payload["process_id"] == "proc-merge"
+
+
+def test_process_service_evicted_process_debug_does_not_break_slot_lookup() -> None:
+    service = ProcessService(
+        log_service_factory=build_log_service_factory(StubLogService()),
+        local_config_service=StubLocalConfigService(),
+    )
+
+    for index in range(52):
+        process_id = f"proc-evict-{index}"
+        slot_id = f"slot-evict-{index}"
+        service.register_process_slot(process_id, slot_id)
+        runner = StubDebugRunner({"timeline": [{"event": f"evict-{index}"}]})
+        service._store_process_debug_export(
+            process_id,
+            runner,
+            extras={
+                "page_name": "Ready4Drive",
+                "action_name": "He llegado",
+                "execution_mode": "traditional",
+            },
+        )
+
+    assert service.get_process_debug_export("proc-evict-0") == {}
+    fallback = service.get_process_debug_export(None, slot_id="slot-evict-51")
+    assert fallback["process_id"] == "proc-evict-51"
+    assert fallback["timeline"] == [{"event": "evict-51"}]

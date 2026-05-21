@@ -4,6 +4,7 @@ from datetime import datetime
 from types import SimpleNamespace
 
 from core.enums import PhotoStatus
+from core.exceptions import ValidationError
 from core.models import PhotoCreate, PhotoUpdate
 from storage.photos_repository import PhotosRepository
 
@@ -100,15 +101,82 @@ def test_create_only_sends_real_photos_columns() -> None:
     assert record.storage_path == "available\\example.jpg"
 
 
-def test_update_filters_non_schema_fields() -> None:
+def test_bulk_create_only_sends_confirmed_photos_columns() -> None:
+    sink: dict = {}
+    response_data = [
+        {
+            "id": "550e8400-e29b-41d4-a716-446655440000",
+            "original_name": "one.jpg",
+            "file_path": "available/one.jpg",
+            "status": "available",
+            "created_at": "2026-04-13T00:00:00",
+        },
+        {
+            "id": "550e8400-e29b-41d4-a716-446655440001",
+            "original_name": "two.jpg",
+            "file_path": "available/two.jpg",
+            "status": "available",
+            "created_at": "2026-04-13T00:00:01",
+        },
+    ]
+    repository = PhotosRepository(
+        client_provider=FakeClientProvider(sink, response_data),
+        settings=FakeSettings(),
+    )
+
+    records = repository.bulk_create(
+        [
+            PhotoCreate(
+                id="550e8400-e29b-41d4-a716-446655440000",
+                original_filename="one.jpg",
+                storage_path="available/one.jpg",
+                status=PhotoStatus.AVAILABLE,
+                source="uploader_app",
+                metadata={"ignored": True},
+            ),
+            PhotoCreate(
+                id="550e8400-e29b-41d4-a716-446655440001",
+                original_filename="two.jpg",
+                storage_path="available/two.jpg",
+                status=PhotoStatus.AVAILABLE,
+                error_message="ignored",
+            ),
+        ]
+    )
+
+    assert sink["payload"] == [
+        {
+            "id": "550e8400-e29b-41d4-a716-446655440000",
+            "original_name": "one.jpg",
+            "file_path": "available\\one.jpg",
+            "status": "available",
+        },
+        {
+            "id": "550e8400-e29b-41d4-a716-446655440001",
+            "original_name": "two.jpg",
+            "file_path": "available\\two.jpg",
+            "status": "available",
+        },
+    ]
+    assert [record.id for record in records] == [
+        "550e8400-e29b-41d4-a716-446655440000",
+        "550e8400-e29b-41d4-a716-446655440001",
+    ]
+
+
+def test_update_sends_confirmed_cleanup_columns() -> None:
     sink: dict = {}
     response_data = [
         {
             "id": "550e8400-e29b-41d4-a716-446655440000",
             "original_name": "example.jpg",
             "file_path": "available/example.jpg",
-            "status": "reserved",
-            "reserved_at": "2026-04-13T01:00:00",
+            "status": "discarded",
+            "reserved_by_process_id": None,
+            "storage_deleted_at": "2026-04-13T01:00:00+00:00",
+            "cleanup_reason": "stale_reserved_cleanup",
+            "cleanup_error": None,
+            "cleaned_by": "admin_cleanup",
             "created_at": "2026-04-13T00:00:00",
         }
     ]
@@ -120,15 +188,40 @@ def test_update_filters_non_schema_fields() -> None:
     repository.update(
         "550e8400-e29b-41d4-a716-446655440000",
         PhotoUpdate(
-            status=PhotoStatus.RESERVED,
-            reserved_at=datetime.fromisoformat("2026-04-13T01:00:00"),
-            error_message="should not be sent",
+            status=PhotoStatus.DISCARDED,
+            reserved_by_process_id=None,
+            storage_deleted_at=datetime.fromisoformat("2026-04-13T01:00:00+00:00"),
+            cleanup_reason="stale_reserved_cleanup",
+            cleanup_error=None,
+            cleaned_by="admin_cleanup",
         ),
     )
 
     assert sink["operation"] == "update"
     assert sink["eq"] == ("id", "550e8400-e29b-41d4-a716-446655440000")
     assert sink["payload"] == {
-        "status": "reserved",
-        "reserved_at": "2026-04-13T01:00:00",
+        "status": "discarded",
+        "reserved_by_process_id": None,
+        "storage_deleted_at": "2026-04-13T01:00:00Z",
+        "cleanup_reason": "stale_reserved_cleanup",
+        "cleanup_error": None,
+        "cleaned_by": "admin_cleanup",
     }
+
+
+def test_update_status_rejects_unconfirmed_error_message_column() -> None:
+    repository = PhotosRepository(
+        client_provider=FakeClientProvider({}, []),
+        settings=FakeSettings(),
+    )
+
+    try:
+        repository.update_status(
+            "550e8400-e29b-41d4-a716-446655440000",
+            PhotoStatus.RESERVED,
+            error_message="not supported by confirmed schema",
+        )
+    except ValidationError as exc:
+        assert "error_message" in str(exc)
+    else:
+        raise AssertionError("Expected update_status to reject error_message.")

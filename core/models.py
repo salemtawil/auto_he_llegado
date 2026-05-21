@@ -98,6 +98,7 @@ class PhotoCleanupAudit(DomainModel):
     consumed_storage_cleaned_count: int = 0
     stale_reserved_storage_cleaned_count: int = 0
     cleanup_error_count: int = 0
+    db_error_after_storage_delete_count: int = 0
     older_than_hours: int = 2
 
 
@@ -110,6 +111,13 @@ class PhotoCleanupResult(DomainModel):
     deleted_count: int = 0
     error_count: int = 0
     skipped_count: int = 0
+    processed_count: int = 0
+    reconciled_count: int = 0
+    failed_count: int = 0
+    remaining_count: int | None = None
+    stop_reason: str | None = None
+    recent_errors: list[str] = Field(default_factory=list)
+    last_error: str | None = None
     items: list[dict[str, Any]] = Field(default_factory=list)
 
 

@@ -13,6 +13,8 @@ class PhotoCleanupService:
     _CLEANED_BY = "admin_cleanup"
     _CONSUMED_REASON = "consumed_cleanup"
     _STALE_RESERVED_REASON = "stale_reserved_cleanup"
+    _DB_ERROR_AFTER_STORAGE_DELETE_PREFIX = "Storage borrado, pero fallo update DB:"
+    _RECENT_ERROR_LIMIT = 5
 
     def __init__(
         self,
@@ -46,8 +48,12 @@ class PhotoCleanupService:
             consumed_storage_cleaned_count=self._photos_repository.count_storage_cleaned(PhotoStatus.CONSUMED),
             stale_reserved_storage_cleaned_count=self._photos_repository.count_storage_cleaned(PhotoStatus.DISCARDED),
             cleanup_error_count=self._photos_repository.count_cleanup_errors(),
+            db_error_after_storage_delete_count=self._photos_repository.count_db_error_after_storage_delete(),
             older_than_hours=normalized_hours,
         )
+
+    def count_db_error_after_storage_delete(self) -> int:
+        return self._photos_repository.count_db_error_after_storage_delete()
 
     def cleanup_consumed_photos(
         self,
@@ -134,6 +140,83 @@ class PhotoCleanupService:
             cancel_callback=cancel_callback,
             max_consecutive_stalled_batches=max_consecutive_stalled_batches,
         )
+
+    def reconcile_db_error_after_storage_delete(
+        self,
+        *,
+        limit: int = 100,
+    ) -> PhotoCleanupResult:
+        normalized_limit = max(int(limit), 1)
+        records = self._photos_repository.list_db_error_after_storage_delete(limit=normalized_limit)
+        total_pending = self._photos_repository.count_db_error_after_storage_delete()
+        result = PhotoCleanupResult(
+            action="reconcile_db_error_after_storage_delete",
+            limit=normalized_limit,
+            dry_run=False,
+            matched_count=len(records),
+            remaining_count=max(total_pending - len(records), 0),
+        )
+        for record in records:
+            result.processed_count += 1
+            normalized_path = self._normalize_storage_path(record.storage_path)
+            item = {
+                "photo_id": record.id,
+                "status": record.status,
+                "file_path": normalized_path,
+                "cleanup_error": record.cleanup_error,
+            }
+            if not normalized_path:
+                result.skipped_count += 1
+                item["result"] = "skipped"
+                item["message"] = "La foto no tiene file_path utilizable."
+                result.items.append(item)
+                continue
+            if record.status not in {PhotoStatus.CONSUMED, PhotoStatus.RESERVED}:
+                result.skipped_count += 1
+                item["result"] = "skipped"
+                item["message"] = "Estado no soportado para reconciliacion."
+                result.items.append(item)
+                continue
+            try:
+                self._client_provider.remove_file(
+                    bucket_name=self._settings.supabase_storage_bucket,
+                    storage_path=normalized_path,
+                )
+            except Exception as exc:
+                if not self._is_storage_missing_error(str(exc)):
+                    message = f"Reconciliacion pendiente: fallo storage: {exc}"
+                    self._append_reconcile_error(result, message)
+                    item["result"] = "storage_error"
+                    item["message"] = message
+                    result.items.append(item)
+                    self._mark_cleanup_error_safe(record.id, message)
+                    continue
+            try:
+                self._mark_reconciled_record(record)
+            except Exception as exc:
+                message = f"{self._DB_ERROR_AFTER_STORAGE_DELETE_PREFIX} {exc}"
+                self._append_reconcile_error(result, message)
+                item["result"] = "db_error_after_storage_delete"
+                item["message"] = message
+                result.items.append(item)
+                self._mark_cleanup_error_safe(record.id, message)
+                continue
+            result.deleted_count += 1
+            result.reconciled_count += 1
+            item["result"] = "reconciled"
+            item["message"] = "Storage ya estaba eliminado o se confirmo su borrado; DB reconciliada."
+            result.items.append(item)
+        result.remaining_count = max(
+            self._photos_repository.count_db_error_after_storage_delete() - result.reconciled_count,
+            0,
+        )
+        if result.failed_count > 0:
+            result.stop_reason = "has_failures"
+        elif result.remaining_count > 0 and result.processed_count >= result.limit:
+            result.stop_reason = "limit_reached"
+        else:
+            result.stop_reason = "completed"
+        return result
 
     def _cleanup_records(
         self,
@@ -375,11 +458,47 @@ class PhotoCleanupService:
     def _mark_db_error(self, record: PhotoRecord, error: str) -> None:
         self._photos_repository.mark_cleanup_error(record.id, error=error)
 
+    def _mark_reconciled_record(self, record: PhotoRecord) -> None:
+        if record.status == PhotoStatus.CONSUMED:
+            self._photos_repository.mark_storage_cleaned(
+                record.id,
+                reason=self._CONSUMED_REASON,
+                cleaned_by=self._CLEANED_BY,
+            )
+            return
+        self._photos_repository.mark_stale_reserved_cleaned(
+            record.id,
+            reason=self._STALE_RESERVED_REASON,
+            cleaned_by=self._CLEANED_BY,
+        )
+
     def _mark_cleanup_error_safe(self, photo_id: str, error: str) -> None:
         try:
             self._photos_repository.mark_cleanup_error(photo_id, error=error)
         except Exception:
             return
+
+    def _append_reconcile_error(self, result: PhotoCleanupResult, message: str) -> None:
+        result.error_count += 1
+        result.failed_count += 1
+        result.last_error = message
+        result.recent_errors.append(message)
+        if len(result.recent_errors) > self._RECENT_ERROR_LIMIT:
+            result.recent_errors = result.recent_errors[-self._RECENT_ERROR_LIMIT :]
+
+    @staticmethod
+    def _is_storage_missing_error(message: str) -> bool:
+        normalized = str(message or "").strip().lower()
+        return any(
+            token in normalized
+            for token in (
+                "not found",
+                "404",
+                "no such object",
+                "missing object",
+                "does not exist",
+            )
+        )
 
     @staticmethod
     def _normalize_storage_path(storage_path: str | None) -> str:

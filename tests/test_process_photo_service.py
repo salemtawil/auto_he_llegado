@@ -24,6 +24,11 @@ class StubPhotosRepository:
         self.records = records or [StubPhotoRecord(photo_id="550e8400-e29b-41d4-a716-446655440000")]
         self.claim_calls = []
         self.update_calls = []
+        self.validate_atomic_claim_support_calls = 0
+
+    def validate_atomic_claim_support(self):
+        self.validate_atomic_claim_support_calls += 1
+        return None
 
     def claim_available(self, *, process_id=None):
         self.claim_calls.append(process_id)
@@ -100,6 +105,7 @@ def test_reserve_photo_marks_reserved_downloads_and_creates_local_copy(tmp_path)
 
     assert reserved.photo_id == "550e8400-e29b-41d4-a716-446655440000"
     assert Path(reserved.local_path).exists() is True
+    assert repository.validate_atomic_claim_support_calls == 1
     assert repository.claim_calls == [None]
     assert client_provider.download_calls == [("photo-pool", "available/sample.jpg")]
 
@@ -121,4 +127,5 @@ def test_reserve_photo_consumes_record_if_download_fails(tmp_path) -> None:
         raise AssertionError("Expected reserve_photo to raise when download fails.")
 
     assert repository.claim_calls == [None]
+    assert repository.validate_atomic_claim_support_calls == 1
     assert repository.update_calls[0][1].status == PhotoStatus.AVAILABLE

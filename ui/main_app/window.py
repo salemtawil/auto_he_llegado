@@ -31,14 +31,15 @@ from ui.main_app.pool_badge import PoolBadge
 from ui.main_app.process_slot_panel import ProcessSlotPanel
 from ui.main_app.settings_dialog import SettingsDialog
 from ui.theme import (
+    ACCENT,
+    ACCENT_SOFT,
     APP_BG,
+    CARD_ALT_BG,
     ERROR,
     HEADER_BG,
     HEADER_BORDER,
     NEUTRAL_BUTTON,
     NEUTRAL_BUTTON_HOVER,
-    SECONDARY_BUTTON,
-    SECONDARY_BUTTON_HOVER,
     SUCCESS,
     TEXT_MUTED,
     TEXT_PRIMARY,
@@ -52,6 +53,7 @@ class ProcessSlotRuntime:
     panel: ProcessSlotPanel
     process_id: str | None = None
     last_process_id: str | None = None
+    last_process_debug: dict | None = None
     last_result: ProcessExecutionResult | None = None
     thread: threading.Thread | None = None
     timer_started_at: float | None = None
@@ -87,11 +89,12 @@ class MainAppWindow(ctk.CTk):
         self._process_to_slot: dict[str, str] = {}
         self._active_slot_id = "slot_1"
         self._latest_debug_slot_id = "slot_1"
+        self._pending_admin_tab: str | None = None
 
         apply_theme_mode(self._current_config.theme_mode)
         self.title("Auto He Llegado")
-        self.geometry("1180x720")
-        self.minsize(820, 560)
+        self.geometry("1280x760")
+        self.minsize(1020, 680)
         self.configure(fg_color=APP_BG)
         self.grid_columnconfigure(0, weight=1)
         self.grid_rowconfigure(1, weight=1)
@@ -109,128 +112,185 @@ class MainAppWindow(ctk.CTk):
         self.header = ctk.CTkFrame(
             self,
             fg_color=HEADER_BG,
-            corner_radius=22,
+            corner_radius=16,
             border_width=1,
             border_color=HEADER_BORDER,
         )
-        self.header.grid(row=0, column=0, padx=12, pady=(10, 6), sticky="ew")
+        self.header.grid(row=0, column=0, padx=10, pady=(8, 4), sticky="ew")
         self.header.grid_columnconfigure(0, weight=1)
+        self.header.grid_columnconfigure(1, weight=0)
+        self.header.grid_columnconfigure(2, weight=0)
+        self.header.grid_rowconfigure(0, weight=1)
 
         self.title_wrap = ctk.CTkFrame(self.header, fg_color="transparent")
-        self.title_wrap.grid(row=0, column=0, padx=(14, 10), pady=9, sticky="w")
+        self.title_wrap.grid(row=0, column=0, padx=(12, 12), pady=7, sticky="w")
+        self.title_wrap.grid_columnconfigure(0, weight=1)
 
-        title = ctk.CTkLabel(
+        self.title_label = ctk.CTkLabel(
             self.title_wrap,
             text="Auto He Llegado",
-            font=ctk.CTkFont(family="Georgia", size=20, weight="bold"),
+            font=ctk.CTkFont(size=17, weight="bold"),
             text_color=TEXT_PRIMARY,
         )
-        title.grid(row=0, column=0, sticky="w")
+        self.title_label.grid(row=0, column=0, sticky="w")
+
+        self.header_meta_label = ctk.CTkLabel(
+            self.title_wrap,
+            text="Motor: Tradicional | Procesos activos: 0/2",
+            font=ctk.CTkFont(size=8, weight="bold"),
+            text_color=TEXT_MUTED,
+        )
+        self.header_meta_label.grid(row=1, column=0, pady=(2, 0), sticky="w")
+
+        self.header_status_label = ctk.CTkLabel(
+            self.title_wrap,
+            text="",
+            font=ctk.CTkFont(size=1),
+            text_color=TEXT_MUTED,
+        )
+        self.header_status_label.grid_forget()
+
+        self.pool_badge = PoolBadge(self.header, refresh_callback=self.refresh_pool_count)
+        self.pool_badge.grid(row=0, column=1, padx=(0, 16), pady=6, sticky="nsew")
 
         self.header_actions = ctk.CTkFrame(self.header, fg_color="transparent")
-        self.header_actions.grid(row=0, column=1, padx=(10, 12), pady=8, sticky="e")
+        self.header_actions.grid(row=0, column=2, padx=(0, 12), pady=6, sticky="nsew")
+        self.header_actions.grid_rowconfigure(0, weight=1)
+        for column in range(5):
+            self.header_actions.grid_columnconfigure(column, weight=1)
 
-        self.pool_badge = PoolBadge(self.header_actions, refresh_callback=self.refresh_pool_count)
-        self.pool_badge.grid(row=0, column=0, padx=(0, 6), sticky="e")
-
-        self.refresh_button = ctk.CTkButton(
+        self.refresh_button = self._create_header_tile(
             self.header_actions,
-            text="Actualizar",
+            icon="⟳",
+            text="Refrescar",
             command=self.refresh_pool_count,
-            height=30,
-            corner_radius=10,
-            fg_color=NEUTRAL_BUTTON,
-            hover_color=NEUTRAL_BUTTON_HOVER,
-            text_color=TEXT_PRIMARY,
-            width=86,
-            font=ctk.CTkFont(size=11, weight="bold"),
         )
-        self.refresh_button.grid(row=0, column=1, padx=(0, 6), sticky="e")
+        self.refresh_button.grid(row=0, column=0, padx=(0, 6), sticky="nsew")
 
-        self.theme_toggle_button = ctk.CTkButton(
+        self.admin_button = self._create_header_tile(
             self.header_actions,
-            text="Tema",
-            command=self.toggle_theme_mode,
-            height=30,
-            corner_radius=10,
-            fg_color=NEUTRAL_BUTTON,
-            hover_color=NEUTRAL_BUTTON_HOVER,
-            text_color=TEXT_PRIMARY,
-            width=96,
-            font=ctk.CTkFont(size=11, weight="bold"),
-        )
-        self.theme_toggle_button.grid(row=0, column=2, padx=(0, 6), sticky="e")
-
-        self.admin_button = ctk.CTkButton(
-            self.header_actions,
+            icon="◈",
             text="Admin",
-            command=self.open_admin_access,
-            height=30,
-            corner_radius=10,
-            fg_color=NEUTRAL_BUTTON,
-            hover_color=NEUTRAL_BUTTON_HOVER,
-            text_color=TEXT_PRIMARY,
-            width=74,
-            font=ctk.CTkFont(size=11, weight="bold"),
+            command=self._open_admin_home,
         )
-        self.admin_button.grid(row=0, column=3, padx=(0, 6), sticky="e")
+        self.admin_button.grid(row=0, column=1, padx=(0, 6), sticky="nsew")
 
-        self.settings_button = ctk.CTkButton(
+        self.uploader_button = self._create_header_tile(
             self.header_actions,
+            icon="⤴",
+            text="Uploader",
+            command=lambda: self._open_admin_tool("Carga"),
+        )
+        self.uploader_button.grid(row=0, column=2, padx=(0, 6), sticky="nsew")
+
+        self.cleanup_button = self._create_header_tile(
+            self.header_actions,
+            icon="✦",
+            text="Limpieza",
+            command=lambda: self._open_admin_tool("Limpieza fotos"),
+        )
+        self.cleanup_button.grid(row=0, column=3, padx=(0, 6), sticky="nsew")
+
+        self.settings_button = self._create_header_tile(
+            self.header_actions,
+            icon="⚙",
             text="Configuracion",
             command=self.open_settings_dialog,
-            height=30,
-            corner_radius=10,
-            fg_color=SECONDARY_BUTTON,
-            hover_color=SECONDARY_BUTTON_HOVER,
-            width=108,
-            font=ctk.CTkFont(size=11, weight="bold"),
+            highlighted=True,
         )
-        self.settings_button.grid(row=0, column=4, sticky="e")
-        self._sync_theme_toggle_button()
+        self.settings_button.grid(row=0, column=4, sticky="nsew")
+        self._refresh_header_summary()
+
+    def _create_header_tile(self, master, *, icon: str, text: str, command, highlighted: bool = False):
+        border_color = ACCENT if highlighted else HEADER_BORDER
+        fg_color = CARD_ALT_BG
+        text_color = ACCENT if highlighted else TEXT_PRIMARY
+        tile = ctk.CTkFrame(
+            master,
+            fg_color=fg_color,
+            corner_radius=12,
+            border_width=1,
+            border_color=border_color,
+            width=96,
+            height=76,
+        )
+        tile.grid_propagate(False)
+        tile.grid_columnconfigure(0, weight=1)
+        tile.grid_rowconfigure(0, weight=1)
+        tile.grid_rowconfigure(1, weight=1)
+
+        icon_label = ctk.CTkLabel(
+            tile,
+            text=icon,
+            text_color=ACCENT,
+            font=ctk.CTkFont(size=20, weight="bold"),
+        )
+        icon_label.grid(row=0, column=0, padx=0, pady=(10, 0), sticky="s")
+
+        text_label = ctk.CTkLabel(
+            tile,
+            text=text,
+            text_color=text_color,
+            font=ctk.CTkFont(size=10, weight="bold"),
+        )
+        text_label.grid(row=1, column=0, padx=6, pady=(0, 10), sticky="n")
+
+        def on_enter(_event=None):
+            tile.configure(border_color=ACCENT, fg_color=NEUTRAL_BUTTON_HOVER)
+
+        def on_leave(_event=None):
+            tile.configure(border_color=border_color, fg_color=fg_color)
+
+        def on_click(_event=None):
+            command()
+
+        for widget in (tile, icon_label, text_label):
+            widget.bind("<Enter>", on_enter)
+            widget.bind("<Leave>", on_leave)
+            widget.bind("<Button-1>", on_click)
+
+        return tile
 
     def _build_content(self) -> None:
         self.content = ctk.CTkFrame(self, fg_color="transparent")
-        self.content.grid(row=1, column=0, padx=12, pady=(0, 12), sticky="nsew")
+        self.content.grid(row=1, column=0, padx=10, pady=(0, 10), sticky="nsew")
         self.content.grid_columnconfigure(0, weight=1)
         self.content.grid_rowconfigure(0, weight=1)
 
-        self.slots_wrap = ctk.CTkFrame(self.content, fg_color="transparent")
-        self.slots_wrap.grid(row=0, column=0, sticky="nsew")
-        self.slots_wrap.grid_columnconfigure(0, weight=1)
-        self.slots_wrap.grid_rowconfigure(0, weight=1)
-        self.slots_wrap.grid_rowconfigure(1, weight=1)
+        self.main_column = ctk.CTkFrame(self.content, fg_color="transparent")
+        self.main_column.grid(row=0, column=0, sticky="nsew")
+        self.main_column.grid_columnconfigure(0, weight=1)
+        self.main_column.grid_rowconfigure(0, weight=1)
+        self.main_column.grid_rowconfigure(1, weight=1)
 
         slot_1_panel = ProcessSlotPanel(
-            self.slots_wrap,
+            self.main_column,
             title="Proceso 1",
             on_start=lambda: self.start_process("slot_1"),
             on_clear=lambda: self.clear_form("slot_1"),
             on_export_state=lambda: self.export_extension_state("slot_1"),
+            on_open_diagnostics=self._open_diagnostics_panel,
+            on_open_extensions=lambda: self.open_extension_test_browser("slot_1"),
+            on_open_browser=lambda: self.open_manual_browser("slot_1"),
         )
-        slot_1_panel.grid(row=0, column=0, pady=(0, 10), sticky="nsew")
 
         slot_2_panel = ProcessSlotPanel(
-            self.slots_wrap,
+            self.main_column,
             title="Proceso 2",
             on_start=lambda: self.start_process("slot_2"),
             on_clear=lambda: self.clear_form("slot_2"),
             on_export_state=lambda: self.export_extension_state("slot_2"),
+            on_open_diagnostics=self._open_diagnostics_panel,
+            on_open_extensions=lambda: self.open_extension_test_browser("slot_2"),
+            on_open_browser=lambda: self.open_manual_browser("slot_2"),
         )
-        slot_2_panel.grid(row=1, column=0, sticky="nsew")
 
         self._slots = {
             "slot_1": ProcessSlotRuntime(slot_id="slot_1", panel=slot_1_panel),
             "slot_2": ProcessSlotRuntime(slot_id="slot_2", panel=slot_2_panel),
         }
 
-        primary_panel = self._slots["slot_1"].panel
-        self.form_panel = primary_panel.form_panel
-        self.status_panel = primary_panel.status_panel
-        self.current_result_panel = primary_panel.current_result_panel
-        self.extension_status_panel = primary_panel.extension_status_panel
-        self.run_button = primary_panel.run_button
-        self.clear_button = primary_panel.clear_button
+        self._sync_primary_slot_refs()
 
     def open_settings_dialog(self) -> None:
         if self._settings_dialog is not None and self._settings_dialog.winfo_exists():
@@ -245,6 +305,7 @@ class MainAppWindow(ctk.CTk):
 
     def open_admin_access(self) -> None:
         if self._admin_uploader_dialog is not None and self._admin_uploader_dialog.winfo_exists():
+            self._apply_pending_admin_tab()
             self._admin_uploader_dialog.focus()
             return
         if self._admin_password_dialog is not None and self._admin_password_dialog.winfo_exists():
@@ -252,6 +313,17 @@ class MainAppWindow(ctk.CTk):
             return
         self._admin_password_dialog = AdminPasswordDialog(self, on_submit=self._validate_admin_access)
         self._admin_password_dialog.focus()
+
+    def _open_admin_home(self) -> None:
+        self._pending_admin_tab = None
+        self.open_admin_access()
+
+    def _open_admin_tool(self, tab_name: str) -> None:
+        self._pending_admin_tab = tab_name
+        self.open_admin_access()
+
+    def _open_diagnostics_panel(self) -> None:
+        self._open_admin_tool("Diagnóstico")
 
     def _validate_admin_access(self, password: str) -> None:
         if password != self._settings.admin_access_password:
@@ -271,6 +343,7 @@ class MainAppWindow(ctk.CTk):
             on_refresh_diagnostics=self.refresh_extension_status,
             on_export_debug=self._handle_admin_export_debug,
         )
+        self._apply_pending_admin_tab()
         self._admin_uploader_dialog.focus()
         self._broadcast_status_message("Acceso Admin concedido. Modulo de carga abierto.", color=SUCCESS)
 
@@ -312,6 +385,7 @@ class MainAppWindow(ctk.CTk):
             self._refresh_theme_widgets()
         self._sync_theme_toggle_button()
         self._sync_run_button_state()
+        self._refresh_header_summary()
 
     def _prompt_agent_name_if_needed(self) -> None:
         if self._current_config.agent_name_confirmed:
@@ -353,10 +427,7 @@ class MainAppWindow(ctk.CTk):
         self.update_idletasks()
 
     def _sync_theme_toggle_button(self) -> None:
-        if not hasattr(self, "theme_toggle_button"):
-            return
-        is_dark = self._current_config.theme_mode == "dark"
-        self.theme_toggle_button.configure(text=f"Tema: {'Oscuro' if is_dark else 'Claro'}")
+        return
 
     def _handle_window_resize(self, event) -> None:
         if event.widget is not self:
@@ -364,40 +435,68 @@ class MainAppWindow(ctk.CTk):
         self._apply_responsive_layout(event.width)
 
     def _apply_responsive_layout(self, width: int) -> None:
-        if width < 900:
-            mode = "narrow"
-        elif width < 1180:
-            mode = "medium"
-        else:
-            mode = "wide"
+        mode = "fixed"
         if mode == self._layout_mode:
             return
         self._layout_mode = mode
-        compact = mode != "wide"
         self._layout_header(mode)
         self._layout_slots(mode)
-        for slot in self._slots.values():
-            slot.panel.set_compact_layout(compact)
-        self.pool_badge.set_compact_layout(compact)
+        self.pool_badge.set_compact_layout(False)
 
     def _layout_header(self, mode: str) -> None:
-        self.header_actions.grid_forget()
-        self.header_actions.grid(
-            row=0,
-            column=1,
-            padx=(10 if mode == "wide" else 8, 12),
-            pady=8,
-            sticky="e",
-        )
+        return
 
     def _layout_slots(self, mode: str) -> None:
         slot_1 = self._slots["slot_1"].panel
         slot_2 = self._slots["slot_2"].panel
-        slot_1.grid_forget()
-        slot_2.grid_forget()
-        self.slots_wrap.grid_columnconfigure(0, weight=1)
-        slot_1.grid(row=0, column=0, pady=(0, 10 if mode != "wide" else 12), sticky="nsew")
+
+        for slot in self._slots.values():
+            slot.panel.grid_forget()
+            slot.panel.set_secondary_visual(False)
+            slot.panel.set_compact_layout(False)
+
+        self._sync_primary_slot_refs()
+        self.main_column.grid(row=0, column=0, sticky="nsew")
+        self.main_column.grid_columnconfigure(0, weight=1)
+        self.main_column.grid_columnconfigure(1, weight=0)
+        slot_1.grid(row=0, column=0, pady=(0, 10), sticky="ew")
         slot_2.grid(row=1, column=0, sticky="nsew")
+
+        self._refresh_header_summary()
+
+    def _sync_primary_slot_refs(self) -> None:
+        primary_panel = (
+            self._slots[self._active_slot_id].panel
+            if self._active_slot_id in self._slots
+            else self._slots["slot_1"].panel
+        )
+        self.form_panel = primary_panel.form_panel
+        self.status_panel = primary_panel.status_panel
+        self.current_result_panel = primary_panel.current_result_panel
+        self.extension_status_panel = primary_panel.extension_status_panel
+        self.run_button = primary_panel.run_button
+        self.clear_button = primary_panel.clear_button
+
+    def _apply_pending_admin_tab(self) -> None:
+        if self._pending_admin_tab is None:
+            return
+        if self._admin_uploader_dialog is None or not self._admin_uploader_dialog.winfo_exists():
+            return
+        with contextlib.suppress(Exception):
+            self._admin_uploader_dialog.tabs.set(self._pending_admin_tab)
+        self._pending_admin_tab = None
+
+    def _refresh_header_summary(self) -> None:
+        if not hasattr(self, "header_meta_label") or not self._slots:
+            return
+        primary_slot_id = self._active_slot_id if self._active_slot_id in self._slots else "slot_1"
+        primary_slot = self._get_slot(primary_slot_id)
+        page_name = primary_slot.panel.form_panel.page_menu.get() or "N/A"
+        slot_title = "Proceso 1" if primary_slot_id == "slot_1" else "Proceso 2"
+        engine_label = self._flow_engine_label(self._current_config.flow_engine)
+        self.header_meta_label.configure(
+            text=f"Motor: {engine_label} | Procesos activos: {self._active_process_count()}/2 | Principal: {slot_title} | Pagina: {page_name}"
+        )
 
     def _refresh_widget_tree(self, widget) -> None:
         theme_keys = (
@@ -434,7 +533,19 @@ class MainAppWindow(ctk.CTk):
         return f"Procesos activos: {self._active_process_count()}/2"
 
     def _set_slot_summary(self, slot_id: str, text: str) -> None:
-        self._get_slot(slot_id).panel.summary_label.configure(text=text)
+        panel = self._get_slot(slot_id).panel
+        if hasattr(panel, "set_summary"):
+            try:
+                panel.set_summary(text)
+            except Exception:
+                pass
+        elif hasattr(panel, "summary_label"):
+            try:
+                panel.summary_label.configure(text=text)
+            except Exception:
+                pass
+        if slot_id == self._active_slot_id:
+            self._refresh_header_summary()
 
     def _set_slot_status(self, slot_id: str, message: str, *, color: str | None = None) -> None:
         slot = self._get_slot(slot_id)
@@ -443,13 +554,15 @@ class MainAppWindow(ctk.CTk):
 
     def _broadcast_status_message(self, message: str, *, color: str | None = None) -> None:
         for slot_id in self._slots:
-            self._set_slot_status(slot_id, message, color=color)
+            try:
+                self._set_slot_status(slot_id, message, color=color)
+            except Exception:
+                continue
 
     def refresh_pool_count(self) -> None:
         if self._is_closing:
             return
         self.pool_badge.set_loading()
-        self._broadcast_status_message("Consultando contador de fotos disponibles...")
         thread = threading.Thread(target=self._refresh_pool_worker, daemon=True)
         thread.start()
 
@@ -463,7 +576,7 @@ class MainAppWindow(ctk.CTk):
 
     def _apply_pool_snapshot(self, snapshot) -> None:
         self.pool_badge.set_snapshot(snapshot)
-        self._broadcast_status_message(f"Contador actualizado: {snapshot.available_count} fotos disponibles.")
+        self._refresh_header_summary()
 
     def start_process(self, slot_id: str) -> None:
         if self._is_closing:
@@ -492,14 +605,17 @@ class MainAppWindow(ctk.CTk):
             self._set_slot_status(slot_id, f"Formulario invalido: {exc}", color=ERROR)
             return
 
+        self._process_service.register_process_slot(process_id, slot_id)
         slot.process_id = request.process_id
         slot.last_process_id = request.process_id
+        slot.last_process_debug = None
         slot.execution_mode = (request.execution_mode or "").strip().lower()
         slot.panel.status_panel.clear_persistent_alert()
         slot.panel.status_panel.clear_retry_indicator()
         self._process_to_slot[process_id] = slot_id
         self._active_slot_id = slot_id
         self._latest_debug_slot_id = slot_id
+        self._layout_slots(self._layout_mode or "wide")
         slot.thread = threading.Thread(
             target=self._run_process_worker,
             args=(slot_id, process_id, request),
@@ -551,6 +667,7 @@ class MainAppWindow(ctk.CTk):
         if self._is_closing:
             return
         slot = self._get_slot(slot_id)
+        slot.last_process_debug = self._process_service.get_process_debug_export(process_id, slot_id=slot_id)
         slot.last_result = result
         timing_summary_text = self._build_status_timing_summary(process_id)
         slot.panel.current_result_panel.set_result(
@@ -573,6 +690,8 @@ class MainAppWindow(ctk.CTk):
         elapsed_seconds = self._finalize_process_tracking(slot_id, process_id)
         if self._is_closing:
             return
+        slot = self._get_slot(slot_id)
+        slot.last_process_debug = self._process_service.get_process_debug_export(process_id, slot_id=slot_id)
         self._set_slot_status(
             slot_id,
             (
@@ -643,6 +762,7 @@ class MainAppWindow(ctk.CTk):
         if self._latest_debug_slot_id == slot_id and self._active_process_count() == 0:
             self._latest_debug_slot_id = "slot_1"
         self._sync_run_button_state()
+        self._layout_slots(self._layout_mode or "wide")
         return elapsed_seconds
 
     def _sync_run_button_state(self) -> None:
@@ -656,6 +776,7 @@ class MainAppWindow(ctk.CTk):
                 continue
             disabled = active_count >= 2 or (active_count >= 1 and current_flow_engine != "traditional")
             slot.panel.run_button.configure(state="disabled" if disabled else "normal")
+        self._refresh_header_summary()
 
     @staticmethod
     def _format_elapsed_time(elapsed_seconds: int) -> str:
@@ -705,12 +826,29 @@ class MainAppWindow(ctk.CTk):
         slot = self._get_slot(slot_id)
         page_name = slot.panel.form_panel.get_form_data().get("page_name") or "Paripe"
         process_id = slot.process_id or slot.last_process_id
+        process_payload = dict(slot.last_process_debug or {})
+        if not process_payload:
+            process_payload = self._process_service.get_process_debug_export(process_id, slot_id=slot_id)
+        if not isinstance(process_payload, dict):
+            process_payload = {}
+        process_payload = {
+            **process_payload,
+            "process_id": process_payload.get("process_id") or process_id,
+            "page_name": process_payload.get("page_name") or page_name,
+            "slot_id": process_payload.get("slot_id") or slot_id,
+        }
         session = BrowserManager.get_latest_session() if slot_id == self._latest_debug_slot_id else None
+        payload = None
+        browser_export_warning = None
         if session is not None:
-            payload = (
-                session.capture_extension_debug(page=session.page, note="manual_process_export")
-                or session.get_last_extension_debug()
-            )
+            try:
+                payload = (
+                    session.capture_extension_debug(page=session.page, note="manual_process_export")
+                    or session.get_last_extension_debug()
+                )
+            except Exception as exc:
+                browser_export_warning = str(exc)
+                payload = session.get_last_extension_debug() or BrowserManager.get_latest_extension_debug()
         elif slot_id == self._latest_debug_slot_id:
             payload = BrowserManager.get_latest_extension_debug()
         else:
@@ -718,8 +856,6 @@ class MainAppWindow(ctk.CTk):
                 "note": "Export parcial: BrowserManager latest_* solo refleja la sesion mas reciente.",
                 "slot_id": slot_id,
             }
-
-        process_payload = self._process_service.get_process_debug_export(process_id)
         body_text = ""
         current_url = ""
         frames_payload: dict | list = []
@@ -728,8 +864,15 @@ class MainAppWindow(ctk.CTk):
                 current_url = session.page.url
             with contextlib.suppress(Exception):
                 body_text = session.page.locator("body").first.inner_text(timeout=700).strip()
-            with contextlib.suppress(Exception):
+            try:
                 frames_payload = session.debug_list_all_frames(page=session.page)
+            except Exception as exc:
+                if browser_export_warning is None:
+                    browser_export_warning = str(exc)
+                last_frame_report = {}
+                if isinstance(payload, dict):
+                    last_frame_report = dict(payload.get("frame_debug_report") or {})
+                frames_payload = last_frame_report or {"total_frames": 0, "frames": [], "error": str(exc)}
 
         if not payload and not process_payload:
             self._set_slot_status(slot_id, "No hay estado del proceso disponible para exportar.", color=ERROR)
@@ -757,6 +900,7 @@ class MainAppWindow(ctk.CTk):
             "flowEngine": self._current_config.flow_engine,
             "pageName": page_name,
             "browser_state": payload,
+            "browser_export_warning": browser_export_warning,
             "current_url": current_url,
             "body_text": body_text,
             "frames": frames_payload,
@@ -793,16 +937,30 @@ class MainAppWindow(ctk.CTk):
     def _build_slot_diagnostic_snapshot(self, slot_id: str) -> dict:
         slot = self._get_slot(slot_id)
         process_id = slot.process_id or slot.last_process_id
-        process_debug = self._process_service.get_process_debug_export(process_id)
+        process_debug = dict(slot.last_process_debug or {})
+        if not process_debug:
+            process_debug = self._process_service.get_process_debug_export(process_id, slot_id=slot_id)
+        if not isinstance(process_debug, dict):
+            process_debug = {}
+        process_debug = {
+            **process_debug,
+            "process_id": process_debug.get("process_id") or process_id,
+            "page_name": process_debug.get("page_name") or slot.panel.form_panel.get_form_data().get("page_name"),
+            "slot_id": process_debug.get("slot_id") or slot_id,
+        }
         session = BrowserManager.get_latest_session() if slot_id == self._latest_debug_slot_id else None
         latest_debug = BrowserManager.get_latest_extension_debug() or {}
         session_debug = latest_debug
         frames_payload: dict | list = []
+        browser_export_warning = None
         session_active = session is not None
         if session is not None:
             session_debug = session.get_last_extension_debug() or latest_debug
-            with contextlib.suppress(Exception):
+            try:
                 frames_payload = session.debug_list_all_frames(page=session.page)
+            except Exception as exc:
+                browser_export_warning = str(exc)
+                frames_payload = dict(session_debug.get("frame_debug_report") or {}) or {"total_frames": 0, "frames": [], "error": str(exc)}
         elif not latest_debug:
             session_debug = {
                 "note": "Diagnostico limitado: BrowserManager latest_* solo refleja la sesion mas reciente.",
@@ -825,6 +983,7 @@ class MainAppWindow(ctk.CTk):
             "extension_requested": self._current_config.flow_engine == "extension",
             "session_active": session_active,
             "session_debug": session_debug,
+            "browser_export_warning": browser_export_warning,
             "process_debug": process_debug,
             "timeline": process_debug.get("timeline", []) if isinstance(process_debug, dict) else [],
             "timing_summary": process_debug.get("timing_summary", {}) if isinstance(process_debug, dict) else {},
@@ -835,7 +994,8 @@ class MainAppWindow(ctk.CTk):
         }
 
     def _build_status_timing_summary(self, process_id: str | None) -> str:
-        process_debug = self._process_service.get_process_debug_export(process_id)
+        slot_id = self._process_to_slot.get(process_id or "")
+        process_debug = self._process_service.get_process_debug_export(process_id, slot_id=slot_id)
         if not isinstance(process_debug, dict):
             return ""
         timing_summary = process_debug.get("timing_summary") or {}
@@ -1074,7 +1234,8 @@ class MainAppWindow(ctk.CTk):
                 slot.panel.run_button.configure(state="disabled")
             with contextlib.suppress(Exception):
                 slot.panel.clear_button.configure(state="disabled")
-        self._broadcast_status_message("Cerrando Playwright y recursos activos...")
+        with contextlib.suppress(Exception):
+            self._broadcast_status_message("Cerrando Playwright y recursos activos...")
         threading.Thread(target=self._shutdown_and_destroy, daemon=True).start()
 
     def _shutdown_and_destroy(self) -> None:

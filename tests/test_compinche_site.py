@@ -2,6 +2,7 @@ from types import SimpleNamespace
 
 from automation.compinche_site import CompincheSite, FlowRoot
 from core.models import LocalConfig, ProcessExecutionRequest, ReservedPhoto, SiteExecutionResult
+from services.process_run_context import ProcessRunContext
 
 
 def _local_config() -> LocalConfig:
@@ -334,6 +335,15 @@ class _FakePhotoService:
 def test_compinche_iframe_flow_moves_directly_from_block_read_to_final_submit() -> None:
     photo_service = _FakePhotoService()
     site = CompincheSite(photo_service=photo_service)
+    run_context = ProcessRunContext(
+        process_id="proc-1",
+        page_name="Compinche",
+        action_name="He llegado",
+        phone_number="8095551234",
+        execution_mode="traditional",
+        log_service=object(),
+    )
+    site.attach_run_context(run_context)
     progress_events: list[tuple[str, str]] = []
     reserved_photo = ReservedPhoto(
         photo_id="photo-1",
@@ -381,6 +391,9 @@ def test_compinche_iframe_flow_moves_directly_from_block_read_to_final_submit() 
     assert ("final_submit", "Boton final He llegado detectado. Candidatos encontrados: 1.") in progress_events
     assert photo_service.consumed == ["photo-1"]
     assert photo_service.deleted == ["C:/tmp/photo-1.jpg"]
+    recorded_events = [item["event"] for item in run_context.run_stats.export_timeline()]
+    assert "final_result_started" in recorded_events
+    assert "final_result_done" in recorded_events
 
 
 def test_compinche_block_phase_skips_selfie_stage_in_extension_mode() -> None:
@@ -410,3 +423,28 @@ def test_compinche_block_phase_skips_selfie_stage_in_extension_mode() -> None:
     assert retry_count == 0
     assert deepfakescore_activated is False
     assert any("block_read_ready" in message for _, message in progress_events)
+
+
+def test_compinche_timing_summary_uses_combined_site_validation_and_block_click() -> None:
+    site = CompincheSite()
+    site._timing_first_by_event = {
+        "process_started": {"elapsed_total_s": 0.0},
+        "login_started": {"elapsed_total_s": 0.0},
+        "login_done": {"elapsed_total_s": 1.0},
+        "photo_prepare_started": {"elapsed_total_s": 1.0},
+        "photo_prepare_done": {"elapsed_total_s": 2.0},
+        "continue_clicked": {"elapsed_total_s": 5.0},
+        "block_visual_detected": {"elapsed_total_s": 9.0},
+        "final_click_done": {"elapsed_total_s": 11.0},
+        "final_result_done": {"elapsed_total_s": 14.0},
+        "process_finished": {"elapsed_total_s": 15.0},
+    }
+
+    summary = site._build_timing_summary()  # noqa: SLF001
+    summary_text = site._build_timing_summary_text()  # noqa: SLF001
+
+    assert summary["validacion_sitio"] == "4.0s"
+    assert summary["bloqueclick"] == "2.0s"
+    assert "selfie" not in summary
+    assert "bloque 4.0s" not in summary_text
+    assert "validacion sitio 4.0s" in summary_text

@@ -12,6 +12,7 @@ from storage.supabase_client import SupabaseClientProvider
 
 
 class PhotosRepository:
+    _DB_ERROR_AFTER_STORAGE_DELETE_PREFIX = "Storage borrado, pero fallo update DB:"
     _CREATE_FIELDS = {"id", "original_name", "file_path", "status"}
     _UPDATE_FIELDS = {
         "status",
@@ -137,9 +138,13 @@ class PhotosRepository:
         *,
         error_message: str | None = None,
     ) -> PhotoRecord:
+        if error_message is not None:
+            raise ValidationError(
+                "error_message no esta soportado por el schema local confirmado de photos."
+            )
         return self.update(
             photo_id,
-            PhotoUpdate(status=status, error_message=error_message),
+            PhotoUpdate(status=status),
         )
 
     def count_available(self) -> int:
@@ -168,6 +173,19 @@ class PhotosRepository:
             self._client_provider.client.table(self._table)
             .select("id", count="exact")
             .not_.is_("cleanup_error", "null")
+        )
+        return int(getattr(response, "count", 0) or 0)
+
+    def count_db_error_after_storage_delete(self) -> int:
+        response = self._client_provider.execute_response(
+            self._client_provider.client.table(self._table)
+            .select("id", count="exact")
+            .not_.is_("file_path", "null")
+            .is_("storage_deleted_at", "null")
+            .like(
+                "cleanup_error",
+                f"{self._DB_ERROR_AFTER_STORAGE_DELETE_PREFIX}%",
+            )
         )
         return int(getattr(response, "count", 0) or 0)
 
@@ -243,6 +261,21 @@ class PhotosRepository:
         if exclude_cleanup_errors:
             query = query.is_("cleanup_error", "null")
         rows = self._client_provider.execute(query)
+        return [PhotoRecord.model_validate(row) for row in rows]
+
+    def list_db_error_after_storage_delete(self, *, limit: int = 100) -> list[PhotoRecord]:
+        validated_limit = validate_limit(limit)
+        rows = self._client_provider.execute(
+            self._client_provider.client.table(self._table)
+            .select("*")
+            .not_.is_("file_path", "null")
+            .is_("storage_deleted_at", "null")
+            .like(
+                "cleanup_error",
+                f"{self._DB_ERROR_AFTER_STORAGE_DELETE_PREFIX}%",
+            )
+            .limit(validated_limit)
+        )
         return [PhotoRecord.model_validate(row) for row in rows]
 
     def mark_storage_cleaned(self, photo_id: str, *, reason: str, cleaned_by: str) -> PhotoRecord:

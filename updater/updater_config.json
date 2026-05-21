@@ -1,0 +1,35 @@
+{
+  "owner": "salemtawil",
+  "repo": "auto_he_llegado",
+  "branch": "main",
+  "install_dir": ".",
+  "app_entrypoints": [
+    "app_main.py",
+    "app_main.exe"
+  ],
+  "allowed_roots": [
+    "app_main.py",
+    "automation/",
+    "core/",
+    "services/",
+    "storage/",
+    "ui/",
+    "browser_extension/",
+    "sql/",
+    "requirements.txt"
+  ],
+  "protected_paths": [
+    ".env",
+    "config/",
+    "logs/",
+    "exports/",
+    "data/",
+    "local_data/",
+    "chrome_profiles/",
+    "backups/",
+    "updates/",
+    ".venv/",
+    "__pycache__/",
+    "*.local.json"
+  ]
+}

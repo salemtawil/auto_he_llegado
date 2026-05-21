@@ -37,7 +37,6 @@ class LogService:
             (lambda: logs_repository) if logs_repository is not None else ProcessLogsRepository
         )
         self._logs_repository = logs_repository or self._logs_repository_factory()
-        self._next_write_repository = self._logs_repository
         self._sleep = sleep_func
 
     def start_process(
@@ -53,7 +52,7 @@ class LogService:
     ) -> ProcessLogRecord:
         timestamp = self._utcnow()
         try:
-            return self._run_write_with_retry(
+            return self._retry_log_operation(
                 lambda repository: repository.create(
                     ProcessLogCreate(
                         started_at=timestamp,
@@ -89,7 +88,7 @@ class LogService:
         block_time: str | None = None,
     ) -> ProcessLogRecord:
         try:
-            return self._run_write_with_retry(
+            return self._retry_log_operation(
                 lambda repository: repository.update(
                     log_id,
                     ProcessLogUpdate(
@@ -120,7 +119,7 @@ class LogService:
         finished_at: datetime | None = None,
     ) -> ProcessLogRecord:
         try:
-            return self._run_write_with_retry(
+            return self._retry_log_operation(
                 lambda repository: repository.update(
                     log_id,
                     ProcessLogUpdate(
@@ -250,14 +249,14 @@ class LogService:
     def _utcnow() -> datetime:
         return datetime.now(timezone.utc)
 
-    def _run_write_with_retry(
+    def _retry_log_operation(
         self,
         operation: Callable[[ProcessLogsRepository], ProcessLogRecord],
     ) -> ProcessLogRecord:
         attempts = len(self._WRITE_RETRY_DELAYS) + 1
         last_error: Exception | None = None
         for attempt_index in range(attempts):
-            repository = self._create_write_repository()
+            repository = self._create_write_repository(attempt_index)
             try:
                 return operation(repository)
             except Exception as exc:
@@ -269,11 +268,9 @@ class LogService:
             raise last_error
         raise RuntimeError("Log write retry finished without a result or captured error.")
 
-    def _create_write_repository(self) -> ProcessLogsRepository:
-        if self._next_write_repository is not None:
-            repository = self._next_write_repository
-            self._next_write_repository = None
-            return repository
+    def _create_write_repository(self, attempt_index: int) -> ProcessLogsRepository:
+        if attempt_index == 0:
+            return self._logs_repository
         return self._logs_repository_factory()
 
     @classmethod

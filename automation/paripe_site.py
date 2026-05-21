@@ -10,6 +10,7 @@ import unicodedata
 from automation.base_site import BaseSite, ProgressCallback
 from automation.browser_manager import BrowserManager
 from automation.engines.extension import ExtensionFlowEngine, ExtensionPhaseDecider
+from automation.flow_context import ActiveFlowContext, resolve_live_flow_context
 from core.models import LocalConfig, ProcessExecutionRequest, ReservedPhoto, SiteExecutionResult
 from services.process_photo_service import ProcessPhotoService
 
@@ -207,7 +208,17 @@ class ParipeSite(BaseSite):
         self._timing_lock = threading.Lock()
         self._last_final_button_candidate: dict[str, object] | None = None
         self._last_process_debug_export: dict[str, object] = {}
-        self._active_flow_context: Locator | None = None
+        self._active_flow_context: ActiveFlowContext | None = None
+        self._final_submit_already_clicked = False
+        self._final_submit_fast_clicked_at = None
+        self._final_submit_done_by_detector = False
+        self._latest_block_snapshot_text = ""
+        self._final_result_already_detected = False
+
+    def clone_for_run(self) -> ParipeSite:
+        return ParipeSite(
+            selectors=self._selectors,
+        )
 
     def _reset_process_debug_state(self) -> None:
         self._process_timeline = []
@@ -218,14 +229,138 @@ class ParipeSite(BaseSite):
         self._last_final_button_candidate = None
         self._last_process_debug_export = {}
         self._active_flow_context = None
+        self._final_submit_already_clicked = False
+        self._final_submit_fast_clicked_at = None
+        self._final_submit_done_by_detector = False
+        self._latest_block_snapshot_text = ""
+        self._final_result_already_detected = False
+        self._reset_flow_state_detector_debug()
 
     def _record_timeline_event(self, event: str, **payload: object) -> None:
+        if self._should_skip_timeline_event(event, payload):
+            return
         self._process_timeline.append(
             {
                 "event": event,
                 "recorded_at": datetime.now().isoformat(),
                 **payload,
             }
+        )
+
+    def _should_skip_timeline_event(self, event: str, payload: dict[str, object]) -> bool:
+        if not self._final_submit_resolved():
+            return False
+        if event == "flow_detector_state":
+            state = str(payload.get("state", "") or "")
+            return state not in {"FINAL_RESULT", "ERROR"}
+        if event == "flow_context_detected":
+            return True
+        if event in {"block_read_ready", "block_details_read", "block_detected", "block_visual_detected"}:
+            return True
+        if event in {"final_button_candidate_found", "final_button_clicked"}:
+            return True
+        return False
+
+    def _mark_final_submit_clicked(self, *, clicked_at: float | None = None, by_detector: bool = False) -> None:
+        self._final_submit_already_clicked = True
+        self._final_submit_fast_clicked_at = clicked_at if clicked_at is not None else monotonic()
+        if by_detector:
+            self._final_submit_done_by_detector = True
+
+    def _final_click_done_recorded(self) -> bool:
+        return "final_click_done" in self._timing_first_by_event
+
+    def _final_submit_resolved(self) -> bool:
+        return bool(getattr(self, "_final_submit_already_clicked", False)) or self._final_click_done_recorded()
+
+    def _after_final_click_done(self, *, page: Page, by_detector: bool = False) -> None:
+        self._mark_final_submit_clicked(
+            clicked_at=getattr(self, "_final_submit_fast_clicked_at", None),
+            by_detector=by_detector,
+        )
+        self._ensure_final_result_started(page=page)
+
+    def _snapshot_block_details(self, details_context: Locator, page: Page) -> str:
+        snapshot_text = getattr(self, "_latest_block_snapshot_text", "") or ""
+        if snapshot_text:
+            return snapshot_text
+        snapshot_text = self._capture_block_snapshot_text(details_context, page)
+        self._latest_block_snapshot_text = snapshot_text
+        return snapshot_text
+
+    def _resolve_snapshot_text_for_final_result(self, details_context: Locator, page: Page) -> str:
+        snapshot_text = self._snapshot_block_details(details_context, page)
+        if snapshot_text.strip():
+            return snapshot_text
+        candidate = dict(self._last_final_button_candidate or {})
+        for key in ("context_text_preview", "body_text_preview"):
+            value = str(candidate.get(key, "") or "").strip()
+            if value:
+                self._latest_block_snapshot_text = value
+                return value
+        return ""
+
+    def _snapshot_contains_block_details(self, snapshot_text: str) -> bool:
+        payment, station, schedule, duration = self._read_block_details_from_snapshot_text(snapshot_text)
+        signals = (payment != "N/A", station != "N/A", schedule != "N/A", duration != "N/A")
+        return sum(1 for enabled in signals if enabled) >= 3
+
+    def _read_block_details_for_result(
+        self,
+        details_context: Locator,
+        page: Page,
+        *,
+        progress_callback: ProgressCallback | None,
+        allow_fallback_read: bool,
+    ) -> tuple[str, str, str, str, str]:
+        snapshot_text = self._resolve_snapshot_text_for_final_result(details_context, page)
+        payment, station, schedule, duration = self._read_block_details_from_snapshot_text(snapshot_text)
+        if allow_fallback_read and (
+            payment == "N/A"
+            and station == "N/A"
+            and schedule == "N/A"
+            and duration == "N/A"
+        ):
+            self.emit_progress(progress_callback, phase="block_read", message="Leyendo informacion del bloque...")
+            payment, station, schedule, duration = self._read_block_details(
+                details_context,
+                page=page,
+                progress_callback=progress_callback,
+            )
+            snapshot_text = self._snapshot_block_details(details_context, page)
+        return payment, station, schedule, duration, snapshot_text
+
+    def _record_final_result_flow_state(self, *, page: Page, source: str = "final_result") -> None:
+        debug_state = getattr(self, "_flow_state_detector_debug", None)
+        if debug_state is None:
+            self._reset_flow_state_detector_debug()
+            debug_state = getattr(self, "_flow_state_detector_debug")
+        debug_state["last_state"] = "FINAL_RESULT"
+        debug_state["last_confidence"] = 1.0
+        debug_state["last_reason"] = "final_result_confirmed"
+        debug_state["last_source"] = source
+        first_seen_by_state = dict(debug_state.get("first_seen_by_state") or {})
+        first_seen_by_state.setdefault("FINAL_RESULT", datetime.now().isoformat())
+        debug_state["first_seen_by_state"] = first_seen_by_state
+        self._record_timeline_event(
+            "flow_detector_state",
+            state="FINAL_RESULT",
+            confidence=1.0,
+            reason="final_result_confirmed",
+            source=source,
+            signals={},
+            text_preview="",
+            context_type="result",
+        )
+        self._record_run_stat(
+            "flow_detector_state",
+            state="FINAL_RESULT",
+            confidence=1.0,
+            reason="final_result_confirmed",
+            source=source,
+            signals={},
+            text_preview="",
+            context_type="result",
         )
 
     def _mark_phase_timing(self, event: str, **payload: object) -> None:
@@ -312,7 +447,7 @@ class ParipeSite(BaseSite):
             self.emit_progress(progress_callback, phase="timing", message=summary)
 
     def export_process_debug_state(self) -> dict[str, object]:
-        return {
+        payload = {
             "site": self.site_name,
             "timeline": [dict(item) for item in self._process_timeline],
             "phase_timings": [dict(item) for item in self._phase_timings],
@@ -320,7 +455,10 @@ class ParipeSite(BaseSite):
             "timing_summary_text": self._build_timing_summary_text(),
             "last_final_button_candidate": dict(self._last_final_button_candidate or {}),
             "last_process_debug_export": dict(self._last_process_debug_export),
+            "flow_state_detector": self._build_flow_state_detector_export(),
         }
+        payload.update(self._build_common_run_stats_payload())
+        return payload
 
     def _start_background_photo_preparation(
         self,
@@ -330,13 +468,20 @@ class ParipeSite(BaseSite):
     ) -> BackgroundPhotoPreparation:
         preparation = BackgroundPhotoPreparation(process_id=process_id)
         self._mark_phase_timing("photo_prepare_future_created", process_id=process_id)
+        self._record_run_stat("photo_prepare_future_created", process_id=process_id)
         self.emit_progress(progress_callback, phase="photo_prepare", message="preparando foto en background tras login")
 
         def worker() -> None:
             try:
                 self._mark_phase_timing("photo_prepare_started", process_id=process_id, source="background")
+                self._record_run_stat("photo_prepare_started", process_id=process_id, source="background")
                 preparation.reserved_photo = self._photo_service.reserve_photo(process_id=process_id)
                 self._mark_phase_timing(
+                    "photo_prepare_done",
+                    process_id=process_id,
+                    photo_id=preparation.reserved_photo.photo_id if preparation.reserved_photo else None,
+                )
+                self._record_run_stat(
                     "photo_prepare_done",
                     process_id=process_id,
                     photo_id=preparation.reserved_photo.photo_id if preparation.reserved_photo else None,
@@ -345,6 +490,7 @@ class ParipeSite(BaseSite):
             except Exception as exc:
                 preparation.error = exc
                 self._mark_phase_timing("photo_prepare_failed", process_id=process_id, error=str(exc))
+                self._record_run_stat("photo_prepare_failed", process_id=process_id, error=str(exc))
             finally:
                 preparation.ready_event.set()
 
@@ -360,22 +506,29 @@ class ParipeSite(BaseSite):
     ) -> tuple[ReservedPhoto, bool]:
         if preparation is None:
             self._record_timeline_event("photo_prepare_future_missing_at_selfie_input", process_id=process_id)
+            self._record_run_stat("photo_prepare_future_missing_at_selfie_input", process_id=process_id)
             self.emit_progress(progress_callback, phase="photo_prepare", message="photo_prepare_future_missing_at_selfie_input")
             self._mark_phase_timing("photo_future_wait_started", process_id=process_id, fallback=True)
+            self._record_run_stat("photo_future_wait_started", process_id=process_id, fallback=True)
             reserved_photo = self._photo_service.reserve_photo(process_id=process_id)
             self._mark_phase_timing("photo_future_wait_done", process_id=process_id, fallback=True)
+            self._record_run_stat("photo_future_wait_done", process_id=process_id, fallback=True)
             self._mark_phase_timing("photo_prepare_done", process_id=process_id, photo_id=reserved_photo.photo_id)
+            self._record_run_stat("photo_prepare_done", process_id=process_id, photo_id=reserved_photo.photo_id)
             return reserved_photo, False
 
         ready_before_input = preparation.ready_event.is_set()
         self._record_timeline_event("photo_ready_before_input", ready=ready_before_input, process_id=process_id)
+        self._record_run_stat("photo_ready_before_input", ready=ready_before_input, process_id=process_id)
         if ready_before_input:
             self.emit_progress(progress_callback, phase="photo_prepare", message="input selfie detectado: usando foto ya preparada")
         else:
             self.emit_progress(progress_callback, phase="photo_prepare", message="esperando future de foto existente")
             self._mark_phase_timing("photo_future_wait_started", process_id=process_id)
+            self._record_run_stat("photo_future_wait_started", process_id=process_id)
             preparation.ready_event.wait()
             self._mark_phase_timing("photo_future_wait_done", process_id=process_id)
+            self._record_run_stat("photo_future_wait_done", process_id=process_id)
         if preparation.error is not None:
             self.emit_progress(progress_callback, phase="photo_prepare", message=f"photo_prepare_failed: {preparation.error}")
             raise preparation.error
@@ -408,26 +561,76 @@ class ParipeSite(BaseSite):
             self._record_timeline_event("dashboard_body_discarded_as_flow_context", source=source)
             return None
         reacquired = self._active_flow_context is None
-        self._active_flow_context = context
+        page_url = self._safe_page_url(page)
+        self._active_flow_context = self._build_active_flow_context(
+            page=page or context.page,
+            root=context,
+            source=source,
+            stage="flow",
+            text_snapshot=self._safe_text(context)[:500] or None,
+        )
         if reacquired and "start" not in source and "detected" not in source:
-            self._record_timeline_event("flow_context_reacquired", source=source, url=page.url if page is not None else "")
+            self._record_timeline_event("flow_context_reacquired", source=source, url=page_url)
+            self._record_run_stat("flow_context_reacquired", source=source, url=page_url)
         self._record_timeline_event(
             "flow_context_detected",
             source=source,
-            url=page.url if page is not None else "",
+            url=page_url,
             context_summary=self._describe_live_dialog(context),
         )
+        self._record_run_stat(
+            "flow_context_detected",
+            source=source,
+            url=page_url,
+            context_summary=self._describe_live_dialog(context),
+        )
+        snapshot = self._observe_flow_state(context, page, f"active_flow_context:{source}")
+        detector_sources = {
+            "resolve_block_context_best",
+            "wait_for_details_dialog_poll",
+            "resolve_block_context_snapshot",
+        }
+        if (
+            page is not None
+            and source in detector_sources
+            and not bool(getattr(self, "_final_submit_already_clicked", False))
+            and not bool(getattr(self, "_final_result_already_detected", False))
+        ):
+            self._try_detector_fast_click_final(
+                context,
+                page,
+                progress_callback=None,
+                snapshot=snapshot,
+                source=f"active_flow_context:{source}",
+            )
         return context
 
     def _get_active_flow_context(self, page: Page) -> Locator | None:
-        context = self._active_flow_context
-        if context is None:
+        active_context = self._active_flow_context
+        page_url = self._safe_page_url(page)
+        if active_context is None:
             return None
-        if self._locator_is_live(context):
-            return context
-        self._record_timeline_event("flow_context_lost", url=page.url)
+        if active_context.is_valid():
+            return active_context.root
+        if not hasattr(page, "locator"):
+            return active_context.root
+        self._record_timeline_event("flow_context_lost", url=page_url)
+        self._record_run_stat("flow_context_lost", url=page_url)
         self._active_flow_context = None
-        return None
+        reacquired = resolve_live_flow_context(
+            page,
+            candidates=[
+                (self._find_block_context_snapshot(page), "block_context_snapshot_reacquired"),
+                (self._find_photo_phase_dialog(page), "photo_phase_dialog_reacquired"),
+            ],
+            stage="reacquired",
+        )
+        if reacquired is None:
+            return None
+        self._active_flow_context = reacquired
+        self._record_timeline_event("flow_context_reacquired", source=reacquired.source, url=page_url)
+        self._record_run_stat("flow_context_reacquired", source=reacquired.source, url=page_url)
+        return reacquired.root
 
     def _get_supported_action_specs(self) -> tuple[ParipeActionSpec, ...]:
         return (
@@ -593,22 +796,26 @@ class ParipeSite(BaseSite):
     ) -> SiteExecutionResult:
         self._reset_process_debug_state()
         self._mark_phase_timing("process_started", process_id=getattr(request, "process_id", None))
+        self._record_run_stat("process_started", process_id=getattr(request, "process_id", None))
         self._photo_service.validate_atomic_reservation_support()
         extension_engine_requested = self._use_extension_engine(local_config, request)
         extension_strict = str(request.execution_mode or "").strip().lower() == "extension"
         self._mark_phase_timing("browser_open_started", engine="extension" if extension_engine_requested else "traditional")
+        self._record_run_stat("browser_open_started", engine="extension" if extension_engine_requested else "traditional")
         session = self._browser_manager.open_clean_session(
             keep_open=local_config.keep_browser_open,
             enable_extension=extension_engine_requested,
             extension_overlay=local_config.browser_extension_overlay,
         )
         self._mark_phase_timing("browser_open_done", extension_loaded=session.extension_loaded)
+        self._record_run_stat("browser_open_done", extension_loaded=session.extension_loaded)
         reserved_photo: ReservedPhoto | None = None
         prepared_photo: BackgroundPhotoPreparation | None = None
         selfie_retry_count = 0
         deepfakescore_activated = False
         self._final_submit_already_clicked = False
         self._final_submit_fast_clicked_at = None
+        self._final_submit_done_by_detector = False
         self._latest_block_snapshot_text = ""
         self._active_flow_context = None
         page = session.page
@@ -651,6 +858,7 @@ class ParipeSite(BaseSite):
                 )
             self.emit_progress(progress_callback, phase="login", message="Abriendo paripe.io/login...")
             self._mark_phase_timing("login_started", url=self._ENTRY_URL)
+            self._record_run_stat("login_started", url=self._ENTRY_URL)
             self._open_login(page, timeout_ms=page_timeout_ms)
             cleanup_report = session.clear_auth_state(page=page)
             self._record_timeline_event("session_state_cleared", **cleanup_report)
@@ -664,6 +872,7 @@ class ParipeSite(BaseSite):
                 timeout_ms=page_timeout_ms,
             )
             self._mark_phase_timing("login_done", url=page.url)
+            self._record_run_stat("login_done", url=page.url)
             session.capture_extension_debug(page=page, note="login_completed")
             self.emit_progress(
                 progress_callback,
@@ -679,8 +888,10 @@ class ParipeSite(BaseSite):
             action_spec = self._get_action_spec(request.action_name)
             self.emit_progress(progress_callback, phase="initial_action", message=f"Ejecutando accion '{action_spec.ui_name}'...")
             self._mark_phase_timing("initial_action_started", action=action_spec.ui_name)
+            self._record_run_stat("initial_action_started", action=action_spec.ui_name)
             self._click_initial_action(page, request.action_name, timeout_ms=action_timeout_ms)
             self._mark_phase_timing("initial_action_clicked", action=action_spec.ui_name, url=page.url)
+            self._record_run_stat("initial_action_clicked", action=action_spec.ui_name, url=page.url)
             session.capture_extension_debug(page=page, note="initial_action_clicked")
             self.emit_progress(progress_callback, phase="initial_action", message="Accion inicial presionada.")
             self._mark_phase_timing("iframe_wait_started", source="photo_phase")
@@ -694,6 +905,7 @@ class ParipeSite(BaseSite):
             )
             self._set_active_flow_context(selfie_dialog, page=page, source="photo_phase_detected")
             self._mark_phase_timing("iframe_detected", source="photo_phase", url=page.url)
+            self._record_run_stat("iframe_detected", source="photo_phase", url=page.url)
             session.capture_extension_debug(page=page, note="photo_phase_detected")
             self._record_timeline_event("photo_phase_detected", url=page.url)
             details_context, reserved_photo, selfie_retry_count, deepfakescore_activated = self._complete_selfie_until_block(
@@ -709,86 +921,111 @@ class ParipeSite(BaseSite):
                 extension_assisted=extension_engine_requested and session.extension_loaded,
                 extension_strict=extension_strict,
             )
-            self._set_active_flow_context(details_context, page=page, source="block_context_ready")
-            session.capture_extension_debug(page=page, note="block_ready_after_selfie")
-            self._record_timeline_event("block_read_ready", url=page.url)
             block_ready_at = monotonic()
-            snapshot_text = getattr(self, "_latest_block_snapshot_text", "") or self._capture_block_snapshot_text(details_context, page)
-            self._latest_block_snapshot_text = ""
             payment = station = schedule = duration = "N/A"
-            final_submit_already_clicked = bool(getattr(self, "_final_submit_already_clicked", False))
-            active_context = self._get_active_flow_context(page)
-            fast_snapshot = (
-                self._fast_context_snapshot(active_context)
-                if active_context is not None
-                else self._fast_block_snapshot(page)
-            )
-            snapshot_selfie_active = bool(
-                fast_snapshot.get("hasSelfieInput", False)
-                or fast_snapshot.get("hasSelfieText", False)
-                or fast_snapshot.get("hasContinueButton", False)
-            )
-            snapshot_processing_active = bool(fast_snapshot.get("hasProcessingText", False))
-            fast_block_signal_count = sum(
-                1
-                for enabled in (
-                    fast_snapshot.get("hasPaymentText", False),
-                    fast_snapshot.get("hasStationText", False),
-                    fast_snapshot.get("hasScheduleText", False),
-                    fast_snapshot.get("hasDurationText", False),
-                    fast_snapshot.get("hasBlockCardLike", False),
-                )
-                if enabled
-            )
-            final_button_visible = (
-                fast_snapshot.get("hasFinalButton", False)
-                and fast_block_signal_count >= 3
-                and not fast_snapshot.get("hasSelfieInput", False)
-                and not fast_snapshot.get("hasSelfieText", False)
-                and not fast_snapshot.get("hasProcessingText", False)
-            )
+            final_submit_already_clicked = self._final_submit_resolved()
+            detector_fast_click_done = bool(getattr(self, "_final_submit_done_by_detector", False))
             if final_submit_already_clicked:
-                self.emit_progress(progress_callback, phase="final_submit", message="botón final visible: click inmediato")
-            elif final_button_visible:
-                self.emit_progress(progress_callback, phase="final_submit", message="botón final visible: click inmediato")
-            else:
-                self.emit_progress(progress_callback, phase="block_read", message="Leyendo informacion del bloque...")
-                payment, station, schedule, duration = self._read_block_details(
-                    details_context,
-                    page=page,
-                    progress_callback=progress_callback,
-                )
-                self._record_timeline_event(
-                    "block_details_read",
-                    payment=payment,
-                    station=station,
-                    schedule=schedule,
-                    duration=duration,
-                )
-                self.emit_progress(
-                    progress_callback,
-                    phase="block_read",
-                    message=(
-                        f"Bloque detectado. Pago: {payment}. Estacion: {station}. "
-                        f"Horario: {schedule}. Duracion: {duration}."
-                    ),
-                )
-                self.emit_progress(
-                    progress_callback,
-                    phase="block_read",
-                    message="Datos del bloque guardados para resultado final y process_logs.",
-                )
-            self.emit_progress(progress_callback, phase="block_read", message=f"Reintentos de selfie: {selfie_retry_count}.")
-            if not final_submit_already_clicked:
-                self._submit_final(
+                payment, station, schedule, duration, _snapshot_text = self._read_block_details_for_result(
                     details_context,
                     page,
-                    timeout_ms=min(action_timeout_ms, 1_000),
                     progress_callback=progress_callback,
-                    session=session,
-                    extension_assisted=extension_engine_requested and session.extension_loaded,
-                    extension_strict=extension_strict,
+                    allow_fallback_read=False,
                 )
+            else:
+                self._set_active_flow_context(details_context, page=page, source="block_context_ready")
+                if not self._final_submit_resolved():
+                    self._observe_flow_state(details_context, page, "block_context_ready")
+                    session.capture_extension_debug(page=page, note="block_ready_after_selfie")
+                    self._record_timeline_event("block_read_ready", url=page.url)
+                active_context = self._get_active_flow_context(page)
+                fast_snapshot = (
+                    self._fast_context_snapshot(active_context)
+                    if active_context is not None
+                    else self._fast_block_snapshot(page)
+                )
+                final_button_visible = (
+                    fast_snapshot.get("hasFinalButton", False)
+                    and sum(
+                        1
+                        for enabled in (
+                            fast_snapshot.get("hasPaymentText", False),
+                            fast_snapshot.get("hasStationText", False),
+                            fast_snapshot.get("hasScheduleText", False),
+                            fast_snapshot.get("hasDurationText", False),
+                            fast_snapshot.get("hasBlockCardLike", False),
+                        )
+                        if enabled
+                    ) >= 3
+                    and not fast_snapshot.get("hasSelfieInput", False)
+                    and not fast_snapshot.get("hasSelfieText", False)
+                    and not fast_snapshot.get("hasProcessingText", False)
+                )
+                if final_submit_already_clicked:
+                    self.emit_progress(progress_callback, phase="final_submit", message="botón final visible: click inmediato")
+                elif final_button_visible:
+                    self.emit_progress(progress_callback, phase="final_submit", message="botón final visible: click inmediato")
+                else:
+                    payment, station, schedule, duration, _snapshot_text = self._read_block_details_for_result(
+                        details_context,
+                        page,
+                        progress_callback=progress_callback,
+                        allow_fallback_read=True,
+                    )
+                    self._record_timeline_event(
+                        "block_details_read",
+                        payment=payment,
+                        station=station,
+                        schedule=schedule,
+                        duration=duration,
+                    )
+                    self.emit_progress(
+                        progress_callback,
+                        phase="block_read",
+                        message=(
+                            f"Bloque detectado. Pago: {payment}. Estacion: {station}. "
+                            f"Horario: {schedule}. Duracion: {duration}."
+                        ),
+                    )
+                    self.emit_progress(
+                        progress_callback,
+                        phase="block_read",
+                        message="Datos del bloque guardados para resultado final y process_logs.",
+                    )
+                self.emit_progress(progress_callback, phase="block_read", message=f"Reintentos de selfie: {selfie_retry_count}.")
+                if not final_submit_already_clicked:
+                    final_submit_already_clicked = self._try_detector_fast_click_final(
+                        details_context,
+                        page,
+                        progress_callback,
+                    )
+                    detector_fast_click_done = bool(getattr(self, "_final_submit_done_by_detector", False))
+                    final_submit_already_clicked = self._final_submit_resolved()
+                if final_submit_already_clicked:
+                    payment, station, schedule, duration, _snapshot_text = self._read_block_details_for_result(
+                        details_context,
+                        page,
+                        progress_callback=progress_callback,
+                        allow_fallback_read=False,
+                    )
+                elif not final_submit_already_clicked:
+                    self._submit_final(
+                        details_context,
+                        page,
+                        timeout_ms=min(action_timeout_ms, 1_000),
+                        progress_callback=progress_callback,
+                        session=session,
+                        extension_assisted=extension_engine_requested and session.extension_loaded,
+                        extension_strict=extension_strict,
+                    )
+                    final_submit_already_clicked = self._final_submit_resolved()
+                if final_submit_already_clicked:
+                    payment, station, schedule, duration, _snapshot_text = self._read_block_details_for_result(
+                        details_context,
+                        page,
+                        progress_callback=progress_callback,
+                        allow_fallback_read=False,
+                    )
             click_elapsed_ms = int(
                 ((getattr(self, "_final_submit_fast_clicked_at", 0.0) or monotonic()) - block_ready_at) * 1000
             ) if final_submit_already_clicked else int((monotonic() - block_ready_at) * 1000)
@@ -797,49 +1034,10 @@ class ParipeSite(BaseSite):
                 phase="final_submit",
                 message=f"Tiempo block_read -> click final: {click_elapsed_ms} ms",
             )
-            if final_submit_already_clicked or final_button_visible:
-                payment, station, schedule, duration = self._read_block_details_from_snapshot_text(snapshot_text)
-                if (
-                    not final_submit_already_clicked
-                    and payment == "N/A"
-                    and station == "N/A"
-                    and schedule == "N/A"
-                    and duration == "N/A"
-                ) and not snapshot_selfie_active and not snapshot_processing_active:
-                    try:
-                        self.emit_progress(progress_callback, phase="block_read", message="Leyendo informacion del bloque...")
-                        payment, station, schedule, duration = self._read_block_details(
-                            details_context,
-                            page=page,
-                            progress_callback=progress_callback,
-                        )
-                    except Exception:
-                        pass
-                self.emit_progress(
-                    progress_callback,
-                    phase="block_read",
-                    message=(
-                        f"Bloque detectado. Pago: {payment}. Estacion: {station}. "
-                        f"Horario: {schedule}. Duracion: {duration}."
-                    ),
-                )
-                self.emit_progress(
-                    progress_callback,
-                    phase="block_read",
-                    message="Datos del bloque guardados para resultado final y process_logs.",
-                )
-                self._record_timeline_event(
-                    "block_details_read",
-                    payment=payment,
-                    station=station,
-                    schedule=schedule,
-                    duration=duration,
-                )
             session.capture_extension_debug(page=page, note="final_submit_clicked")
-            self._record_timeline_event("final_button_clicked", url=page.url)
             self.emit_progress(progress_callback, phase="final_submit", message="Boton final He llegado presionado.")
             self.emit_progress(progress_callback, phase="final_result", message="Esperando confirmacion final...")
-            self._mark_phase_timing("final_result_started", url=page.url)
+            self._ensure_final_result_started(page=page)
             result = self._detect_final_result(
                 details_context,
                 page,
@@ -856,10 +1054,48 @@ class ParipeSite(BaseSite):
                 extension_assisted=extension_engine_requested and session.extension_loaded,
                 extension_strict=extension_strict,
             )
-            self._mark_phase_timing("final_result_done", success=result.success, final_status=result.final_status, url=page.url)
+            self._ensure_final_result_done(result=result, page=page)
+            if result.success and bool(getattr(self, "_final_result_already_detected", False)):
+                self._record_timeline_event(
+                    "process_finish_triggered_by_final_result",
+                    success=result.success,
+                    final_status=result.final_status,
+                    url=page.url,
+                )
+                self._record_run_stat(
+                    "process_finish_triggered_by_final_result",
+                    success=result.success,
+                    final_status=result.final_status,
+                    url=page.url,
+                )
+                self._last_process_debug_export = {
+                    "last_url": page.url,
+                    "final_status": result.final_status,
+                    "success": result.success,
+                    "timing_summary": self._build_timing_summary(),
+                    "timing_summary_text": self._build_timing_summary_text(),
+                    "flow_state_detector": self._build_flow_state_detector_export(),
+                }
+                self._mark_phase_timing("process_finished", success=result.success, final_status=result.final_status)
+                self._record_run_stat("process_finished", success=result.success, final_status=result.final_status)
+                self._emit_timing_summary(progress_callback)
+                return result
             session.capture_extension_debug(page=page, note="final_result_detected")
+            self._observe_flow_state(details_context, page, "final_result_detected")
             self._record_timeline_event(
                 "final_result_detected",
+                success=result.success,
+                final_status=result.final_status,
+                url=page.url,
+            )
+            self._record_timeline_event(
+                "process_finish_triggered_by_final_result",
+                success=result.success,
+                final_status=result.final_status,
+                url=page.url,
+            )
+            self._record_run_stat(
+                "process_finish_triggered_by_final_result",
                 success=result.success,
                 final_status=result.final_status,
                 url=page.url,
@@ -870,12 +1106,16 @@ class ParipeSite(BaseSite):
                 "success": result.success,
                 "timing_summary": self._build_timing_summary(),
                 "timing_summary_text": self._build_timing_summary_text(),
+                "flow_state_detector": self._build_flow_state_detector_export(),
             }
             self._mark_phase_timing("process_finished", success=result.success, final_status=result.final_status)
+            self._record_run_stat("process_finished", success=result.success, final_status=result.final_status)
             self._emit_timing_summary(progress_callback)
             return result
         except ParipeFlowError as exc:
+            self._observe_flow_state(self._get_active_flow_context(page) or page, page, f"error:{exc.phase}")
             self._mark_phase_timing("process_finished", success=False, final_status=exc.final_status, phase=exc.phase)
+            self._record_run_stat("process_finished", success=False, final_status=exc.final_status, phase=exc.phase)
             self._emit_timing_summary(progress_callback)
             return SiteExecutionResult(
                 success=False,
@@ -887,7 +1127,9 @@ class ParipeSite(BaseSite):
                 reserved_photo_id=reserved_photo.photo_id if reserved_photo else None,
             )
         except Exception as exc:
+            self._observe_flow_state(self._get_active_flow_context(page) or page, page, "error:unexpected")
             self._mark_phase_timing("process_finished", success=False, final_status="failed", phase="unexpected")
+            self._record_run_stat("process_finished", success=False, final_status="failed", phase="unexpected")
             self._emit_timing_summary(progress_callback)
             return SiteExecutionResult(
                 success=False,
@@ -1416,6 +1658,7 @@ class ParipeSite(BaseSite):
         current_dialog = selfie_dialog
         attempt = 1
         while True:
+            self._raise_if_cancelled()
             self._set_active_flow_context(current_dialog, page=page, source="selfie_attempt")
             if extension_assisted:
                 extension_state = self._extension_state(session, page, note="dispatch_selfie_loop")
@@ -1455,6 +1698,7 @@ class ParipeSite(BaseSite):
                 self.emit_progress(progress_callback, phase="photo_upload", message=f"Reintentando con nueva foto. Intento {attempt_label}.")
             self.emit_progress(progress_callback, phase="photo_upload", message="Modal de selfie detectado. Preparando subida...")
             self._mark_phase_timing("selfie_input_detected", attempt=attempt, url=page.url)
+            self._record_run_stat("selfie_input_detected", attempt=attempt, url=page.url)
             selfie_input_detected_at = monotonic()
             reserved_photo, photo_ready_before_input = self._await_background_photo(
                 prepared_photo,
@@ -1472,20 +1716,30 @@ class ParipeSite(BaseSite):
                     photo_id=reserved_photo.photo_id,
                 )
                 self._mark_phase_timing("photo_upload_started", attempt=attempt, file_name=reserved_photo.original_filename)
+                self._record_run_stat("photo_upload_started", attempt=attempt, file_name=reserved_photo.original_filename)
                 self._record_timeline_event(
+                    "selfie_input_to_upload_ms",
+                    attempt=attempt,
+                    value=int(max(monotonic() - selfie_input_detected_at, 0.0) * 1000),
+                )
+                self._record_run_stat(
                     "selfie_input_to_upload_ms",
                     attempt=attempt,
                     value=int(max(monotonic() - selfie_input_detected_at, 0.0) * 1000),
                 )
                 self._upload_photo(current_dialog, reserved_photo, timeout_ms=action_timeout_ms)
                 self.emit_progress(progress_callback, phase="photo_upload", message="Foto cargada.")
+                self._observe_flow_state(current_dialog, page, "selfie_input_detected")
                 self._mark_phase_timing("photo_upload_done", attempt=attempt, file_name=reserved_photo.original_filename)
+                self._record_run_stat("photo_upload_done", attempt=attempt, file_name=reserved_photo.original_filename)
                 self._record_timeline_event("photo_uploaded", file_name=reserved_photo.original_filename)
                 self.emit_progress(progress_callback, phase="continue_submit", message="Presionando Continuar...")
                 self._click_continue(current_dialog, timeout_ms=action_timeout_ms)
                 continue_clicked_at = monotonic()
                 self._mark_phase_timing("continue_clicked", attempt=attempt, url=page.url)
+                self._record_run_stat("continue_clicked", attempt=attempt, url=page.url)
                 self._record_timeline_event("continue_clicked", url=page.url)
+                self._observe_flow_state(current_dialog, page, "continue_clicked")
                 self.emit_progress(progress_callback, phase="continue_submit", message="Continuar presionado.")
                 resolution_source = "polling tradicional"
                 if extension_assisted:
@@ -1514,6 +1768,7 @@ class ParipeSite(BaseSite):
                     )
                 self.emit_progress(progress_callback, phase="processing_after_continue", message="Esperando validacion de selfie.")
                 self.emit_progress(progress_callback, phase="processing_after_continue", message="Esperando aparicion del bloque.")
+                self._record_run_stat("site_processing_started", attempt=attempt, url=page.url)
                 self._mark_phase_timing("selfie_validation_started", attempt=attempt, url=page.url)
                 self._mark_phase_timing("block_wait_started", attempt=attempt, url=page.url)
                 details_context = self._wait_for_details_dialog(
@@ -1526,8 +1781,13 @@ class ParipeSite(BaseSite):
                     extension_assisted=extension_assisted,
                     extension_strict=extension_strict,
                 )
+                if self._final_submit_resolved():
+                    return details_context, reserved_photo, max(attempt - 1, 0), deepfakescore_activated
+                self._observe_flow_state(details_context, page, "block_detected")
                 self._set_active_flow_context(details_context, page=page, source="block_detected")
                 self._mark_phase_timing("block_detected", attempt=attempt, url=page.url)
+                self._record_run_stat("block_detected", attempt=attempt, url=page.url)
+                self._record_run_stat("block_visual_detected", attempt=attempt, url=page.url, source="block_detected")
                 if attempt >= 2:
                     self.emit_progress(progress_callback, phase="block_read", message="Retry exitoso, bloque detectado.")
                     self.emit_progress(progress_callback, phase="block_read", message="Reenganchando al flujo normal desde retry/selfie hacia block_read.")
@@ -1536,6 +1796,7 @@ class ParipeSite(BaseSite):
                 return details_context, reserved_photo, max(attempt - 1, 0), deepfakescore_activated
             except ParipeFlowError as exc:
                 if exc.final_status == "selfie_retry":
+                    self._observe_flow_state(current_dialog, page, "error:return_to_selfie")
                     self._record_timeline_event("return_to_selfie_detected", url=page.url, message=exc.message)
                     self.emit_progress(progress_callback, phase="photo_upload", message="Retorno a selfie detectado.")
                     if not deepfakescore_activated:
@@ -1591,6 +1852,8 @@ class ParipeSite(BaseSite):
         self._photo_service.consume_photo(reserved_photo.photo_id)
         self._photo_service.delete_local_copy(reserved_photo.local_path)
     def _fast_mark_block_context_from_button(self, page: Page) -> Locator | None:
+        if not hasattr(page, "evaluate") or not hasattr(page, "locator"):
+            return None
         script = """
         ({ finalLabels, continueLabels }) => {
             const normalize = (value) =>
@@ -1726,7 +1989,7 @@ class ParipeSite(BaseSite):
         *,
         progress_callback: ProgressCallback | None,
         timeout_ms: int,
-        continue_clicked_at: float | None,
+        continue_clicked_at: float | None = None,
         session=None,
         extension_assisted: bool = False,
         extension_strict: bool = False,
@@ -1748,12 +2011,16 @@ class ParipeSite(BaseSite):
         last_discard_signature = ""
         grace_reported = False
         loading_reported = False
+        page_url = self._safe_page_url(page)
         self.emit_progress(
             progress_callback,
             phase="processing_after_continue",
             message=f"timing block wait started: timeout={timeout_ms}ms",
         )
         while monotonic() < deadline:
+            self._raise_if_cancelled()
+            if bool(getattr(self, "_final_submit_already_clicked", False)):
+                return self._get_active_flow_context(page) or flow_context
             poll_iteration += 1
             poll_started_at = monotonic()
             extension_phase = "unknown"
@@ -1829,14 +2096,14 @@ class ParipeSite(BaseSite):
                 )
             if snapshot_processing_active and not loading_reported:
                 loading_reported = True
-                self._record_timeline_event("loading_detected", url=page.url)
+                self._record_timeline_event("loading_detected", url=page_url)
                 self.emit_progress(
                     progress_callback,
                     phase="processing_after_continue",
                     message="loading detectado tras Continuar",
                 )
             if fast_snapshot.get("hasSelfieInput", False) and fast_snapshot.get("hasContinueButton", False):
-                self._record_timeline_event("return_to_selfie_detected", url=page.url, source="wait_for_details_dialog")
+                self._record_timeline_event("return_to_selfie_detected", url=page_url, source="wait_for_details_dialog")
                 self.emit_progress(
                     progress_callback,
                     phase="photo_upload",
@@ -1863,6 +2130,8 @@ class ParipeSite(BaseSite):
                 continue
 
             snapshot_context = self._fast_mark_block_context_from_button(page)
+            if bool(getattr(self, "_final_submit_already_clicked", False)):
+                return self._get_active_flow_context(page) or snapshot_context or flow_context
             if snapshot_context is not None:
                 final_button = self._find_button_by_labels(
                     snapshot_context,
@@ -1877,7 +2146,7 @@ class ParipeSite(BaseSite):
                 ):
                     return snapshot_context
 
-                self._mark_phase_timing("block_visual_detected", source="fast_button_context", url=page.url)
+                self._mark_phase_timing("block_visual_detected", source="fast_button_context", url=page_url)
                 self._latest_block_snapshot_text = self._capture_block_snapshot_text(snapshot_context, page)
                 self._set_active_flow_context(snapshot_context, page=page, source="fast_button_context")
                 self.emit_progress(
@@ -1890,9 +2159,13 @@ class ParipeSite(BaseSite):
             resolve_context_started_at = monotonic()
             current_context = self._resolve_current_flow_dialog(page, flow_context)
             self._set_active_flow_context(current_context, page=page, source="wait_for_details_dialog_poll")
+            if bool(getattr(self, "_final_submit_already_clicked", False)):
+                return self._get_active_flow_context(page) or current_context
             resolve_context_elapsed_ms = int((monotonic() - resolve_context_started_at) * 1000)
             resolve_block_started_at = monotonic()
             block_context = self._resolve_block_context(current_context, page) or current_context
+            if bool(getattr(self, "_final_submit_already_clicked", False)):
+                return self._get_active_flow_context(page) or block_context
             resolve_block_elapsed_ms = int((monotonic() - resolve_block_started_at) * 1000)
             # Fast-path seguro: solo avanzamos si el bloque ya muestra el boton
             # final y texto real del bloque en el mismo contexto visible.
@@ -1950,7 +2223,7 @@ class ParipeSite(BaseSite):
                         source="wait_for_details_dialog_fast_iframe_click",
                     ):
                         return block_context
-                    self._mark_phase_timing("block_visual_detected", source="wait_for_details_dialog_poll", url=page.url)
+                    self._mark_phase_timing("block_visual_detected", source="wait_for_details_dialog_poll", url=page_url)
                     self._latest_block_snapshot_text = self._capture_block_snapshot_text(block_context, page)
                     return block_context
             
@@ -2099,7 +2372,7 @@ class ParipeSite(BaseSite):
                     phase="block_read",
                     message="block_read resuelto por fallback tradicional",
                 )
-                self._mark_phase_timing("block_visual_detected", source="wait_for_details_dialog_poll", url=page.url)
+                self._mark_phase_timing("block_visual_detected", source="wait_for_details_dialog_poll", url=page_url)
                 if block_evaluation["residual_reasons"]:
                     self.emit_progress(
                         progress_callback,
@@ -2210,7 +2483,7 @@ class ParipeSite(BaseSite):
                 best_score = score
                 best_context = candidate
         if best_context is not None and not self._looks_like_body_context(best_context):
-            self._active_flow_context = best_context
+            self._set_active_flow_context(best_context, page=page, source="resolve_block_context_best")
         return best_context
 
     def _score_live_dialog(self, dialog: Locator) -> int:
@@ -2706,6 +2979,8 @@ class ParipeSite(BaseSite):
     def _looks_like_duration_text(text: str) -> bool:
         return _DURATION_RE.search(text or "") is not None
     def _find_block_context_snapshot(self, page: Page) -> Locator | None:
+        if not hasattr(page, "locator"):
+            return None
         candidates = page.locator('[role="dialog"][aria-modal="true"], div:has(button:has-text("He llegado"))')
         try:
             count = candidates.count()
@@ -2751,38 +3026,128 @@ class ParipeSite(BaseSite):
         *,
         source: str,
     ) -> bool:
-        if self._looks_like_body_context(context):
-            self._record_timeline_event("dashboard_body_discarded_as_block_context", source=source, url=page.url)
-            self.emit_progress(progress_callback, phase="block_read", message="dashboard/body descartado como contexto de bloque")
-            return False
-        self._latest_block_snapshot_text = self._capture_block_snapshot_text(context, page)
-        self._set_active_flow_context(context, page=page, source=source)
-        self._remember_final_button_candidate(
-            context=context,
-            button=button,
-            page=page,
+        if self._final_submit_resolved():
+            return True
+        clicked = super()._try_fast_click_final_from_flow_context(
+            page,
+            context,
+            progress_callback,
             source=source,
         )
-        self._mark_phase_timing("block_visual_detected", source=source, url=page.url)
-        self._record_timeline_event("block_visual_detected", source=source, url=page.url)
-        self.emit_progress(progress_callback, phase="final_submit", message="bloque detectado por boton final: click inmediato")
-        self._mark_phase_timing("final_click_started", source=source, url=page.url)
-        try:
-            button.click(timeout=400)
-        except Exception:
-            try:
-                button.click(timeout=700, force=True)
-            except Exception:
-                try:
-                    button.evaluate("node => node.click()")
-                except Exception:
-                    return False
-        self._final_submit_already_clicked = True
-        self._final_submit_fast_clicked_at = monotonic()
-        self._mark_phase_timing("final_click_done", source=source, url=page.url)
-        self._record_timeline_event("final_button_clicked", source=source, url=page.url)
-        self.emit_progress(progress_callback, phase="final_submit", message="boton final presionado directamente desde deteccion iframe")
+        if clicked:
+            self._after_final_click_done(page=page)
+        return clicked
+
+    def _detector_fast_click_is_eligible(self, snapshot, *, context: Locator) -> tuple[bool, str]:
+        if snapshot is None:
+            return False, "snapshot_missing"
+        signals = snapshot.signals
+        if snapshot.state != "FINAL_BUTTON_VISIBLE":
+            return False, f"state_{snapshot.state}"
+        if float(snapshot.confidence) < 0.95:
+            return False, "low_confidence"
+        if self._looks_like_body_context(context):
+            return False, "dashboard_body_context"
+        required_signals = (
+            signals.has_final_button,
+            signals.has_payment_text,
+            signals.has_station_text,
+            signals.has_schedule_text,
+            signals.has_duration_text,
+        )
+        if not all(required_signals):
+            return False, "missing_required_signals"
+        return True, "eligible"
+
+    def _try_detector_fast_click_final(
+        self,
+        context: Locator,
+        page: Page,
+        progress_callback: ProgressCallback | None,
+        *,
+        snapshot=None,
+        source: str = "detector_fast_click_probe",
+    ) -> bool:
+        if self._final_submit_resolved():
+            return True
+        snapshot = snapshot or self._observe_flow_state(context, page, source)
+        eligible, reason = self._detector_fast_click_is_eligible(snapshot, context=context)
+        if not eligible:
+            self._record_timeline_event("detector_fast_click_skipped", reason=reason, source=source)
+            self._record_run_stat("detector_fast_click_skipped", reason=reason, source=source)
+            return False
+        self._record_timeline_event(
+            "detector_fast_click_eligible",
+            state=snapshot.state,
+            confidence=snapshot.confidence,
+            source=source,
+        )
+        self._record_run_stat(
+            "detector_fast_click_eligible",
+            state=snapshot.state,
+            confidence=snapshot.confidence,
+            source=source,
+        )
+        self._record_timeline_event("detector_fast_click_started", source=source)
+        self._record_run_stat("detector_fast_click_started", source=source)
+        clicked = self._try_fast_click_final_from_flow_context(
+            page,
+            context,
+            progress_callback,
+            source=source,
+        )
+        if not clicked:
+            self._record_timeline_event("detector_fast_click_skipped", reason="click_failed", source=source)
+            self._record_run_stat("detector_fast_click_skipped", reason="click_failed", source=source)
+            return False
+        self._after_final_click_done(page=page, by_detector=True)
+        self._record_timeline_event("detector_fast_click_done", source=source)
+        self._record_run_stat("detector_fast_click_done", source=source)
         return True
+
+    def _ensure_final_result_started(self, *, page: Page) -> None:
+        if "final_result_started" in self._timing_first_by_event:
+            return
+        page_url = self._safe_page_url(page)
+        self._mark_phase_timing("final_result_started", url=page_url)
+        self._record_run_stat("final_result_started", url=page_url)
+
+    def _ensure_final_result_done(self, *, result: SiteExecutionResult, page: Page) -> None:
+        if "final_result_done" in self._timing_first_by_event:
+            return
+        page_url = self._safe_page_url(page)
+        self._mark_phase_timing("final_result_done", success=result.success, final_status=result.final_status, url=page_url)
+        self._record_run_stat("final_result_done", success=result.success, final_status=result.final_status, url=page_url)
+
+    def _build_final_success_result(
+        self,
+        *,
+        station_name: str,
+        block_price: str,
+        block_time: str,
+        block_duration: str,
+        selfie_retry_count: int,
+        deepfakescore_activated: bool,
+        reserved_photo_id: str | None,
+    ) -> SiteExecutionResult:
+        return SiteExecutionResult(
+            success=True,
+            message=(
+                "Proceso completado correctamente en paripe.io. "
+                f"Pago: {block_price}. Estacion: {station_name}. "
+                f"Horario: {block_time}. Duracion: {block_duration}."
+            ),
+            final_status="success",
+            phase="final_result",
+            station_name=station_name,
+            block_price=block_price,
+            block_time=block_time,
+            block_duration=block_duration,
+            selfie_retry_count=selfie_retry_count,
+            deepfakescore_retries=selfie_retry_count,
+            deepfakescore_activated=deepfakescore_activated,
+            reserved_photo_id=reserved_photo_id,
+        )
         
     def _submit_final(
         self,
@@ -2795,12 +3160,14 @@ class ParipeSite(BaseSite):
         extension_assisted: bool = False,
         extension_strict: bool = False,
     ) -> None:
-        if bool(getattr(self, "_final_submit_already_clicked", False)):
+        if self._final_submit_resolved():
             return
         started_at = monotonic()
         resolution_reported = False
         button_detected_reported = False
-        self._mark_phase_timing("final_click_started", source="_submit_final", url=page.url)
+        page_url = self._safe_page_url(page)
+        self._mark_phase_timing("final_click_started", source="_submit_final", url=page_url)
+        self._record_run_stat("final_click_started", source="_submit_final", url=page_url)
         self.emit_progress(progress_callback, phase="final_submit", message="final_submit timing started")
         snapshot_context = self._find_block_context_snapshot(page)
         if snapshot_context is not None:
@@ -2814,7 +3181,9 @@ class ParipeSite(BaseSite):
                 )
                 self.emit_progress(progress_callback, phase="final_submit", message="snapshot block button found")
                 button.click(timeout=500)
-                self._mark_phase_timing("final_click_done", source="_submit_final_snapshot", url=page.url)
+                self._mark_phase_timing("final_click_done", source="_submit_final_snapshot", url=page_url)
+                self._record_run_stat("final_click_done", source="_submit_final_snapshot", url=page_url)
+                self._after_final_click_done(page=page)
                 return
         if extension_assisted:
             extension_state = self._extension_state(session, page, note="wait_final_submit_ready")
@@ -2880,8 +3249,10 @@ class ParipeSite(BaseSite):
                 else:
                     button.evaluate("node => node.click()")
 
-                self._record_timeline_event("final_button_clicked", source=f"locator_attempt_{attempt}", url=page.url)
-                self._mark_phase_timing("final_click_done", source=f"_submit_final_attempt_{attempt}", url=page.url)
+                self._record_timeline_event("final_button_clicked", source=f"locator_attempt_{attempt}", url=page_url)
+                self._mark_phase_timing("final_click_done", source=f"_submit_final_attempt_{attempt}", url=page_url)
+                self._record_run_stat("final_click_done", source=f"_submit_final_attempt_{attempt}", url=page_url)
+                self._after_final_click_done(page=page)
                 page.wait_for_timeout(500)
 
                 self.emit_progress(
@@ -2928,6 +3299,7 @@ class ParipeSite(BaseSite):
         extension_state = None
         fallback_reason = "phase_unknown"
         while monotonic() < deadline:
+            self._raise_if_cancelled()
             extension_phase = "unknown"
             if extension_assisted:
                 extension_state = self._extension_state(session, page, note="wait_final_result_ready")
@@ -2971,24 +3343,20 @@ class ParipeSite(BaseSite):
                     phase="final_result",
                     message="final_result_ready resuelto por extensión",
                 )
-                return SiteExecutionResult(
-                    success=True,
-                    message=(
-                        "Proceso completado correctamente en paripe.io. "
-                        f"Pago: {block_price}. Estacion: {station_name}. "
-                        f"Horario: {block_time}. Duracion: {block_duration}."
-                    ),
-                    final_status="success",
-                    phase="final_result",
+                self._ensure_final_result_started(page=page)
+                self._final_result_already_detected = True
+                result = self._build_final_success_result(
                     station_name=station_name,
                     block_price=block_price,
                     block_time=block_time,
                     block_duration=block_duration,
                     selfie_retry_count=selfie_retry_count,
-                    deepfakescore_retries=selfie_retry_count,
                     deepfakescore_activated=deepfakescore_activated,
                     reserved_photo_id=reserved_photo_id,
                 )
+                self._record_final_result_flow_state(page=page, source="final_result:extension")
+                self._ensure_final_result_done(result=result, page=page)
+                return result
             success_count = self._count_success_messages(dialog, page)
             if success_count > 0:
                 if extension_strict:
@@ -3014,24 +3382,20 @@ class ParipeSite(BaseSite):
                     phase="final_result",
                     message=f"Confirmacion final detectada. Mensajes de exito encontrados: {success_count}.",
                 )
-                return SiteExecutionResult(
-                    success=True,
-                    message=(
-                        "Proceso completado correctamente en paripe.io. "
-                        f"Pago: {block_price}. Estacion: {station_name}. "
-                        f"Horario: {block_time}. Duracion: {block_duration}."
-                    ),
-                    final_status="success",
-                    phase="final_result",
+                self._ensure_final_result_started(page=page)
+                self._final_result_already_detected = True
+                result = self._build_final_success_result(
                     station_name=station_name,
                     block_price=block_price,
                     block_time=block_time,
                     block_duration=block_duration,
                     selfie_retry_count=selfie_retry_count,
-                    deepfakescore_retries=selfie_retry_count,
                     deepfakescore_activated=deepfakescore_activated,
                     reserved_photo_id=reserved_photo_id,
                 )
+                self._record_final_result_flow_state(page=page, source="final_result:success_markers")
+                self._ensure_final_result_done(result=result, page=page)
+                return result
             body_text = self._safe_normalized_text(page.locator("body").first)
             terminal_state = self._resolve_terminal_state(body_text)
             if terminal_state == "error":
@@ -3047,14 +3411,16 @@ class ParipeSite(BaseSite):
                 )
             if "procesando" in body_text or "validando" in body_text or "cargando" in body_text:
                 last_successful_step = "final_submit"
-            final_button = self._find_final_submit_button(dialog)
-            button_missing = final_button is None
+            button_missing = True
             button_disabled = False
-            if final_button is not None:
-                try:
-                    button_disabled = final_button.is_disabled()
-                except Exception:
-                    button_disabled = False
+            if not bool(getattr(self, "_final_submit_already_clicked", False)):
+                final_button = self._find_final_submit_button(dialog)
+                button_missing = final_button is None
+                if final_button is not None:
+                    try:
+                        button_disabled = final_button.is_disabled()
+                    except Exception:
+                        button_disabled = False
             signature_changed = self._result_signature(dialog, page) != baseline_signature
             if (button_missing or button_disabled) and signature_changed:
                 if inferred_success_since is None:
@@ -3088,24 +3454,20 @@ class ParipeSite(BaseSite):
                         phase="final_result",
                         message="Confirmacion final detectada por cambio de estado del flujo.",
                     )
-                    return SiteExecutionResult(
-                        success=True,
-                        message=(
-                            "Proceso completado correctamente en paripe.io. "
-                            f"Pago: {block_price}. Estacion: {station_name}. "
-                            f"Horario: {block_time}. Duracion: {block_duration}."
-                        ),
-                        final_status="success",
-                        phase="final_result",
+                    self._ensure_final_result_started(page=page)
+                    self._final_result_already_detected = True
+                    result = self._build_final_success_result(
                         station_name=station_name,
                         block_price=block_price,
                         block_time=block_time,
                         block_duration=block_duration,
                         selfie_retry_count=selfie_retry_count,
-                        deepfakescore_retries=selfie_retry_count,
                         deepfakescore_activated=deepfakescore_activated,
                         reserved_photo_id=reserved_photo_id,
                     )
+                    self._record_final_result_flow_state(page=page, source="final_result:dom_change")
+                    self._ensure_final_result_done(result=result, page=page)
+                    return result
             else:
                 inferred_success_since = None
             page.wait_for_timeout(self._SHORT_WAIT_MS)
@@ -3146,7 +3508,7 @@ class ParipeSite(BaseSite):
                 best_score = score
                 best_context = candidate
         if best_context is not None:
-            self._active_flow_context = best_context
+            self._set_active_flow_context(best_context, page=page, source="resolve_block_context_snapshot")
         return best_context
 
     def _context_looks_like_block(self, context: Locator) -> bool:
@@ -3248,19 +3610,18 @@ class ParipeSite(BaseSite):
 
     def _read_block_details_from_snapshot_text(self, snapshot_text: str) -> tuple[str, str, str, str]:
         pairs = self._extract_text_pairs(snapshot_text)
-        payment = self._pick_detail_value(pairs, ("pago", "precio", "price", "valor", "monto"))
-        station = self._pick_detail_value(pairs, ("estacion", "station", "estacao"))
-        schedule = self._extract_time_range(snapshot_text) or self._pick_detail_value(
+        payment, station, schedule, duration = self._parse_block_snapshot_details(
             pairs,
-            ("horario", "fecha", "schedule", "hora", "turno", "slot"),
+            snapshot_text,
+            payment_aliases=("pago", "precio", "price", "valor", "monto"),
+            station_aliases=("estacion", "station", "estacao"),
+            schedule_aliases=("horario", "fecha", "schedule", "hora", "turno", "slot"),
+            duration_aliases=("duracion", "duration", "tiempo estimado"),
         )
-        if schedule != "N/A":
-            schedule = schedule.replace("(He llegado)", "").strip()
         if schedule == "N/A":
             text_candidates = self._extract_schedule_candidates(snapshot_text)
             if text_candidates:
                 schedule = text_candidates[0]
-        duration = self._read_duration(pairs, full_text=snapshot_text)
         return payment, station, schedule, duration
 
     def _read_duration(self, pairs: dict[str, str], *, full_text: str) -> str:
@@ -3312,6 +3673,8 @@ class ParipeSite(BaseSite):
         page: Page | None,
         source: str,
     ) -> dict[str, object]:
+        if self._final_submit_resolved() or bool(getattr(self, "_final_result_already_detected", False)):
+            return dict(self._last_final_button_candidate or {})
         context_text_preview = self._safe_text(context)[:500]
         context_is_block = self._context_has_block_details(context)
         block_signals = self._block_signal_snapshot(context)
@@ -3437,6 +3800,8 @@ class ParipeSite(BaseSite):
         )
 
     def _find_final_submit_button(self, context: Locator, page: Page | None = None) -> Locator | None:
+        if self._final_submit_resolved():
+            return None
         if not self._context_has_block_details(context):
             return None
         button = self._find_button_by_labels(context, self._selectors.final_submit_texts)
@@ -3450,6 +3815,8 @@ class ParipeSite(BaseSite):
         return button
 
     def _count_final_submit_buttons(self, context: Locator) -> int:
+        if self._final_submit_resolved():
+            return 0
         return 1 if self._find_final_submit_button(context) is not None else 0
 
     def _count_success_messages(self, dialog: Locator, page: Page) -> int:
@@ -3532,6 +3899,19 @@ class ParipeSite(BaseSite):
         )
 
     def _fast_context_snapshot(self, context: Locator) -> dict[str, bool]:
+        if not hasattr(context, "locator"):
+            return {
+                "hasFinalButton": False,
+                "hasPaymentText": False,
+                "hasStationText": False,
+                "hasScheduleText": False,
+                "hasDurationText": False,
+                "hasBlockCardLike": False,
+                "hasSelfieInput": False,
+                "hasContinueButton": False,
+                "hasProcessingText": False,
+                "hasSelfieText": False,
+            }
         text = self._safe_normalized_text(context)
         return {
             "hasFinalButton": self._find_button_by_labels(context, self._selectors.final_submit_texts) is not None,

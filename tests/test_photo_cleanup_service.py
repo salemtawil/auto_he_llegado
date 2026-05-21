@@ -1,0 +1,356 @@
+from __future__ import annotations
+
+from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
+
+from config.settings import Settings
+from core.enums import PhotoStatus
+from core.models import PhotoRecord
+from services.photo_cleanup_service import PhotoCleanupService
+
+
+def build_settings(tmp_path) -> Settings:
+    return Settings(
+        app_name="test-app",
+        app_env="test",
+        log_level="INFO",
+        project_root=tmp_path,
+        local_data_dir=tmp_path / "local_data",
+        supabase_url="https://example.supabase.co",
+        supabase_key="test-key",
+        supabase_storage_bucket="photo-pool",
+        supabase_photos_table="photos",
+        supabase_process_logs_table="process_logs",
+        supabase_timeout_seconds=30,
+        admin_access_password="secret",
+        use_chrome_profile_extension=False,
+        chrome_profile_dir=None,
+        chrome_executable_path=None,
+    )
+
+
+def make_photo_record(
+    *,
+    photo_id: str,
+    status: PhotoStatus,
+    storage_path: str = "available/sample.jpg",
+    cleanup_error: str | None = None,
+    reserved_at: datetime | None = None,
+    consumed_at: datetime | None = None,
+) -> PhotoRecord:
+    return PhotoRecord(
+        id=photo_id,
+        original_filename="sample.jpg",
+        storage_path=storage_path,
+        status=status,
+        cleanup_error=cleanup_error,
+        reserved_at=reserved_at,
+        consumed_at=consumed_at,
+    )
+
+
+class StubClientProvider:
+    def __init__(self, *, remove_error: Exception | None = None) -> None:
+        self.remove_error = remove_error
+        self.remove_calls: list[tuple[str, str]] = []
+
+    def remove_file(self, *, bucket_name: str, storage_path: str) -> None:
+        self.remove_calls.append((bucket_name, storage_path))
+        if self.remove_error is not None:
+            raise self.remove_error
+
+
+class StubPhotosRepository:
+    def __init__(
+        self,
+        *,
+        consumed_records=None,
+        stale_reserved_records=None,
+        reconcile_records=None,
+        mark_storage_cleaned_error: Exception | None = None,
+    ) -> None:
+        self.consumed_records = list(consumed_records or [])
+        self.stale_reserved_records = list(stale_reserved_records or [])
+        self.reconcile_records = list(reconcile_records or [])
+        self.mark_storage_cleaned_error = mark_storage_cleaned_error
+        self.mark_cleanup_error_calls: list[tuple[str, str]] = []
+        self.mark_storage_cleaned_calls: list[tuple[str, str, str]] = []
+        self.mark_stale_reserved_cleaned_calls: list[tuple[str, str, str]] = []
+        self.list_consumed_pending_cleanup_calls: list[bool] = []
+        self.list_stale_reserved_pending_cleanup_calls: list[tuple[int, bool]] = []
+        self.list_reconcile_calls: list[int] = []
+        self.count_reconcile_errors_calls = 0
+
+    def count_by_status(self, _status):
+        return 0
+
+    def count_consumed_pending_cleanup(self):
+        return 0
+
+    def count_consumed_cleanable_pending_cleanup(self):
+        return 0
+
+    def count_stale_reserved_pending_cleanup(self, *, older_than_hours: int):
+        return 0
+
+    def count_stale_reserved_cleanable_pending_cleanup(self, *, older_than_hours: int):
+        return 0
+
+    def count_storage_cleaned(self, _status=None):
+        return 0
+
+    def count_cleanup_errors(self):
+        return len(self.reconcile_records)
+
+    def count_db_error_after_storage_delete(self):
+        self.count_reconcile_errors_calls += 1
+        return len(self.reconcile_records)
+
+    def list_consumed_pending_cleanup(self, limit: int = 100, *, exclude_cleanup_errors: bool = False):
+        self.list_consumed_pending_cleanup_calls.append(exclude_cleanup_errors)
+        records = self.consumed_records
+        if exclude_cleanup_errors:
+            records = [record for record in records if record.cleanup_error is None]
+        return records[:limit]
+
+    def list_stale_reserved_pending_cleanup(
+        self,
+        *,
+        older_than_hours: int,
+        limit: int = 100,
+        exclude_cleanup_errors: bool = False,
+    ):
+        self.list_stale_reserved_pending_cleanup_calls.append((older_than_hours, exclude_cleanup_errors))
+        records = self.stale_reserved_records
+        if exclude_cleanup_errors:
+            records = [record for record in records if record.cleanup_error is None]
+        return records[:limit]
+
+    def list_db_error_after_storage_delete(self, *, limit: int = 100):
+        self.list_reconcile_calls.append(limit)
+        return self.reconcile_records[:limit]
+
+    def mark_storage_cleaned(self, photo_id: str, *, reason: str, cleaned_by: str):
+        self.mark_storage_cleaned_calls.append((photo_id, reason, cleaned_by))
+        if self.mark_storage_cleaned_error is not None:
+            raise self.mark_storage_cleaned_error
+        return SimpleNamespace(id=photo_id)
+
+    def mark_stale_reserved_cleaned(self, photo_id: str, *, reason: str, cleaned_by: str):
+        self.mark_stale_reserved_cleaned_calls.append((photo_id, reason, cleaned_by))
+        if self.mark_storage_cleaned_error is not None:
+            raise self.mark_storage_cleaned_error
+        return SimpleNamespace(id=photo_id)
+
+    def mark_cleanup_error(self, photo_id: str, *, error: str):
+        self.mark_cleanup_error_calls.append((photo_id, error))
+        return SimpleNamespace(id=photo_id)
+
+
+def test_cleanup_marks_recoverable_db_error_after_storage_delete(tmp_path) -> None:
+    record = make_photo_record(
+        photo_id="550e8400-e29b-41d4-a716-446655440000",
+        status=PhotoStatus.CONSUMED,
+        consumed_at=datetime.now(timezone.utc),
+    )
+    repository = StubPhotosRepository(
+        consumed_records=[record],
+        mark_storage_cleaned_error=RuntimeError("db write failed"),
+    )
+    service = PhotoCleanupService(
+        photos_repository=repository,
+        client_provider=StubClientProvider(),
+        settings=build_settings(tmp_path),
+    )
+
+    result = service.cleanup_consumed_photos(limit=1)
+
+    assert result.error_count == 1
+    assert result.items[0]["result"] == "db_error_after_storage_delete"
+    assert "Storage borrado, pero fallo update DB" in result.items[0]["message"]
+    assert repository.mark_cleanup_error_calls == [
+        (
+            "550e8400-e29b-41d4-a716-446655440000",
+            "Storage borrado, pero fallo update DB: db write failed",
+        )
+    ]
+
+
+def test_reconcile_db_error_after_storage_delete_marks_consumed_photo_as_cleaned(tmp_path) -> None:
+    record = make_photo_record(
+        photo_id="550e8400-e29b-41d4-a716-446655440000",
+        status=PhotoStatus.CONSUMED,
+        cleanup_error="Storage borrado, pero fallo update DB: db write failed",
+        consumed_at=datetime.now(timezone.utc),
+    )
+    repository = StubPhotosRepository(reconcile_records=[record])
+    client_provider = StubClientProvider(remove_error=RuntimeError("Object not found"))
+    service = PhotoCleanupService(
+        photos_repository=repository,
+        client_provider=client_provider,
+        settings=build_settings(tmp_path),
+    )
+
+    result = service.reconcile_db_error_after_storage_delete(limit=1)
+
+    assert result.matched_count == 1
+    assert result.processed_count == 1
+    assert result.reconciled_count == 1
+    assert result.failed_count == 0
+    assert result.skipped_count == 0
+    assert result.deleted_count == 1
+    assert result.error_count == 0
+    assert result.remaining_count == 0
+    assert result.stop_reason == "completed"
+    assert result.recent_errors == []
+    assert result.last_error is None
+    assert result.items[0]["result"] == "reconciled"
+    assert repository.mark_storage_cleaned_calls == [
+        (
+            "550e8400-e29b-41d4-a716-446655440000",
+            "consumed_cleanup",
+            "admin_cleanup",
+        )
+    ]
+    assert client_provider.remove_calls == [("photo-pool", "available/sample.jpg")]
+
+
+def test_reconcile_db_error_after_storage_delete_marks_stale_reserved_photo_as_discarded(tmp_path) -> None:
+    record = make_photo_record(
+        photo_id="550e8400-e29b-41d4-a716-446655440001",
+        status=PhotoStatus.RESERVED,
+        cleanup_error="Storage borrado, pero fallo update DB: db write failed",
+        reserved_at=datetime.now(timezone.utc) - timedelta(hours=5),
+    )
+    repository = StubPhotosRepository(reconcile_records=[record])
+    service = PhotoCleanupService(
+        photos_repository=repository,
+        client_provider=StubClientProvider(remove_error=RuntimeError("404 missing object")),
+        settings=build_settings(tmp_path),
+    )
+
+    result = service.reconcile_db_error_after_storage_delete(limit=1)
+
+    assert result.deleted_count == 1
+    assert result.reconciled_count == 1
+    assert repository.mark_stale_reserved_cleaned_calls == [
+        (
+            "550e8400-e29b-41d4-a716-446655440001",
+            "stale_reserved_cleanup",
+            "admin_cleanup",
+        )
+    ]
+
+
+def test_explicit_reconciliation_is_not_blocked_by_exclude_cleanup_errors(tmp_path) -> None:
+    record = make_photo_record(
+        photo_id="550e8400-e29b-41d4-a716-446655440002",
+        status=PhotoStatus.CONSUMED,
+        cleanup_error="Storage borrado, pero fallo update DB: db write failed",
+        consumed_at=datetime.now(timezone.utc),
+    )
+    repository = StubPhotosRepository(
+        consumed_records=[record],
+        reconcile_records=[record],
+    )
+    service = PhotoCleanupService(
+        photos_repository=repository,
+        client_provider=StubClientProvider(remove_error=RuntimeError("Object not found")),
+        settings=build_settings(tmp_path),
+    )
+
+    batch_result = service.cleanup_consumed_photos(limit=1, exclude_cleanup_errors=True)
+    reconcile_result = service.reconcile_db_error_after_storage_delete(limit=1)
+
+    assert batch_result.matched_count == 0
+    assert repository.list_consumed_pending_cleanup_calls == [True]
+    assert reconcile_result.deleted_count == 1
+    assert repository.list_reconcile_calls == [1]
+
+
+def test_count_db_error_after_storage_delete_returns_repository_count(tmp_path) -> None:
+    record = make_photo_record(
+        photo_id="550e8400-e29b-41d4-a716-446655440010",
+        status=PhotoStatus.CONSUMED,
+        cleanup_error="Storage borrado, pero fallo update DB: db write failed",
+        consumed_at=datetime.now(timezone.utc),
+    )
+    repository = StubPhotosRepository(reconcile_records=[record])
+    service = PhotoCleanupService(
+        photos_repository=repository,
+        client_provider=StubClientProvider(),
+        settings=build_settings(tmp_path),
+    )
+
+    count = service.count_db_error_after_storage_delete()
+
+    assert count == 1
+    assert repository.count_reconcile_errors_calls == 1
+
+
+def test_reconcile_db_error_after_storage_delete_returns_complete_counters(tmp_path) -> None:
+    consumed = make_photo_record(
+        photo_id="550e8400-e29b-41d4-a716-446655440011",
+        status=PhotoStatus.CONSUMED,
+        cleanup_error="Storage borrado, pero fallo update DB: db write failed",
+        consumed_at=datetime.now(timezone.utc),
+    )
+    missing_path = make_photo_record(
+        photo_id="550e8400-e29b-41d4-a716-446655440012",
+        status=PhotoStatus.CONSUMED,
+        storage_path="available/missing.jpg",
+        cleanup_error="Storage borrado, pero fallo update DB: db write failed",
+        consumed_at=datetime.now(timezone.utc),
+    ).model_copy(update={"storage_path": ""})
+    unsupported_status = make_photo_record(
+        photo_id="550e8400-e29b-41d4-a716-446655440013",
+        status=PhotoStatus.AVAILABLE,
+        cleanup_error="Storage borrado, pero fallo update DB: db write failed",
+    )
+    repository = StubPhotosRepository(reconcile_records=[consumed, missing_path, unsupported_status])
+    service = PhotoCleanupService(
+        photos_repository=repository,
+        client_provider=StubClientProvider(remove_error=RuntimeError("Object not found")),
+        settings=build_settings(tmp_path),
+    )
+
+    result = service.reconcile_db_error_after_storage_delete(limit=3)
+
+    assert result.matched_count == 3
+    assert result.processed_count == 3
+    assert result.reconciled_count == 1
+    assert result.failed_count == 0
+    assert result.skipped_count == 2
+    assert result.remaining_count == 2
+    assert result.stop_reason == "limit_reached"
+    assert result.last_error is None
+    assert result.recent_errors == []
+
+
+def test_reconcile_db_error_after_storage_delete_reports_remaining_and_recent_errors(tmp_path) -> None:
+    consumed = make_photo_record(
+        photo_id="550e8400-e29b-41d4-a716-446655440014",
+        status=PhotoStatus.CONSUMED,
+        cleanup_error="Storage borrado, pero fallo update DB: db write failed",
+        consumed_at=datetime.now(timezone.utc),
+    )
+    repository = StubPhotosRepository(
+        reconcile_records=[consumed],
+        mark_storage_cleaned_error=RuntimeError("db write failed again"),
+    )
+    service = PhotoCleanupService(
+        photos_repository=repository,
+        client_provider=StubClientProvider(remove_error=RuntimeError("Object not found")),
+        settings=build_settings(tmp_path),
+    )
+
+    result = service.reconcile_db_error_after_storage_delete(limit=1)
+
+    assert result.processed_count == 1
+    assert result.reconciled_count == 0
+    assert result.failed_count == 1
+    assert result.skipped_count == 0
+    assert result.remaining_count == 1
+    assert result.stop_reason == "has_failures"
+    assert result.last_error == "Storage borrado, pero fallo update DB: db write failed again"
+    assert result.recent_errors == ["Storage borrado, pero fallo update DB: db write failed again"]

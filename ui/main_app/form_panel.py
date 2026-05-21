@@ -3,7 +3,7 @@ from __future__ import annotations
 import customtkinter as ctk
 
 from core.validators import strip_phone_number
-from ui.theme import ACCENT, ACCENT_SOFT, BORDER, CARD_BG, INPUT_BG, TEXT_MUTED, TEXT_PRIMARY, TEXT_SOFT
+from ui.theme import ACCENT, ACCENT_HOVER, ACCENT_SOFT, BORDER, CARD_ALT_BG, CARD_BG, INPUT_BG, TEXT_MUTED, TEXT_PRIMARY, TEXT_SOFT
 
 
 class FormPanel(ctk.CTkFrame):
@@ -13,7 +13,7 @@ class FormPanel(ctk.CTkFrame):
     DEFAULT_ACTION = "He llegado"
 
     def __init__(self, master, **kwargs) -> None:
-        super().__init__(master, fg_color=CARD_BG, corner_radius=22, border_width=1, border_color=BORDER, **kwargs)
+        super().__init__(master, fg_color=CARD_BG, corner_radius=18, border_width=1, border_color=BORDER, **kwargs)
         self.grid_columnconfigure(0, weight=1)
         self._phone_var = ctk.StringVar()
         self._is_syncing_phone = False
@@ -22,43 +22,33 @@ class FormPanel(ctk.CTkFrame):
         self._field_frames: list[ctk.CTkFrame] = []
 
         self.header_row = ctk.CTkFrame(self, fg_color="transparent")
-        self.header_row.grid(row=0, column=0, padx=14, pady=(10, 4), sticky="ew")
+        self.header_row.grid(row=0, column=0, padx=10, pady=(6, 1), sticky="ew")
         self.header_row.grid_columnconfigure(0, weight=1)
 
         self.header_text = ctk.CTkFrame(self.header_row, fg_color="transparent")
         self.header_text.grid(row=0, column=0, sticky="w")
 
-        badge = ctk.CTkLabel(
-            self.header_text,
-            text="Panel operativo",
-            corner_radius=999,
-            fg_color=ACCENT_SOFT,
-            text_color=ACCENT,
-            padx=8,
-            pady=3,
-            font=ctk.CTkFont(size=9, weight="bold"),
-        )
-        badge.grid(row=0, column=0, sticky="w")
-
         title = ctk.CTkLabel(
             self.header_text,
-            text="Datos principales",
-            font=ctk.CTkFont(family="Georgia", size=16, weight="bold"),
+            text="Datos del proceso",
+            font=ctk.CTkFont(size=10, weight="bold"),
             text_color=TEXT_PRIMARY,
         )
-        title.grid(row=1, column=0, pady=(5, 0), sticky="w")
-
-        self.actions_row = ctk.CTkFrame(self.header_row, fg_color="transparent")
-        self.actions_row.grid(row=0, column=1, rowspan=2, padx=(12, 0), sticky="e")
+        title.grid(row=0, column=0, pady=(0, 0), sticky="w")
 
         self.fields_wrap = ctk.CTkFrame(self, fg_color="transparent")
-        self.fields_wrap.grid(row=1, column=0, padx=14, pady=(0, 8), sticky="ew")
+        self.fields_wrap.grid(row=1, column=0, padx=10, pady=(0, 4), sticky="ew")
+
+        self.actions_row = ctk.CTkFrame(self, fg_color="transparent")
+        self.actions_row.grid(row=2, column=0, padx=10, pady=(0, 8), sticky="ew")
 
         self.page_menu = self._build_option_field("Pagina", self.PAGE_OPTIONS)
         self.action_menu = self._build_option_field("Accion", self.ACTION_OPTIONS)
         self.phone_entry = self._build_entry_field("Telefono", "+58 4121234567", textvariable=self._phone_var)
         self.phone_entry.bind("<FocusOut>", self._handle_phone_focus_out)
         self.password_entry = self._build_entry_field("Contrasena", "Contrasena")
+
+        self._style_controls()
 
         self.set_compact_layout(False)
         self.reset_defaults()
@@ -72,11 +62,11 @@ class FormPanel(ctk.CTkFrame):
             frame,
             values=values,
             corner_radius=10,
-            height=32,
+            height=28,
             dynamic_resizing=False,
             anchor="w",
-            font=ctk.CTkFont(size=12, weight="bold"),
-            dropdown_font=ctk.CTkFont(size=11),
+            font=ctk.CTkFont(size=10, weight="bold"),
+            dropdown_font=ctk.CTkFont(size=10),
         )
         menu.grid(row=1, column=0, sticky="ew")
         return menu
@@ -87,12 +77,12 @@ class FormPanel(ctk.CTkFrame):
             frame,
             placeholder_text=placeholder,
             corner_radius=10,
-            height=32,
+            height=28,
             border_width=1,
             border_color=BORDER,
             textvariable=textvariable,
             fg_color=INPUT_BG,
-            font=ctk.CTkFont(size=12),
+            font=ctk.CTkFont(size=10),
         )
         entry.grid(row=1, column=0, sticky="ew")
         return entry
@@ -103,10 +93,10 @@ class FormPanel(ctk.CTkFrame):
         ctk.CTkLabel(
             frame,
             text=label,
-            font=ctk.CTkFont(size=11, weight="bold"),
+            font=ctk.CTkFont(size=9, weight="bold"),
             text_color=TEXT_PRIMARY,
             anchor="w",
-        ).grid(row=0, column=0, pady=(0, 3), sticky="w")
+        ).grid(row=0, column=0, pady=(0, 1), sticky="w")
         self._field_frames.append(frame)
         return frame
 
@@ -135,12 +125,25 @@ class FormPanel(ctk.CTkFrame):
                 (self._field_frames[2], 1, 0),
                 (self._field_frames[3], 1, 1),
             )
-            action_padx = (16, 0)
+            action_padx = (0, 0)
         for frame in self._field_frames:
             frame.grid_forget()
         for frame, row, column in placements:
-            frame.grid(row=row, column=column, padx=(0, 10) if column == 0 else 0, pady=(0, 7), sticky="ew")
-        self.actions_row.grid_configure(padx=action_padx, pady=0, sticky="e" if not compact else "ew")
+            frame.grid(row=row, column=column, padx=(0, 8) if column == 0 else 0, pady=(0, 4), sticky="ew")
+        self.actions_row.grid_configure(padx=action_padx, pady=(0, 8), sticky="ew")
+
+    def _style_controls(self) -> None:
+        controls = (self.page_menu, self.action_menu)
+        for control in controls:
+            control.configure(
+                fg_color=INPUT_BG,
+                button_color=ACCENT,
+                button_hover_color=ACCENT_HOVER,
+                text_color=TEXT_PRIMARY,
+                dropdown_fg_color=CARD_ALT_BG,
+                dropdown_hover_color=ACCENT_SOFT,
+                dropdown_text_color=TEXT_PRIMARY,
+            )
 
     def get_form_data(self) -> dict[str, str]:
         self._apply_phone_cleanup()

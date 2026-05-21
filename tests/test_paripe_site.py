@@ -370,6 +370,478 @@ def test_paripe_final_result_falls_back_to_polling_when_extension_signal_is_not_
     assert recorded_sources == ["extension_fallback_polling"]
 
 
+def test_paripe_final_result_sets_already_detected_flag_on_success() -> None:
+    site = ParipeSite()
+    site._count_success_messages = lambda *_args, **_kwargs: 1  # type: ignore[method-assign]  # noqa: SLF001
+    site._record_engine_resolution = lambda *_args, **_kwargs: None  # type: ignore[method-assign]  # noqa: SLF001
+    page = SimpleNamespace(
+        locator=lambda _selector: SimpleNamespace(first=object()),
+        wait_for_timeout=lambda _ms: None,
+        url="https://paripe.io/app",
+    )
+
+    result = site._detect_final_result(  # noqa: SLF001
+        object(),
+        page,
+        timeout_ms=5_000,
+        station_name="Estacion Demo",
+        block_price="$93",
+        block_time="05:00 am - 08:00 am",
+        block_duration="3 horas",
+        selfie_retry_count=0,
+        deepfakescore_activated=False,
+        reserved_photo_id="photo-1",
+        progress_callback=None,
+        session=None,
+        extension_assisted=False,
+    )
+
+    assert result.success is True
+    assert site._final_result_already_detected is True  # noqa: SLF001
+
+
+def test_paripe_detect_final_result_skips_final_button_lookup_after_click_done() -> None:
+    site = ParipeSite()
+    page = SimpleNamespace(
+        locator=lambda _selector: SimpleNamespace(first=object()),
+        wait_for_timeout=lambda _ms: None,
+        url="https://paripe.io/app",
+    )
+    site._final_submit_already_clicked = True  # noqa: SLF001
+    site._count_success_messages = lambda *_args, **_kwargs: 1  # type: ignore[method-assign]  # noqa: SLF001
+    site._record_engine_resolution = lambda *_args, **_kwargs: None  # type: ignore[method-assign]  # noqa: SLF001
+    site._find_final_submit_button = lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("No debe buscar el boton final despues de final_click_done"))  # type: ignore[method-assign]  # noqa: SLF001
+
+    result = site._detect_final_result(  # noqa: SLF001
+        object(),
+        page,
+        timeout_ms=5_000,
+        station_name="Estacion Demo",
+        block_price="$93",
+        block_time="05:00 am - 08:00 am",
+        block_duration="3 horas",
+        selfie_retry_count=0,
+        deepfakescore_activated=False,
+        reserved_photo_id="photo-1",
+        progress_callback=None,
+        session=None,
+        extension_assisted=False,
+    )
+
+    assert result.success is True
+
+
+def test_paripe_detector_fast_click_requires_high_confidence_and_full_signals() -> None:
+    site = ParipeSite()
+    snapshot = SimpleNamespace(
+        state="FINAL_BUTTON_VISIBLE",
+        confidence=0.96,
+        signals=SimpleNamespace(
+            has_final_button=True,
+            has_payment_text=True,
+            has_station_text=True,
+            has_schedule_text=True,
+            has_duration_text=True,
+        ),
+    )
+    site._observe_flow_state = lambda *_args, **_kwargs: snapshot  # type: ignore[method-assign]  # noqa: SLF001
+    site._looks_like_body_context = lambda _context: False  # type: ignore[method-assign]  # noqa: SLF001
+    site._try_fast_click_final_from_flow_context = lambda *_args, **_kwargs: True  # type: ignore[method-assign]  # noqa: SLF001
+
+    clicked = site._try_detector_fast_click_final(object(), object(), None)  # type: ignore[arg-type]  # noqa: SLF001
+
+    assert clicked is True
+    assert site._final_submit_already_clicked is True  # noqa: SLF001
+    assert site._final_submit_done_by_detector is True  # noqa: SLF001
+    assert site._final_submit_fast_clicked_at is not None  # noqa: SLF001
+
+
+def test_paripe_detector_fast_click_rejects_dashboard_like_context() -> None:
+    site = ParipeSite()
+    snapshot = SimpleNamespace(
+        state="FINAL_BUTTON_VISIBLE",
+        confidence=0.96,
+        signals=SimpleNamespace(
+            has_final_button=True,
+            has_payment_text=True,
+            has_station_text=True,
+            has_schedule_text=True,
+            has_duration_text=True,
+        ),
+    )
+    site._observe_flow_state = lambda *_args, **_kwargs: snapshot  # type: ignore[method-assign]  # noqa: SLF001
+    site._looks_like_body_context = lambda _context: True  # type: ignore[method-assign]  # noqa: SLF001
+    site._try_fast_click_final_from_flow_context = lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("No debe hacer fast click en dashboard"))  # type: ignore[method-assign]  # noqa: SLF001
+
+    clicked = site._try_detector_fast_click_final(object(), object(), None)  # type: ignore[arg-type]  # noqa: SLF001
+
+    assert clicked is False
+
+
+def test_paripe_set_active_flow_context_triggers_detector_fast_click_on_block_sources() -> None:
+    site = ParipeSite()
+    snapshot = SimpleNamespace(state="FINAL_BUTTON_VISIBLE", confidence=0.96, signals=SimpleNamespace())
+    triggered_sources: list[str] = []
+    site._looks_like_body_context = lambda _context: False  # type: ignore[method-assign]  # noqa: SLF001
+    site._describe_live_dialog = lambda _context: "dialog"  # type: ignore[method-assign]  # noqa: SLF001
+    site._safe_text = lambda _context: "Pago Estacion Horario Duracion He llegado"  # type: ignore[method-assign]  # noqa: SLF001
+    site._observe_flow_state = lambda *_args, **_kwargs: snapshot  # type: ignore[method-assign]  # noqa: SLF001
+    site._record_timeline_event = lambda *_args, **_kwargs: None  # type: ignore[method-assign]  # noqa: SLF001
+    site._record_run_stat = lambda *_args, **_kwargs: None  # type: ignore[method-assign]  # noqa: SLF001
+    site._try_detector_fast_click_final = lambda _context, _page, progress_callback=None, *, snapshot=None, source="": triggered_sources.append(source) or False  # type: ignore[method-assign]  # noqa: SLF001
+    fake_page = SimpleNamespace(url="https://paripe.io/app")
+    fake_context = SimpleNamespace(page=fake_page)
+
+    site._set_active_flow_context(fake_context, page=fake_page, source="resolve_block_context_best")  # noqa: SLF001
+
+    assert triggered_sources == ["active_flow_context:resolve_block_context_best"]
+
+
+def test_paripe_detector_fast_click_skips_when_block_signals_are_incomplete() -> None:
+    site = ParipeSite()
+    snapshot = SimpleNamespace(
+        state="FINAL_BUTTON_VISIBLE",
+        confidence=0.96,
+        signals=SimpleNamespace(
+            has_final_button=True,
+            has_payment_text=True,
+            has_station_text=True,
+            has_schedule_text=True,
+            has_duration_text=False,
+        ),
+    )
+    site._observe_flow_state = lambda *_args, **_kwargs: snapshot  # type: ignore[method-assign]  # noqa: SLF001
+    site._looks_like_body_context = lambda _context: False  # type: ignore[method-assign]  # noqa: SLF001
+    site._try_fast_click_final_from_flow_context = lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("No debe clickear sin senales completas"))  # type: ignore[method-assign]  # noqa: SLF001
+
+    clicked = site._try_detector_fast_click_final(object(), object(), None)  # type: ignore[arg-type]  # noqa: SLF001
+
+    assert clicked is False
+
+
+def test_paripe_submit_final_short_circuits_after_detector_fast_click() -> None:
+    site = ParipeSite()
+    site._final_submit_already_clicked = True  # noqa: SLF001
+    site._final_submit_done_by_detector = True  # noqa: SLF001
+    site._find_final_submit_button = lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("No debe buscar el boton final despues del detector fast-click"))  # type: ignore[method-assign]  # noqa: SLF001
+
+    site._submit_final(  # noqa: SLF001
+        object(),  # type: ignore[arg-type]
+        object(),  # type: ignore[arg-type]
+        timeout_ms=5_000,
+        progress_callback=None,
+        session=None,
+        extension_assisted=False,
+        extension_strict=False,
+    )
+
+
+def test_paripe_wait_for_details_dialog_returns_immediately_after_fast_click() -> None:
+    site = ParipeSite()
+    flow_context = object()
+    page = SimpleNamespace(url="https://paripe.io/app")
+    site._final_submit_already_clicked = True  # noqa: SLF001
+    site._get_active_flow_context = lambda _page: None  # type: ignore[method-assign]  # noqa: SLF001
+    site._set_active_flow_context = lambda _context, *, page=None, source="": flow_context  # type: ignore[method-assign]  # noqa: SLF001
+    page.wait_for_timeout = lambda _ms: (_ for _ in ()).throw(AssertionError("No debe seguir esperando despues del fast-click"))
+
+    result = site._wait_for_details_dialog(  # noqa: SLF001
+        flow_context=flow_context,  # type: ignore[arg-type]
+        page=page,  # type: ignore[arg-type]
+        progress_callback=None,
+        timeout_ms=5_000,
+    )
+
+    assert result is flow_context
+
+
+def test_paripe_timeline_suppresses_detector_noise_after_final_click() -> None:
+    site = ParipeSite()
+    site._final_submit_already_clicked = True  # noqa: SLF001
+
+    site._record_timeline_event("flow_detector_state", state="FINAL_BUTTON_VISIBLE")
+    site._record_timeline_event("flow_context_detected", source="wait_for_details_dialog_poll")
+    site._record_timeline_event("final_button_candidate_found", source="_find_final_submit_button")
+    site._record_timeline_event("final_button_clicked", source="_submit_final")
+    site._record_timeline_event("flow_detector_state", state="FINAL_RESULT")
+
+    assert [entry["event"] for entry in site._process_timeline] == ["flow_detector_state"]  # noqa: SLF001
+    assert site._process_timeline[0]["state"] == "FINAL_RESULT"  # noqa: SLF001
+
+
+def test_paripe_read_block_details_from_snapshot_text_preserves_details_for_fast_click() -> None:
+    site = ParipeSite()
+
+    payment, station, schedule, duration = site._read_block_details_from_snapshot_text(  # noqa: SLF001
+        "\n".join(
+            (
+                "Pago",
+                "$93",
+                "Estacion",
+                "Bronx NY (VNY2) - Sub Same-Day",
+                "Horario",
+                "05:00 am - 08:00 am",
+                "Duracion",
+                "3 horas",
+            )
+        )
+    )
+
+    assert payment == "$93"
+    assert station == "Bronx NY (VNY2) - Sub Same-Day"
+    assert schedule == "05:00 am - 08:00 am"
+    assert duration == "3 horas"
+
+
+def test_paripe_complete_selfie_until_block_skips_block_detected_when_fast_click_already_happened() -> None:
+    site = ParipeSite()
+    details_context = object()
+    page = SimpleNamespace(url="https://paripe.io/app")
+    reserved_photo = SimpleNamespace(photo_id="photo-1", original_filename="selfie.jpg", local_path="c:/tmp/selfie.jpg")
+
+    site._set_active_flow_context = lambda *_args, **_kwargs: None  # type: ignore[method-assign]  # noqa: SLF001
+    site._await_background_photo = lambda *_args, **_kwargs: (reserved_photo, True)  # type: ignore[method-assign]  # noqa: SLF001
+    site._upload_photo = lambda *_args, **_kwargs: None  # type: ignore[method-assign]  # noqa: SLF001
+    site._click_continue = lambda *_args, **_kwargs: None  # type: ignore[method-assign]  # noqa: SLF001
+    site._record_engine_resolution = lambda *_args, **_kwargs: None  # type: ignore[method-assign]  # noqa: SLF001
+    site._record_timeline_event = lambda *_args, **_kwargs: None  # type: ignore[method-assign]  # noqa: SLF001
+    site._observe_flow_state = lambda _context, _page, source: (_ for _ in ()).throw(AssertionError("No debe marcar block_detected despues del fast-click")) if source == "block_detected" else None  # type: ignore[method-assign]  # noqa: SLF001
+
+    def fake_wait_for_details_dialog(*_args, **_kwargs):
+        site._mark_final_submit_clicked(by_detector=True)  # noqa: SLF001
+        return details_context
+
+    site._wait_for_details_dialog = fake_wait_for_details_dialog  # type: ignore[method-assign]  # noqa: SLF001
+
+    result = site._complete_selfie_until_block(  # noqa: SLF001
+        page=page,  # type: ignore[arg-type]
+        selfie_dialog=object(),  # type: ignore[arg-type]
+        progress_callback=None,
+        action_timeout_ms=5_000,
+        block_wait_ms=5_000,
+        max_selfie_retries=2,
+        session=None,
+        extension_assisted=False,
+        extension_strict=False,
+    )
+
+    assert result == (details_context, reserved_photo, 0, False)
+
+
+def test_paripe_execute_pipeline_fast_click_skips_old_block_route() -> None:
+    site = ParipeSite()
+    page = SimpleNamespace(
+        url="https://paripe.io/app",
+        locator=lambda _selector: SimpleNamespace(first=object()),
+        wait_for_timeout=lambda _ms: None,
+    )
+    session = SimpleNamespace(
+        page=page,
+        extension_loaded=False,
+        clear_auth_state=lambda **_kwargs: {},
+        capture_extension_debug=lambda **_kwargs: None,
+        close=lambda: None,
+    )
+    reserved_photo = SimpleNamespace(photo_id="photo-1", original_filename="selfie.jpg", local_path="c:/tmp/selfie.jpg")
+    site._browser_manager = SimpleNamespace(open_clean_session=lambda **_kwargs: session)  # type: ignore[assignment]
+    site._photo_service = SimpleNamespace(
+        validate_atomic_reservation_support=lambda: None,
+        consume_photo=lambda _photo_id: None,
+        delete_local_copy=lambda _path: None,
+    )
+    site._use_extension_engine = lambda *_args, **_kwargs: False  # type: ignore[method-assign]  # noqa: SLF001
+    site._open_login = lambda *_args, **_kwargs: None  # type: ignore[method-assign]  # noqa: SLF001
+    site._perform_login = lambda *_args, **_kwargs: None  # type: ignore[method-assign]  # noqa: SLF001
+    site._start_background_photo_preparation = lambda **_kwargs: None  # type: ignore[method-assign]  # noqa: SLF001
+    site._wait_for_photo_phase = lambda *_args, **_kwargs: object()  # type: ignore[method-assign]  # noqa: SLF001
+    site._set_active_flow_context = lambda *_args, **_kwargs: None  # type: ignore[method-assign]  # noqa: SLF001
+    site._emit_timing_summary = lambda *_args, **_kwargs: None  # type: ignore[method-assign]  # noqa: SLF001
+    site._click_initial_action = lambda *_args, **_kwargs: None  # type: ignore[method-assign]  # noqa: SLF001
+
+    def fake_complete_selfie_until_block(*_args, **_kwargs):
+        site._latest_block_snapshot_text = "\n".join(
+            ("Pago", "$93", "Estacion", "Bronx NY (VNY2)", "Horario", "05:00 am - 08:00 am", "Duracion", "3 horas")
+        )
+        site._mark_phase_timing("final_click_done", source="detector")  # noqa: SLF001
+        site._after_final_click_done(page=page, by_detector=True)  # noqa: SLF001
+        site._record_timeline_event("detector_fast_click_done", source="test")
+        return object(), reserved_photo, 0, False
+
+    site._complete_selfie_until_block = fake_complete_selfie_until_block  # type: ignore[method-assign]  # noqa: SLF001
+
+    def fake_detect_final_result(*_args, **_kwargs):
+        assert "final_result_started" in site._timing_first_by_event  # noqa: SLF001
+        site._final_result_already_detected = True  # noqa: SLF001
+        site._record_final_result_flow_state(page=page, source="test_final_result")  # noqa: SLF001
+        return SiteExecutionResult(success=True, message="ok", final_status="success", phase="final_result")
+
+    site._detect_final_result = fake_detect_final_result  # type: ignore[method-assign]  # noqa: SLF001
+    site._submit_final = lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("No debe ejecutar _submit_final en fast-click"))  # type: ignore[method-assign]  # noqa: SLF001
+    site._read_block_details = lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("No debe leer bloque pesado despues del fast-click"))  # type: ignore[method-assign]  # noqa: SLF001
+
+    result = site._execute_pipeline(  # noqa: SLF001
+        _request(),
+        local_config=_local_config(),
+        progress_callback=None,
+    )
+
+    timeline_events = [entry["event"] for entry in site._process_timeline]  # noqa: SLF001
+
+    assert result.success is True
+    assert "block_read_ready" not in timeline_events
+    assert "block_details_read" not in timeline_events
+    assert "block_detected" not in timeline_events
+    assert "block_visual_detected" not in timeline_events
+
+
+def test_paripe_execute_pipeline_skips_old_block_route_after_non_detector_final_click_done() -> None:
+    site = ParipeSite()
+    page = SimpleNamespace(
+        url="https://paripe.io/app",
+        locator=lambda _selector: SimpleNamespace(first=object()),
+        wait_for_timeout=lambda _ms: None,
+    )
+    session = SimpleNamespace(
+        page=page,
+        extension_loaded=False,
+        clear_auth_state=lambda **_kwargs: {},
+        capture_extension_debug=lambda **_kwargs: None,
+        close=lambda: None,
+    )
+    reserved_photo = SimpleNamespace(photo_id="photo-1", original_filename="selfie.jpg", local_path="c:/tmp/selfie.jpg")
+    site._browser_manager = SimpleNamespace(open_clean_session=lambda **_kwargs: session)  # type: ignore[assignment]
+    site._photo_service = SimpleNamespace(
+        validate_atomic_reservation_support=lambda: None,
+        consume_photo=lambda _photo_id: None,
+        delete_local_copy=lambda _path: None,
+    )
+    site._use_extension_engine = lambda *_args, **_kwargs: False  # type: ignore[method-assign]  # noqa: SLF001
+    site._open_login = lambda *_args, **_kwargs: None  # type: ignore[method-assign]  # noqa: SLF001
+    site._perform_login = lambda *_args, **_kwargs: None  # type: ignore[method-assign]  # noqa: SLF001
+    site._start_background_photo_preparation = lambda **_kwargs: None  # type: ignore[method-assign]  # noqa: SLF001
+    site._wait_for_photo_phase = lambda *_args, **_kwargs: object()  # type: ignore[method-assign]  # noqa: SLF001
+    site._set_active_flow_context = lambda *_args, **_kwargs: None  # type: ignore[method-assign]  # noqa: SLF001
+    site._emit_timing_summary = lambda *_args, **_kwargs: None  # type: ignore[method-assign]  # noqa: SLF001
+    site._click_initial_action = lambda *_args, **_kwargs: None  # type: ignore[method-assign]  # noqa: SLF001
+
+    def fake_complete_selfie_until_block(*_args, **_kwargs):
+        site._latest_block_snapshot_text = "\n".join(
+            ("Pago", "$93", "Estacion", "Bronx NY (VNY2)", "Horario", "05:00 am - 08:00 am", "Duracion", "3 horas")
+        )
+        site._mark_phase_timing("final_click_done", source="wait_for_details_dialog_fast_iframe_click")  # noqa: SLF001
+        site._after_final_click_done(page=page)  # noqa: SLF001
+        return object(), reserved_photo, 0, False
+
+    site._complete_selfie_until_block = fake_complete_selfie_until_block  # type: ignore[method-assign]  # noqa: SLF001
+
+    def fake_detect_final_result(*_args, **_kwargs):
+        assert "final_result_started" in site._timing_first_by_event  # noqa: SLF001
+        site._final_result_already_detected = True  # noqa: SLF001
+        site._record_final_result_flow_state(page=page, source="test_final_result")  # noqa: SLF001
+        return SiteExecutionResult(success=True, message="ok", final_status="success", phase="final_result")
+
+    site._detect_final_result = fake_detect_final_result  # type: ignore[method-assign]  # noqa: SLF001
+    site._submit_final = lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("No debe ejecutar _submit_final despues de final_click_done"))  # type: ignore[method-assign]  # noqa: SLF001
+    site._read_block_details = lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("No debe leer bloque pesado despues de final_click_done"))  # type: ignore[method-assign]  # noqa: SLF001
+
+    result = site._execute_pipeline(  # noqa: SLF001
+        _request(),
+        local_config=_local_config(),
+        progress_callback=None,
+    )
+
+    timeline_events = [entry["event"] for entry in site._process_timeline]  # noqa: SLF001
+
+    assert result.success is True
+    assert "block_read_ready" not in timeline_events
+    assert "block_details_read" not in timeline_events
+    assert "block_detected" not in timeline_events
+    assert "block_visual_detected" not in timeline_events
+
+
+def test_paripe_execute_pipeline_keeps_traditional_fallback_when_fast_click_does_not_apply() -> None:
+    site = ParipeSite()
+    page = SimpleNamespace(
+        url="https://paripe.io/app",
+        locator=lambda _selector: SimpleNamespace(first=object()),
+        wait_for_timeout=lambda _ms: None,
+    )
+    session = SimpleNamespace(
+        page=page,
+        extension_loaded=False,
+        clear_auth_state=lambda **_kwargs: {},
+        capture_extension_debug=lambda **_kwargs: None,
+        close=lambda: None,
+    )
+    reserved_photo = SimpleNamespace(photo_id="photo-1", original_filename="selfie.jpg", local_path="c:/tmp/selfie.jpg")
+    site._browser_manager = SimpleNamespace(open_clean_session=lambda **_kwargs: session)  # type: ignore[assignment]
+    site._photo_service = SimpleNamespace(
+        validate_atomic_reservation_support=lambda: None,
+        consume_photo=lambda _photo_id: None,
+        delete_local_copy=lambda _path: None,
+    )
+    site._use_extension_engine = lambda *_args, **_kwargs: False  # type: ignore[method-assign]  # noqa: SLF001
+    site._open_login = lambda *_args, **_kwargs: None  # type: ignore[method-assign]  # noqa: SLF001
+    site._perform_login = lambda *_args, **_kwargs: None  # type: ignore[method-assign]  # noqa: SLF001
+    site._start_background_photo_preparation = lambda **_kwargs: None  # type: ignore[method-assign]  # noqa: SLF001
+    site._wait_for_photo_phase = lambda *_args, **_kwargs: object()  # type: ignore[method-assign]  # noqa: SLF001
+    site._emit_timing_summary = lambda *_args, **_kwargs: None  # type: ignore[method-assign]  # noqa: SLF001
+    site._click_initial_action = lambda *_args, **_kwargs: None  # type: ignore[method-assign]  # noqa: SLF001
+    site._set_active_flow_context = lambda *_args, **_kwargs: None  # type: ignore[method-assign]  # noqa: SLF001
+    site._observe_flow_state = lambda *_args, **_kwargs: None  # type: ignore[method-assign]  # noqa: SLF001
+    site._fast_block_snapshot = lambda _page: {  # type: ignore[method-assign]  # noqa: SLF001
+        "hasFinalButton": False,
+        "hasPaymentText": False,
+        "hasStationText": False,
+        "hasScheduleText": False,
+        "hasDurationText": False,
+        "hasBlockCardLike": False,
+        "hasSelfieInput": False,
+        "hasSelfieText": False,
+        "hasContinueButton": False,
+        "hasProcessingText": False,
+    }
+
+    def fake_complete_selfie_until_block(*_args, **_kwargs):
+        site._latest_block_snapshot_text = "\n".join(
+            ("Pago", "$93", "Estacion", "Bronx NY (VNY2)", "Horario", "05:00 am - 08:00 am", "Duracion", "3 horas")
+        )
+        return object(), reserved_photo, 0, False
+
+    site._complete_selfie_until_block = fake_complete_selfie_until_block  # type: ignore[method-assign]  # noqa: SLF001
+    site._try_detector_fast_click_final = lambda *_args, **_kwargs: False  # type: ignore[method-assign]  # noqa: SLF001
+    site._read_block_details = lambda *_args, **_kwargs: ("$93", "Bronx NY (VNY2)", "05:00 am - 08:00 am", "3 horas")  # type: ignore[method-assign]  # noqa: SLF001
+
+    submit_calls: list[str] = []
+
+    def fake_submit_final(*_args, **_kwargs):
+        submit_calls.append("submit")
+        site._mark_phase_timing("final_click_done", source="_submit_final")  # noqa: SLF001
+        site._after_final_click_done(page=page)  # noqa: SLF001
+
+    site._submit_final = fake_submit_final  # type: ignore[method-assign]  # noqa: SLF001
+
+    def fake_detect_final_result(*_args, **_kwargs):
+        site._final_result_already_detected = True  # noqa: SLF001
+        site._record_final_result_flow_state(page=page, source="test_final_result")  # noqa: SLF001
+        return SiteExecutionResult(success=True, message="ok", final_status="success", phase="final_result")
+
+    site._detect_final_result = fake_detect_final_result  # type: ignore[method-assign]  # noqa: SLF001
+
+    result = site._execute_pipeline(  # noqa: SLF001
+        _request(),
+        local_config=_local_config(),
+        progress_callback=None,
+    )
+
+    timeline_events = [entry["event"] for entry in site._process_timeline]  # noqa: SLF001
+
+    assert result.success is True
+    assert submit_calls == ["submit"]
+    assert "block_read_ready" in timeline_events
+    assert "block_details_read" in timeline_events
+
+
 def test_paripe_block_read_uses_extension_engine_signal_when_available() -> None:
     site = ParipeSite()
     progress_events: list[tuple[str, str]] = []

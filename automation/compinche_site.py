@@ -13,6 +13,7 @@ import unicodedata
 from automation.base_site import BaseSite, ProgressCallback
 from automation.browser_manager import BrowserManager
 from automation.engines.extension import ExtensionFlowEngine, ExtensionPhaseDecider
+from automation.flow_context import ActiveFlowContext, resolve_live_flow_context
 from core.models import LocalConfig, ProcessExecutionRequest, ReservedPhoto, SiteExecutionResult
 from services.process_photo_service import ProcessPhotoService
 from playwright.sync_api import Locator
@@ -186,6 +187,15 @@ class CompincheSite(BaseSite):
         self._timing_first_by_event: dict[str, dict[str, object]] = {}
         self._timing_lock = threading.Lock()
         self._last_process_debug_export: dict[str, object] = {}
+        self._active_flow_context: ActiveFlowContext | None = None
+        self._final_submit_already_clicked = False
+        self._final_submit_fast_clicked_at = None
+        self._latest_block_snapshot_text = ""
+
+    def clone_for_run(self) -> CompincheSite:
+        return CompincheSite(
+            selectors=self._selectors,
+        )
 
     def _reset_process_debug_state(self) -> None:
         self._process_timeline = []
@@ -194,6 +204,11 @@ class CompincheSite(BaseSite):
         self._timing_last_event_at = None
         self._timing_first_by_event = {}
         self._last_process_debug_export = {}
+        self._active_flow_context = None
+        self._final_submit_already_clicked = False
+        self._final_submit_fast_clicked_at = None
+        self._latest_block_snapshot_text = ""
+        self._reset_flow_state_detector_debug()
 
     def _record_timeline_event(self, event: str, **payload: object) -> None:
         self._process_timeline.append(
@@ -253,14 +268,17 @@ class CompincheSite(BaseSite):
         return f"{value:.1f}s"
 
     def _build_timing_summary(self) -> dict[str, str]:
+        block_detected_event = "block_visual_detected" if "block_visual_detected" in self._timing_first_by_event else "block_detected"
         summary = {
             "total": self._format_timing_value(self._timing_delta("process_started", "process_finished")),
             "login": self._format_timing_value(self._timing_delta("login_started", "login_done")),
             "photo_prepare": self._format_timing_value(self._timing_delta("photo_prepare_started", "photo_prepare_done")),
-            "selfie_validation": self._format_timing_value(self._timing_delta("selfie_validation_started", "block_detected")),
-            "block_wait": self._format_timing_value(self._timing_delta("block_wait_started", "block_detected")),
-            "final_click": self._format_timing_value(self._timing_delta("final_click_started", "final_click_done")),
-            "final_result": self._format_timing_value(self._timing_delta("final_result_started", "final_result_done")),
+            "validacion_sitio": self._format_timing_value(self._timing_delta("continue_clicked", block_detected_event)),
+            "bloqueclick": self._format_timing_value(self._timing_delta(block_detected_event, "final_click_done")),
+            "final_result": self._format_timing_value(
+                self._timing_delta("final_click_done", "final_result_done")
+                or self._timing_delta("final_result_started", "final_result_done")
+            ),
         }
         return {key: value for key, value in summary.items() if value is not None}
 
@@ -269,14 +287,13 @@ class CompincheSite(BaseSite):
         parts: list[str] = []
         label_map = {
             "login": "login",
-            "photo_prepare": "foto",
-            "selfie_validation": "selfie",
-            "block_wait": "bloque",
-            "final_click": "final",
-            "final_result": "resultado",
+            "photo_prepare": "foto prep",
+            "validacion_sitio": "validacion sitio",
+            "bloqueclick": "bloqueclick",
+            "final_result": "resultado final",
             "total": "total",
         }
-        for key in ("login", "photo_prepare", "selfie_validation", "block_wait", "final_click", "final_result", "total"):
+        for key in ("login", "photo_prepare", "validacion_sitio", "bloqueclick", "final_result", "total"):
             value = summary.get(key)
             if value:
                 parts.append(f"{label_map[key]} {value}")
@@ -288,14 +305,17 @@ class CompincheSite(BaseSite):
             self.emit_progress(progress_callback, phase="timing", message=summary)
 
     def export_process_debug_state(self) -> dict[str, object]:
-        return {
+        payload = {
             "site": self.site_name,
             "timeline": [dict(item) for item in self._process_timeline],
             "phase_timings": [dict(item) for item in self._phase_timings],
             "timing_summary": self._build_timing_summary(),
             "timing_summary_text": self._build_timing_summary_text(),
             "last_process_debug_export": dict(self._last_process_debug_export),
+            "flow_state_detector": self._build_flow_state_detector_export(),
         }
+        payload.update(self._build_common_run_stats_payload())
+        return payload
 
     def _start_background_photo_preparation(
         self,
@@ -304,8 +324,11 @@ class CompincheSite(BaseSite):
         progress_callback: ProgressCallback | None,
     ) -> BackgroundPhotoPreparation:
         preparation = BackgroundPhotoPreparation(process_id=process_id)
+        self._mark_phase_timing("photo_prepare_future_created", process_id=process_id)
+        self._record_run_stat("photo_prepare_future_created", process_id=process_id)
         self._mark_phase_timing("photo_prepare_started", process_id=process_id, source="background")
-        self.emit_progress(progress_callback, phase="photo_prepare", message="preparando foto en background")
+        self._record_run_stat("photo_prepare_started", process_id=process_id, source="background")
+        self.emit_progress(progress_callback, phase="photo_prepare", message="preparando foto en background tras login")
 
         def worker() -> None:
             try:
@@ -315,8 +338,16 @@ class CompincheSite(BaseSite):
                     process_id=process_id,
                     photo_id=preparation.reserved_photo.photo_id if preparation.reserved_photo else None,
                 )
+                self._record_run_stat(
+                    "photo_prepare_done",
+                    process_id=process_id,
+                    photo_id=preparation.reserved_photo.photo_id if preparation.reserved_photo else None,
+                )
+                self.emit_progress(progress_callback, phase="photo_prepare", message="foto preparada antes del input selfie")
             except Exception as exc:
                 preparation.error = exc
+                self._mark_phase_timing("photo_prepare_failed", process_id=process_id, error=str(exc))
+                self._record_run_stat("photo_prepare_failed", process_id=process_id, error=str(exc))
             finally:
                 preparation.ready_event.set()
 
@@ -331,23 +362,37 @@ class CompincheSite(BaseSite):
         process_id: str | None,
     ) -> ReservedPhoto:
         if preparation is None:
-            self.emit_progress(progress_callback, phase="photo_prepare", message="esperando foto reservada")
+            self.emit_progress(progress_callback, phase="photo_prepare", message="photo_prepare_future_missing_at_selfie_input")
+            self._record_timeline_event("photo_ready_before_input", ready=False, process_id=process_id)
+            self._record_run_stat("photo_prepare_future_missing_at_selfie_input", process_id=process_id)
+            self._mark_phase_timing("photo_future_wait_started", process_id=process_id, fallback=True)
+            self._record_run_stat("photo_future_wait_started", process_id=process_id, fallback=True)
             reserved_photo = self._photo_service.reserve_photo(process_id=process_id)
+            self._mark_phase_timing("photo_future_wait_done", process_id=process_id, fallback=True)
             self._mark_phase_timing("photo_prepare_done", process_id=process_id, photo_id=reserved_photo.photo_id)
-            self.emit_progress(progress_callback, phase="photo_prepare", message="foto reservada usada en selfie")
+            self._record_run_stat("photo_future_wait_done", process_id=process_id, fallback=True)
+            self._record_run_stat("photo_prepare_done", process_id=process_id, photo_id=reserved_photo.photo_id)
             return reserved_photo
 
         if preparation.ready_event.is_set():
             self.emit_progress(progress_callback, phase="photo_prepare", message="foto preparada antes del input selfie")
+            self._record_timeline_event("photo_ready_before_input", ready=True, process_id=process_id)
+            self._record_run_stat("photo_ready_before_input", process_id=process_id, ready=True)
         else:
-            self.emit_progress(progress_callback, phase="photo_prepare", message="esperando foto reservada")
+            self.emit_progress(progress_callback, phase="photo_prepare", message="esperando future de foto existente")
+            self._record_timeline_event("photo_ready_before_input", ready=False, process_id=process_id)
+            self._record_run_stat("photo_ready_before_input", process_id=process_id, ready=False)
+            self._mark_phase_timing("photo_future_wait_started", process_id=process_id)
+            self._record_run_stat("photo_future_wait_started", process_id=process_id)
             preparation.ready_event.wait()
+            self._mark_phase_timing("photo_future_wait_done", process_id=process_id)
+            self._record_run_stat("photo_future_wait_done", process_id=process_id)
         if preparation.error is not None:
             raise preparation.error
         if preparation.reserved_photo is None:
             raise RuntimeError("La preparación de foto en background terminó sin una foto reservada.")
         preparation.consumed = True
-        self.emit_progress(progress_callback, phase="photo_prepare", message="foto reservada usada en selfie")
+        self.emit_progress(progress_callback, phase="photo_prepare", message="input selfie detectado: usando foto ya preparada")
         return preparation.reserved_photo
 
     def _discard_background_photo(self, preparation: BackgroundPhotoPreparation | None) -> None:
@@ -364,6 +409,80 @@ class CompincheSite(BaseSite):
             self._photo_service.delete_local_copy(reserved_photo.local_path)
         except Exception:
             pass
+
+    def _looks_like_body_context(self, root: Page | Frame | Locator) -> bool:
+        if not isinstance(root, Locator):
+            return False
+        try:
+            return str(root.evaluate("node => (node.tagName || '').toLowerCase()") or "").strip().lower() == "body"
+        except Exception:
+            return False
+
+    def _set_active_flow_context(
+        self,
+        context: Page | Frame | Locator | None,
+        *,
+        page: Page | None,
+        source: str,
+    ) -> Page | Frame | Locator | None:
+        if context is None:
+            return None
+        if self._looks_like_body_context(context):
+            self._record_timeline_event("dashboard_body_discarded_as_flow_context", source=source)
+            return None
+        current_page = page or (context.page if isinstance(context, Locator) else context.page if hasattr(context, "page") else None)
+        if current_page is None:
+            return context
+        self._active_flow_context = self._build_active_flow_context(
+            page=current_page,
+            root=context,
+            source=source,
+            stage="flow",
+        )
+        self._record_run_stat("flow_context_detected", source=source, page_url=self._safe_page_url(current_page))
+        self._observe_flow_state(context, page, f"active_flow_context:{source}")
+        return context
+
+    def _get_active_flow_context(
+        self,
+        page: Page,
+        *,
+        fallback_root: Page | Frame | Locator | None = None,
+    ) -> Page | Frame | Locator | None:
+        active_context = self._active_flow_context
+        page_url = self._safe_page_url(page)
+        if active_context is not None and active_context.is_valid():
+            return active_context.root
+        if not hasattr(page, "locator") and active_context is not None:
+            return active_context.root
+        if active_context is not None:
+            self._record_run_stat("flow_context_lost", url=page_url)
+            self._record_timeline_event("flow_context_lost", url=page_url)
+        self._active_flow_context = None
+        reacquired = resolve_live_flow_context(
+            page,
+            candidates=[
+                (fallback_root, "fallback_root_reacquired"),
+                (self._find_any_live_flow_frame(page), "live_flow_frame_reacquired"),
+            ],
+            stage="reacquired",
+        )
+        if reacquired is None:
+            return None
+        self._active_flow_context = reacquired
+        self._record_run_stat("flow_context_reacquired", source=reacquired.source, url=page_url)
+        self._record_timeline_event("flow_context_reacquired", source=reacquired.source, url=page_url)
+        return reacquired.root
+
+    def _context_has_block_details(self, root: Page | Frame | Locator) -> bool:
+        normalized_text = self._normalized_root_text(root)
+        return self._root_looks_like_block(normalized_text, root)
+
+    def _capture_block_snapshot_text(self, root: Page | Frame | Locator, page: Page) -> str:
+        if self._looks_like_body_context(root):
+            self.emit_progress(None, phase="block_read", message="dashboard/body descartado como contexto principal")
+            return ""
+        return self._safe_root_text(root)
 
     def _get_supported_action_specs(self) -> tuple[CompincheActionSpec, ...]:
         return (
@@ -471,20 +590,27 @@ class CompincheSite(BaseSite):
     def _execute_pipeline(self, request: ProcessExecutionRequest, *, local_config: LocalConfig, progress_callback: ProgressCallback | None) -> SiteExecutionResult:
         self._reset_process_debug_state()
         self._mark_phase_timing("process_started", process_id=getattr(request, "process_id", None))
+        self._record_run_stat("process_started", process_id=getattr(request, "process_id", None))
         self._photo_service.validate_atomic_reservation_support()
         extension_engine_requested = self._use_extension_engine(local_config, request)
         process_id = getattr(request, "process_id", None)
         self._mark_phase_timing("browser_open_started", engine="extension" if extension_engine_requested else "traditional")
+        self._record_run_stat("browser_open_started", engine="extension" if extension_engine_requested else "traditional")
         session = self._browser_manager.open_clean_session(
             keep_open=local_config.keep_browser_open,
             enable_extension=extension_engine_requested,
             extension_overlay=local_config.browser_extension_overlay,
         )
         self._mark_phase_timing("browser_open_done", extension_loaded=session.extension_loaded)
+        self._record_run_stat("browser_open_done", extension_loaded=session.extension_loaded)
         reserved_photo: ReservedPhoto | None = None
         prepared_photo: BackgroundPhotoPreparation | None = None
         selfie_retry_count = 0
         deepfakescore_activated = False
+        self._final_submit_already_clicked = False
+        self._final_submit_fast_clicked_at = None
+        self._latest_block_snapshot_text = ""
+        self._active_flow_context = None
         page = session.page
         page_timeout_ms = max(local_config.page_timeout_seconds, 1) * 1000
         action_timeout_ms = max(local_config.action_timeout_seconds, 1) * 1000
@@ -525,6 +651,7 @@ class CompincheSite(BaseSite):
                 )
             self.emit_progress(progress_callback, phase="login", message="Abriendo compinche.io/login y esperando solo el formulario minimo...")
             self._mark_phase_timing("login_started", url=self._ENTRY_URL)
+            self._record_run_stat("login_started", url=self._ENTRY_URL)
             self._open_login(page, timeout_ms=max(page_timeout_ms, self._LOGIN_TIMEOUT_MS))
             cleanup_report = session.clear_auth_state(page=page)
             self._record_timeline_event("session_state_cleared", **cleanup_report)
@@ -536,9 +663,11 @@ class CompincheSite(BaseSite):
             session.capture_extension_debug(page=page, note="login_completed")
             if login_result is not None:
                 self._mark_phase_timing("process_finished", success=login_result.success, final_status=login_result.final_status, phase=login_result.phase)
+                self._record_run_stat("process_finished", success=login_result.success, final_status=login_result.final_status, phase=login_result.phase)
                 self._emit_timing_summary(progress_callback)
                 return login_result
             self._mark_phase_timing("login_done", url=page.url)
+            self._record_run_stat("login_done", url=page.url)
             self.emit_progress(
                 progress_callback,
                 phase="account_selection",
@@ -551,8 +680,10 @@ class CompincheSite(BaseSite):
             self.emit_progress(progress_callback, phase="initial_action", message=f"Resolviendo la accion inicial '{action_spec.ui_name}' segun idioma y estructura...")
             frame_count_before_action = len(page.frames)
             self._mark_phase_timing("initial_action_started", action=action_spec.ui_name)
+            self._record_run_stat("initial_action_started", action=action_spec.ui_name)
             self._click_action_card(page, action_spec)
             self._mark_phase_timing("initial_action_clicked", action=action_spec.ui_name, url=page.url)
+            self._record_run_stat("initial_action_clicked", action=action_spec.ui_name, url=page.url)
             session.capture_extension_debug(page=page, note="initial_action_clicked")
             self.emit_progress(progress_callback, phase="initial_action", message="Accion inicial presionada.")
             self.emit_progress(progress_callback, phase="iframe_entry", message="Esperando carga del flujo He llegado dentro del iframe...")
@@ -566,9 +697,13 @@ class CompincheSite(BaseSite):
                 extension_assisted=extension_engine_requested and session.extension_loaded,
             )
             self._mark_phase_timing("iframe_detected", source="flow_root", url=page.url)
+            self._record_run_stat("iframe_detected", source="flow_root", url=page.url)
             session.capture_extension_debug(page=page, note="iframe_flow_detected")
             primary_flow_root = self._resolve_primary_flow_root(page, flow_root)
+            self._set_active_flow_context(primary_flow_root, page=page, source="flow_root_detected")
             self.emit_progress(progress_callback, phase="iframe_entry", message=flow_root.description)
+            self.emit_progress(progress_callback, phase="iframe_entry", message="contexto activo del flujo detectado")
+            self.emit_progress(progress_callback, phase="iframe_entry", message="leyendo solo contexto activo del flujo")
             if flow_root.is_iframe:
                 self.emit_progress(progress_callback, phase="iframe_entry", message="Iframe He llegado detectado.")
                 self.emit_progress(progress_callback, phase="iframe_entry", message="Iframe He llegado seleccionado como contexto principal del flujo.")
@@ -583,6 +718,7 @@ class CompincheSite(BaseSite):
             )
             if no_block_message is not None:
                 self._mark_phase_timing("process_finished", success=False, final_status="no_block", phase="block_check")
+                self._record_run_stat("process_finished", success=False, final_status="no_block", phase="block_check")
                 self._emit_timing_summary(progress_callback)
                 return SiteExecutionResult(success=False, message=no_block_message, final_status="no_block", phase="block_check")
             self.emit_progress(progress_callback, phase="iframe_entry", message="Flujo embebido disponible.")
@@ -599,14 +735,17 @@ class CompincheSite(BaseSite):
                 extension_assisted=extension_engine_requested and session.extension_loaded,
             )
             self._mark_phase_timing("process_finished", success=result.success, final_status=result.final_status, phase=result.phase)
+            self._record_run_stat("process_finished", success=result.success, final_status=result.final_status, phase=result.phase)
             self._emit_timing_summary(progress_callback)
             return result
         except CompincheFlowError as exc:
             self._mark_phase_timing("process_finished", success=False, final_status=exc.final_status, phase=exc.phase)
+            self._record_run_stat("process_finished", success=False, final_status=exc.final_status, phase=exc.phase)
             self._emit_timing_summary(progress_callback)
             return SiteExecutionResult(success=False, message=exc.message, final_status=exc.final_status, phase=exc.phase, selfie_retry_count=selfie_retry_count, deepfakescore_activated=deepfakescore_activated, reserved_photo_id=reserved_photo.photo_id if reserved_photo else None)
         except Exception as exc:
             self._mark_phase_timing("process_finished", success=False, final_status="failed", phase="unexpected")
+            self._record_run_stat("process_finished", success=False, final_status="failed", phase="unexpected")
             self._emit_timing_summary(progress_callback)
             return SiteExecutionResult(success=False, message=f"Fallo en flujo real de compinche.io: {exc}", final_status="failed", phase="unexpected", selfie_retry_count=selfie_retry_count, deepfakescore_activated=deepfakescore_activated, reserved_photo_id=reserved_photo.photo_id if reserved_photo else None)
         finally:
@@ -638,6 +777,8 @@ class CompincheSite(BaseSite):
         reserved_photo: ReservedPhoto | None = None
         selfie_retry_count = 0
         deepfakescore_activated = False
+        page_url = self._safe_page_url(page)
+        self._set_active_flow_context(flow_root, page=page, source="iframe_flow_start")
         self.emit_progress(progress_callback, phase="selfie_stage", message="Usando el iframe de He llegado como contexto principal.")
         self.emit_progress(progress_callback, phase="selfie_stage", message="Validacion de cuenta omitida. Continuando directo al flujo.")
         if extension_assisted:
@@ -666,8 +807,25 @@ class CompincheSite(BaseSite):
             )
             if session is not None:
                 session.capture_extension_debug(page=page, note="block_ready_after_selfie")
+            self._set_active_flow_context(block_context, page=page, source="block_context_ready")
+            self._observe_flow_state(block_context, page, "block_context_ready")
+            active_context = self._get_active_flow_context(
+                page,
+                fallback_root=self._resolve_block_context(page, block_context) or block_context,
+            ) or block_context
+            final_submit_already_clicked = self._try_fast_click_final_from_flow_context(
+                page,
+                active_context,
+                progress_callback,
+                source="flow_context_block_ready",
+            )
             self.emit_progress(progress_callback, phase="block_read", message="Bloque detectado. Leyendo informacion del bloque...")
-            station_name, block_price, block_time, block_duration = self._read_block_data(block_context, page=page)
+            if final_submit_already_clicked:
+                station_name, block_price, block_time, block_duration = self._read_block_data_from_snapshot_text(
+                    getattr(self, "_latest_block_snapshot_text", "") or self._capture_block_snapshot_text(active_context, page)
+                )
+            else:
+                station_name, block_price, block_time, block_duration = self._read_block_data(active_context, page=page)
             self.emit_progress(
                 progress_callback,
                 phase="block_read",
@@ -677,22 +835,25 @@ class CompincheSite(BaseSite):
                 ),
             )
             self.emit_progress(progress_callback, phase="block_read", message=f"Reintentos de selfie: {selfie_retry_count}.")
-            final_context = self._resolve_block_context(page, block_context) or block_context
+            final_context = self._resolve_block_context(page, active_context) or active_context
             final_button_count = self._count_final_submit_buttons(final_context)
+            self._observe_flow_state(final_context, page, "final_button_detected")
             self.emit_progress(progress_callback, phase="final_submit", message=f"Boton final He llegado detectado. Candidatos encontrados: {final_button_count}.")
-            self.emit_progress(progress_callback, phase="final_submit", message="Presionando boton final He llegado...")
-            final_context = self._submit_final(
-                block_context,
-                page=page,
-                progress_callback=progress_callback,
-                session=session,
-                extension_assisted=extension_assisted,
-            )
+            if not final_submit_already_clicked:
+                self.emit_progress(progress_callback, phase="final_submit", message="Presionando boton final He llegado...")
+                final_context = self._submit_final(
+                    active_context,
+                    page=page,
+                    progress_callback=progress_callback,
+                    session=session,
+                    extension_assisted=extension_assisted,
+                )
             if session is not None:
                 session.capture_extension_debug(page=page, note="final_submit_clicked")
             self.emit_progress(progress_callback, phase="final_submit", message="Boton final He llegado presionado y validado.")
             self.emit_progress(progress_callback, phase="final_result", message="Esperando resultado final en iframe...")
-            self._mark_phase_timing("final_result_started", url=page.url)
+            self._mark_phase_timing("final_result_started", url=page_url)
+            self._record_run_stat("final_result_started", url=page_url)
             result = self._detect_final_result(
                 final_context,
                 page=page,
@@ -708,20 +869,25 @@ class CompincheSite(BaseSite):
                 session=session,
                 extension_assisted=extension_assisted,
             )
-            self._mark_phase_timing("final_result_done", success=result.success, final_status=result.final_status, url=page.url)
+            self._mark_phase_timing("final_result_done", success=result.success, final_status=result.final_status, url=page_url)
+            self._record_run_stat("final_result_done", success=result.success, final_status=result.final_status, url=page_url)
             if session is not None:
                 session.capture_extension_debug(page=page, note="final_result_detected")
+            self._observe_flow_state(final_context, page, "final_result_detected")
             self._last_process_debug_export = {
-                "last_url": page.url,
+                "last_url": page_url,
                 "final_status": result.final_status,
                 "success": result.success,
                 "timing_summary": self._build_timing_summary(),
                 "timing_summary_text": self._build_timing_summary_text(),
+                "flow_state_detector": self._build_flow_state_detector_export(),
             }
             return result
         except CompincheFlowError as exc:
+            self._observe_flow_state(self._get_active_flow_context(page, fallback_root=flow_root) or flow_root, page, f"error:{exc.phase}")
             return SiteExecutionResult(success=False, message=exc.message, final_status=exc.final_status, phase=exc.phase, selfie_retry_count=selfie_retry_count, deepfakescore_activated=deepfakescore_activated, reserved_photo_id=reserved_photo.photo_id if reserved_photo else None)
         except Exception as exc:
+            self._observe_flow_state(self._get_active_flow_context(page, fallback_root=flow_root) or flow_root, page, "error:unexpected")
             return SiteExecutionResult(success=False, message=f"Fallo en flujo real de compinche.io: {exc}", final_status="failed", phase="unexpected", selfie_retry_count=selfie_retry_count, deepfakescore_activated=deepfakescore_activated, reserved_photo_id=reserved_photo.photo_id if reserved_photo else None)
         finally:
             if reserved_photo is not None:
@@ -903,6 +1069,7 @@ class CompincheSite(BaseSite):
         started_at = monotonic()
         deadline = monotonic() + (timeout_ms / 1000)
         while monotonic() < deadline:
+            self._raise_if_cancelled()
             if extension_assisted:
                 extension_state = self._extension_state(session, page, note="wait_iframe_entry")
                 extension_phase = self._extension_phase(extension_state)
@@ -1245,6 +1412,7 @@ class CompincheSite(BaseSite):
         current_root = root
         attempt = 1
         while True:
+            self._raise_if_cancelled()
             if extension_assisted:
                 extension_state = self._extension_state(session, page, note="dispatch_selfie_loop")
                 extension_phase = self._extension_phase(extension_state)
@@ -1282,6 +1450,8 @@ class CompincheSite(BaseSite):
                 self.emit_progress(progress_callback, phase="selfie_retry_if_needed", message=f"Reintentando con nueva foto. Intento {attempt_label}.")
             self.emit_progress(progress_callback, phase="selfie_stage", message="Preparando foto para el input selfie...")
             self._mark_phase_timing("selfie_input_detected", attempt=attempt, url=page.url)
+            self._record_run_stat("selfie_input_detected", attempt=attempt, url=page.url)
+            selfie_input_detected_at = monotonic()
             reserved_photo = self._resolve_prepared_photo(
                 prepared_photo,
                 progress_callback=progress_callback,
@@ -1292,16 +1462,24 @@ class CompincheSite(BaseSite):
                 self.emit_progress(progress_callback, phase="selfie_stage", message="Subiendo la foto dentro del iframe o contenedor activo...")
                 file_input = self._require_photo_input(current_root, timeout_ms=action_timeout_ms)
                 self.emit_progress(progress_callback, phase="selfie_stage", message="Input file encontrado.")
+                self._observe_flow_state(current_root, page, "selfie_input_detected")
                 self.emit_progress(progress_callback, phase="selfie_stage", message=f"Foto usada en intento {attempt}: {reserved_photo.original_filename}.")
                 self._mark_phase_timing("photo_upload_started", attempt=attempt, file_name=reserved_photo.original_filename)
+                self._record_run_stat("photo_upload_started", attempt=attempt, file_name=reserved_photo.original_filename)
+                selfie_input_to_upload_ms = int(max(monotonic() - selfie_input_detected_at, 0.0) * 1000)
+                self._record_timeline_event("selfie_input_to_upload_ms", attempt=attempt, value=selfie_input_to_upload_ms)
+                self._record_run_stat("selfie_input_to_upload_ms", attempt=attempt, value=selfie_input_to_upload_ms)
                 self._upload_photo(current_root, reserved_photo=reserved_photo, timeout_ms=action_timeout_ms, file_input=file_input)
                 self.emit_progress(progress_callback, phase="selfie_stage", message="Foto cargada.")
                 self._mark_phase_timing("photo_upload_done", attempt=attempt, file_name=reserved_photo.original_filename)
+                self._record_run_stat("photo_upload_done", attempt=attempt, file_name=reserved_photo.original_filename)
                 self.emit_progress(progress_callback, phase="selfie_stage", message="Presionando Continuar para seguir el flujo...")
                 continue_button = self._require_continue_button(current_root)
                 self.emit_progress(progress_callback, phase="selfie_stage", message="Continuar encontrado.")
                 self._continue_from_modal(current_root, continue_button=continue_button)
                 self._mark_phase_timing("continue_clicked", attempt=attempt, url=page.url)
+                self._record_run_stat("continue_clicked", attempt=attempt, url=page.url)
+                self._observe_flow_state(current_root, page, "continue_clicked")
                 self.emit_progress(progress_callback, phase="selfie_stage", message="Continuar presionado.")
                 resolution_source = "polling tradicional"
                 if extension_assisted:
@@ -1324,6 +1502,7 @@ class CompincheSite(BaseSite):
                     )
                 self.emit_progress(progress_callback, phase="processing_loading_after_continue", message="Esperando validacion de selfie...")
                 self.emit_progress(progress_callback, phase="processing_loading_after_continue", message="Esperando aparicion del bloque...")
+                self._record_run_stat("site_processing_started", attempt=attempt, url=page.url)
                 self._mark_phase_timing("selfie_validation_started", attempt=attempt, url=page.url)
                 self._mark_phase_timing("block_wait_started", attempt=attempt, url=page.url)
                 block_context = self._wait_for_block_context(
@@ -1334,7 +1513,10 @@ class CompincheSite(BaseSite):
                     session=session,
                     extension_assisted=extension_assisted,
                 )
+                self._observe_flow_state(block_context, page, "block_detected")
                 self._mark_phase_timing("block_detected", attempt=attempt, url=page.url)
+                self._record_run_stat("block_detected", attempt=attempt, url=page.url)
+                self._record_run_stat("block_visual_detected", attempt=attempt, url=page.url)
                 if attempt >= 2:
                     self.emit_progress(progress_callback, phase="block_read", message="Retry exitoso, bloque detectado.")
                     self.emit_progress(progress_callback, phase="block_read", message="Reenganchando al flujo normal desde retry/selfie hacia block_read.")
@@ -1344,6 +1526,7 @@ class CompincheSite(BaseSite):
                 return block_context, reserved_photo, max(attempt - 1, 0), deepfakescore_activated
             except CompincheFlowError as exc:
                 if exc.final_status == "selfie_retry":
+                    self._observe_flow_state(current_root, page, "error:return_to_selfie")
                     self.emit_progress(progress_callback, phase="selfie_retry_if_needed", message="Retorno a selfie detectado.")
                     if not deepfakescore_activated:
                         self.emit_progress(progress_callback, phase="selfie_retry_if_needed", message="deepfakescore activado | reintentos: 1")
@@ -1362,6 +1545,7 @@ class CompincheSite(BaseSite):
                             final_status="timeout",
                         )
                     current_root = self._resolve_selfie_retry_root(page, current_root)
+                    self._set_active_flow_context(current_root, page=page, source="return_to_selfie")
                     prepared_photo = self._start_background_photo_preparation(
                         process_id=process_id,
                         progress_callback=progress_callback,
@@ -1419,6 +1603,7 @@ class CompincheSite(BaseSite):
         extension_state = None
         fallback_reason = "phase_unknown"
         while monotonic() < deadline:
+            self._raise_if_cancelled()
             poll_iteration += 1
             extension_phase = "unknown"
             if extension_assisted:
@@ -1942,6 +2127,18 @@ class CompincheSite(BaseSite):
             )
         return station_name, block_price, block_time, duration
 
+    def _read_block_data_from_snapshot_text(self, snapshot_text: str) -> tuple[str, str, str, str]:
+        pairs = self._extract_text_pairs(snapshot_text)
+        block_price, station_name, block_time, duration = self._parse_block_snapshot_details(
+            pairs,
+            snapshot_text,
+            payment_aliases=("precio", "price", "valor", "monto", "pago"),
+            station_aliases=("estacion", "station", "estacao", "punto", "point"),
+            schedule_aliases=("horario", "fecha", "hora", "time", "schedule", "slot"),
+            duration_aliases=("duracion", "duration", "horas", "hours"),
+        )
+        return station_name, block_price, block_time, duration
+
     def _submit_final(
         self,
         root: Page | Frame | Locator,
@@ -1951,9 +2148,13 @@ class CompincheSite(BaseSite):
         session=None,
         extension_assisted: bool = False,
     ) -> Page | Frame | Locator:
+        if bool(getattr(self, "_final_submit_already_clicked", False)):
+            return root
         last_error = "El boton final 'He llegado' fue detectado, pero no respondio despues de varios intentos."
         resolution_reported = False
-        self._mark_phase_timing("final_click_started", source="_submit_final", url=page.url)
+        page_url = self._safe_page_url(page)
+        self._mark_phase_timing("final_click_started", source="_submit_final", url=page_url)
+        self._record_run_stat("final_click_started", source="_submit_final", url=page_url)
         for attempt in range(1, 4):
             current_root = self._resolve_block_context(page, root) or root
             final_button_count = self._count_final_submit_buttons(current_root)
@@ -2011,7 +2212,8 @@ class CompincheSite(BaseSite):
                     baseline_signature=baseline_signature,
                     progress_callback=progress_callback,
                 )
-                self._mark_phase_timing("final_click_done", source=f"_submit_final_attempt_{attempt}", url=page.url)
+                self._mark_phase_timing("final_click_done", source=f"_submit_final_attempt_{attempt}", url=page_url)
+                self._record_run_stat("final_click_done", source=f"_submit_final_attempt_{attempt}", url=page_url)
                 return validated_root
             except CompincheFlowError as exc:
                 last_error = exc.message
@@ -2077,6 +2279,7 @@ class CompincheSite(BaseSite):
         extension_state = None
         fallback_reason = "phase_unknown"
         while monotonic() < deadline:
+            self._raise_if_cancelled()
             extension_phase = "unknown"
             if extension_assisted:
                 extension_state = self._extension_state(session, page, note="wait_final_result_ready")

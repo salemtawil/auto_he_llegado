@@ -32,6 +32,7 @@ class CurrentResultPanel(ctk.CTkFrame):
         self._compact = False
         self._detail_values: dict[str, ctk.CTkLabel] = {}
         self._elapsed_value = "--"
+        self._compact_summary_text = "Sin corrida activa todavía."
 
         header = ctk.CTkFrame(self, fg_color="transparent")
         header.grid(row=0, column=0, padx=14, pady=(10, 6), sticky="ew")
@@ -124,6 +125,25 @@ class CurrentResultPanel(ctk.CTkFrame):
         )
         self.message_label.grid(row=1, column=0, padx=12, pady=(6, 12), sticky="ew")
 
+        self.compact_card = ctk.CTkFrame(
+            self,
+            fg_color=INPUT_BG,
+            corner_radius=14,
+            border_width=1,
+            border_color=BORDER,
+        )
+        self.compact_card.grid_columnconfigure(0, weight=1)
+        self.compact_label = ctk.CTkLabel(
+            self.compact_card,
+            text=self._compact_summary_text,
+            text_color=TEXT_PRIMARY,
+            justify="left",
+            anchor="w",
+            wraplength=360,
+            font=ctk.CTkFont(size=10),
+        )
+        self.compact_label.grid(row=0, column=0, padx=12, pady=10, sticky="ew")
+
         self._apply_visual_state("neutral")
         self.set_placeholder()
 
@@ -133,11 +153,22 @@ class CurrentResultPanel(ctk.CTkFrame):
         for value in self._detail_values.values():
             value.configure(text="--")
         self.message_label.configure(text="Todavía no hay resultado.")
+        self._compact_summary_text = "Sin corrida activa todavía."
+        self.compact_label.configure(text=self._compact_summary_text)
         self._apply_visual_state("neutral")
 
     def set_compact_layout(self, compact: bool) -> None:
         self._compact = compact
         self.message_label.configure(wraplength=340 if compact else 720)
+        self.compact_label.configure(wraplength=340 if compact else 520)
+        if compact:
+            self.body.grid_remove()
+            self.message_card.grid_remove()
+            self.compact_card.grid(row=1, column=0, padx=12, pady=(0, 12), sticky="ew")
+            return
+        self.compact_card.grid_remove()
+        self.body.grid(row=1, column=0, padx=12, pady=(0, 12), sticky="ew")
+        self.message_card.grid(row=2, column=0, padx=12, pady=(0, 12), sticky="ew")
 
     def set_result(self, result: ProcessExecutionResult, *, elapsed_text: str | None = None) -> None:
         self.subline.configure(text=f"{result.page_name} | {result.action_name}")
@@ -147,7 +178,10 @@ class CurrentResultPanel(ctk.CTkFrame):
         self._detail_values["Pagina"].configure(text=result.page_name)
         self._detail_values["Accion"].configure(text=result.action_name)
         self._detail_values["Tiempo final"].configure(text=self._elapsed_value)
-        self.message_label.configure(text=self._short_message(result.message))
+        short_message = self._short_message(result.message)
+        self.message_label.configure(text=short_message)
+        self._compact_summary_text = self._build_compact_summary(result, short_message)
+        self.compact_label.configure(text=self._compact_summary_text)
 
     def _status_label(self, result: ProcessExecutionResult) -> str:
         if result.success:
@@ -188,7 +222,19 @@ class CurrentResultPanel(ctk.CTkFrame):
         chip_fg, chip_text, border = palette.get(state, palette["neutral"])
         self.eyebrow.configure(fg_color=chip_fg, text_color=chip_text)
         self.message_card.configure(border_color=border)
+        self.compact_card.configure(border_color=border)
         self._detail_values["Estado"].configure(text_color=chip_text)
+
+    def _build_compact_summary(self, result: ProcessExecutionResult, short_message: str) -> str:
+        pieces = [
+            self._status_label(result),
+            result.page_name or "N/A",
+            result.action_name or "N/A",
+        ]
+        if self._elapsed_value and self._elapsed_value != "--":
+            pieces.append(self._elapsed_value)
+        head = " | ".join(pieces)
+        return f"{head}\n{short_message}" if short_message else head
 
     @staticmethod
     def _format_datetime(value: datetime | None) -> str:

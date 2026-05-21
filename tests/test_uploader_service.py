@@ -44,11 +44,20 @@ class StubPhotoRecord:
 class StubPhotosRepository:
     def __init__(self, *, create_error: Exception | None = None) -> None:
         self.create_error = create_error
+        self.created_photos = []
+        self.bulk_created_photos = []
 
     def create(self, photo) -> StubPhotoRecord:
+        self.created_photos.append(photo)
         if self.create_error is not None:
             raise self.create_error
         return StubPhotoRecord(photo_id=photo.id, storage_path=photo.storage_path)
+
+    def bulk_create(self, photos) -> list[StubPhotoRecord]:
+        self.bulk_created_photos.append(list(photos))
+        if self.create_error is not None:
+            raise self.create_error
+        return [StubPhotoRecord(photo_id=photo.id, storage_path=photo.storage_path) for photo in photos]
 
 
 def build_settings(tmp_path: Path) -> Settings:
@@ -171,6 +180,7 @@ def test_upload_files_emits_live_progress_updates(tmp_path) -> None:
     assert [event.current_file_status for event in events if event.current_file_status] == [
         "Subiendo",
         "Storage OK",
+        "Pendiente DB",
         "Database OK",
         "Completado",
         "Completado",
@@ -179,3 +189,24 @@ def test_upload_files_emits_live_progress_updates(tmp_path) -> None:
     assert events[-1].processed_count == 1
     assert events[-1].success_count == 1
     assert events[-1].failed_count == 0
+
+
+def test_upload_file_does_not_depend_on_unconfirmed_photo_columns(tmp_path) -> None:
+    source = tmp_path / "example.jpg"
+    source.write_bytes(b"jpg-data")
+    settings = build_settings(tmp_path)
+    repository = StubPhotosRepository()
+    service = UploaderService(
+        photos_repository=repository,
+        client_provider=StubClientProvider(),
+        settings=settings,
+    )
+
+    result = service.upload_file(source)
+
+    assert result.success is True
+    assert len(repository.created_photos) == 1
+    created_photo = repository.created_photos[0]
+    assert created_photo.original_filename == "example.jpg"
+    assert created_photo.storage_path.endswith(".jpg")
+    assert created_photo.source == "uploader_app"

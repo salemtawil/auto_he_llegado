@@ -1022,6 +1022,40 @@ def test_capture_extension_debug_includes_ping_report() -> None:
     assert payload["frame_debug_report"]["total_frames"] == 1
 
 
+def test_capture_extension_debug_keeps_last_debug_when_frame_scan_fails() -> None:
+    page = StubPage(
+        lambda expression, *args: {
+            "state": {"phase": "dashboard"},
+            "marker": "loaded",
+            "overlayPresent": False,
+            "overlayFramePresent": False,
+        },
+        frames=[],
+        main_frame=None,
+    )
+    session = BrowserSession(
+        playwright=object(),
+        browser=object(),
+        context=object(),
+        page=page,
+        extension_enabled=True,
+        extension_loaded=True,
+    )
+    session._last_extension_debug = {  # noqa: SLF001
+        "frame_debug_report": {"total_frames": 1, "frames": [{"frame_url": "cached"}]},
+        "marker_report": {"total_frames": 1, "frames": []},
+        "ping_report": {"total_frames": 1, "frames": []},
+    }
+    session.debug_list_all_frames = lambda page=None: (_ for _ in ()).throw(RuntimeError("Cannot switch to a different thread"))  # type: ignore[method-assign]  # noqa: SLF001
+
+    payload = session.capture_extension_debug(note="thread_failure")
+
+    assert payload is not None
+    assert payload["frame_debug_report"]["total_frames"] == 1
+    assert payload["frame_debug_report"]["frames"][0]["frame_url"] == "cached"
+    assert payload["frame_debug_error"] == "Cannot switch to a different thread"
+
+
 def test_browser_manager_remembers_latest_extension_debug() -> None:
     BrowserManager.begin_new_run(flow_engine="extension")
     BrowserManager.remember_extension_debug({"marker": "loaded", "state": {"phase": "dashboard"}})
