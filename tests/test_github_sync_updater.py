@@ -8,6 +8,7 @@ import pytest
 
 from updater.github_sync_updater import (
     GitHubSyncUpdater,
+    InstallDirError,
     UpdaterConfig,
     build_raw_url,
     is_path_allowed,
@@ -27,6 +28,21 @@ def make_install_dir(tmp_path: Path) -> Path:
     (install_dir / "ui").mkdir()
     (install_dir / "services").mkdir()
     (install_dir / "automation").mkdir()
+    return install_dir
+
+
+def make_portable_install_dir(
+    tmp_path: Path,
+    *,
+    entrypoints: tuple[str, ...] = ("AutoHeLlegado.exe",),
+    with_internal: bool = True,
+) -> Path:
+    install_dir = tmp_path / "portable"
+    install_dir.mkdir()
+    for entrypoint in entrypoints:
+        (install_dir / entrypoint).write_text("portable\n", encoding="utf-8")
+    if with_internal:
+        (install_dir / "_internal").mkdir()
     return install_dir
 
 
@@ -70,9 +86,55 @@ def test_load_config(tmp_path: Path) -> None:
     assert config.allowed_roots == ["ui/"]
 
 
+def test_load_config_accepts_utf8_sig_bom(tmp_path: Path) -> None:
+    path = tmp_path / "config_bom.json"
+    path.write_text(
+        json.dumps(
+            {
+                "owner": "a",
+                "repo": "b",
+                "branch": "main",
+                "install_dir": ".",
+                "allowed_roots": ["ui/"],
+                "protected_paths": ["config/"],
+            }
+        ),
+        encoding="utf-8-sig",
+    )
+
+    config = load_config(path)
+
+    assert config.owner == "a"
+    assert config.repo == "b"
+
+
 def test_validate_install_dir_valid(tmp_path: Path) -> None:
     install_dir = make_install_dir(tmp_path)
     validate_install_dir(install_dir, ["app_main.py"])
+
+
+def test_validate_install_dir_accepts_portable_layout(tmp_path: Path) -> None:
+    install_dir = make_portable_install_dir(tmp_path)
+
+    validate_install_dir(install_dir, ["AutoHeLlegado.exe"])
+
+
+def test_validate_install_dir_accepts_portable_without_ui_services_automation(tmp_path: Path) -> None:
+    install_dir = make_portable_install_dir(tmp_path)
+
+    validate_install_dir(install_dir, ["AutoHeLlegado.exe"])
+
+
+def test_validate_install_dir_accepts_portable_with_multiple_entrypoints_from_config(tmp_path: Path) -> None:
+    install_dir = make_portable_install_dir(
+        tmp_path,
+        entrypoints=("AutoHeLlegado.exe", "AutoHeLlegadoUploader.exe", "AutoHeLlegadoDebugInspector.exe"),
+    )
+
+    validate_install_dir(
+        install_dir,
+        ["AutoHeLlegado.exe", "AutoHeLlegadoUploader.exe", "AutoHeLlegadoDebugInspector.exe"],
+    )
 
 
 def test_validate_install_dir_invalid(tmp_path: Path) -> None:
@@ -80,6 +142,34 @@ def test_validate_install_dir_invalid(tmp_path: Path) -> None:
     install_dir.mkdir()
     with pytest.raises(Exception):
         validate_install_dir(install_dir, ["app_main.py"])
+
+
+def test_validate_install_dir_reports_source_layout_failure(tmp_path: Path) -> None:
+    install_dir = tmp_path / "bad_source"
+    install_dir.mkdir()
+    (install_dir / "app_main.py").write_text("print('app')\n", encoding="utf-8")
+
+    with pytest.raises(InstallDirError) as exc_info:
+        validate_install_dir(install_dir, ["app_main.py"])
+
+    message = str(exc_info.value)
+    assert "source/dev" in message
+    assert str(install_dir) in message
+    assert "app_main.py" in message
+    assert "ui" in message
+
+
+def test_validate_install_dir_reports_portable_layout_failure(tmp_path: Path) -> None:
+    install_dir = make_portable_install_dir(tmp_path, entrypoints=(), with_internal=True)
+
+    with pytest.raises(InstallDirError) as exc_info:
+        validate_install_dir(install_dir, ["AutoHeLlegado.exe"])
+
+    message = str(exc_info.value)
+    assert "portable" in message
+    assert str(install_dir) in message
+    assert "_internal" in message
+    assert "AutoHeLlegado.exe" in message
 
 
 def test_path_allowed() -> None:

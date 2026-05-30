@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 import customtkinter as ctk
 
 from services.photo_pool_service import PhotoPoolSnapshot
 from ui.theme import (
-    ACCENT,
     BORDER,
     CARD_ALT_BG,
+    ERROR,
+    ERROR_SOFT,
     INFO,
     INFO_SOFT,
     SUCCESS,
@@ -17,6 +20,48 @@ from ui.theme import (
     WARNING,
     WARNING_SOFT,
 )
+
+# Modifica estos valores para cambiar los rangos visuales del contador del pool.
+POOL_LOW_MAX = 299
+POOL_MEDIUM_MAX = 600
+
+
+@dataclass(frozen=True)
+class PoolBadgeVisualState:
+    chip_text: str
+    chip_fg: str | tuple[str, str]
+    chip_text_color: str | tuple[str, str]
+    count_color: str | tuple[str, str]
+
+
+def resolve_pool_badge_visual_state(available_count: int) -> PoolBadgeVisualState:
+    if available_count <= 0:
+        return PoolBadgeVisualState(
+            chip_text="Vacio",
+            chip_fg=ERROR_SOFT,
+            chip_text_color=ERROR,
+            count_color=ERROR,
+        )
+    if available_count <= POOL_LOW_MAX:
+        return PoolBadgeVisualState(
+            chip_text="Bajo",
+            chip_fg=ERROR_SOFT,
+            chip_text_color=ERROR,
+            count_color=ERROR,
+        )
+    if available_count <= POOL_MEDIUM_MAX:
+        return PoolBadgeVisualState(
+            chip_text="Medio",
+            chip_fg=WARNING_SOFT,
+            chip_text_color=WARNING,
+            count_color=WARNING,
+        )
+    return PoolBadgeVisualState(
+        chip_text="Saludable",
+        chip_fg=SUCCESS_SOFT,
+        chip_text_color=SUCCESS,
+        count_color=SUCCESS,
+    )
 
 
 class PoolBadge(ctk.CTkFrame):
@@ -69,15 +114,13 @@ class PoolBadge(ctk.CTkFrame):
         self.caption_label.configure(font=ctk.CTkFont(size=8 if compact else 9))
 
     def set_snapshot(self, snapshot: PhotoPoolSnapshot) -> None:
-        label = (snapshot.label or "").lower()
-        if snapshot.available_count <= 0:
-            chip_text, chip_fg, chip_text_color = "Vacio", WARNING_SOFT, WARNING
-        elif "alto" in label or snapshot.available_count >= 10:
-            chip_text, chip_fg, chip_text_color = "Saludable", SUCCESS_SOFT, SUCCESS
-        else:
-            chip_text, chip_fg, chip_text_color = "Atencion", INFO_SOFT, INFO
-        self.count_label.configure(text=str(snapshot.available_count), text_color=snapshot.color or ACCENT)
-        self.level_chip.configure(text=chip_text, fg_color=chip_fg, text_color=chip_text_color)
+        visual_state = resolve_pool_badge_visual_state(snapshot.available_count)
+        self.count_label.configure(text=str(snapshot.available_count), text_color=visual_state.count_color)
+        self.level_chip.configure(
+            text=visual_state.chip_text,
+            fg_color=visual_state.chip_fg,
+            text_color=visual_state.chip_text_color,
+        )
 
     def set_loading(self) -> None:
         self.count_label.configure(text="...", text_color=TEXT_PRIMARY)

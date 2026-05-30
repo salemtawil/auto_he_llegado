@@ -15,6 +15,7 @@ from urllib.request import Request, urlopen
 
 APP_ENTRYPOINTS_DEFAULT = ["app_main.py", "app_main.exe"]
 EXPECTED_DIRS = ("ui", "services", "automation")
+PORTABLE_INTERNAL_DIR = "_internal"
 BUILTIN_EXCLUDED_PREFIXES = (
     ".git/",
     ".venv/",
@@ -137,7 +138,7 @@ def sha256_file(path: Path) -> str:
 
 
 def load_config(path: Path) -> UpdaterConfig:
-    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload = json.loads(path.read_text(encoding="utf-8-sig"))
     missing = [key for key in ("owner", "repo", "branch", "install_dir", "allowed_roots", "protected_paths") if key not in payload]
     if missing:
         raise ConfigError(f"Faltan claves en config: {', '.join(missing)}")
@@ -174,6 +175,48 @@ def validate_install_dir(install_dir: Path, app_entrypoints: list[str]) -> None:
             f"install_dir no parece una instalación válida: {install_dir}. "
             "Debe contener un entrypoint y al menos una carpeta ui/services/automation."
         )
+
+
+def _validate_install_dir_by_layout(install_dir: Path, app_entrypoints: list[str]) -> None:
+    if not install_dir.exists() or not install_dir.is_dir():
+        raise InstallDirError(f"install_dir invalido: {install_dir}")
+
+    checked_entrypoints = app_entrypoints or list(APP_ENTRYPOINTS_DEFAULT)
+    found_entrypoints = [item for item in checked_entrypoints if (install_dir / item).exists()]
+    checked_dirs = list(EXPECTED_DIRS)
+    found_dirs = [item for item in EXPECTED_DIRS if (install_dir / item).is_dir()]
+    has_internal = (install_dir / PORTABLE_INTERNAL_DIR).is_dir()
+
+    if has_internal:
+        if found_entrypoints:
+            return
+        raise InstallDirError(
+            "Instalacion portable PyInstaller invalida. "
+            f"install_dir={install_dir}. "
+            "Tipo detectado=portable. "
+            f"Entrypoints revisados={checked_entrypoints}. "
+            f"Entrypoints encontrados={found_entrypoints or 'ninguno'}. "
+            f"Carpetas revisadas={checked_dirs}. "
+            f"Carpetas encontradas={found_dirs or 'ninguna'}. "
+            f"_internal={'si' if has_internal else 'no'}."
+        )
+
+    if found_entrypoints and found_dirs:
+        return
+    raise InstallDirError(
+        "Instalacion source/dev invalida. "
+        f"install_dir={install_dir}. "
+        "Tipo detectado=source/dev. "
+        f"Entrypoints revisados={checked_entrypoints}. "
+        f"Entrypoints encontrados={found_entrypoints or 'ninguno'}. "
+        f"Carpetas revisadas={checked_dirs}. "
+        f"Carpetas encontradas={found_dirs or 'ninguna'}. "
+        f"_internal={'si' if has_internal else 'no'}. "
+        "Debe contener un entrypoint configurado y al menos una carpeta ui/services/automation."
+    )
+
+
+validate_install_dir = _validate_install_dir_by_layout
 
 
 def is_path_allowed(path: str, allowed_roots: list[str]) -> bool:

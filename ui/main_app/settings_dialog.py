@@ -20,9 +20,10 @@ from ui.theme import (
 
 
 class SettingsDialog(ctk.CTkToplevel):
-    def __init__(self, master, config: LocalConfig, on_save, **kwargs) -> None:
+    def __init__(self, master, config: LocalConfig, on_save, on_launch_updater=None, **kwargs) -> None:
         super().__init__(master, fg_color=APP_BG, **kwargs)
         self._on_save = on_save
+        self._on_launch_updater = on_launch_updater
         self._initial_data = {
             "agent_name": config.agent_name,
             "flow_engine": "Extension" if config.flow_engine == "extension" else "Tradicional",
@@ -165,8 +166,36 @@ class SettingsDialog(ctk.CTkToplevel):
             border_color=BORDER,
         )
         footer.grid(row=1, column=0, padx=0, pady=0, sticky="ew")
+        footer.grid_columnconfigure(0, weight=1)
+
+        if self._on_launch_updater is not None:
+            updater_button = ctk.CTkButton(
+                footer,
+                text="Actualizar app",
+                command=self._handle_launch_updater,
+                height=38,
+                corner_radius=12,
+                fg_color="transparent",
+                hover_color=ACCENT_HOVER,
+                border_width=1,
+                border_color=ACCENT,
+                text_color=ACCENT,
+                font=ctk.CTkFont(size=13, weight="bold"),
+            )
+            updater_button.grid(row=0, column=0, padx=16, pady=(16, 0), sticky="ew")
+
+            updater_hint = ctk.CTkLabel(
+                footer,
+                text="Cierra la app y lanza el updater externo para aplicar cambios de GitHub.",
+                text_color=TEXT_MUTED,
+                font=ctk.CTkFont(size=11),
+                justify="left",
+                wraplength=360,
+            )
+            updater_hint.grid(row=1, column=0, padx=16, pady=(8, 0), sticky="w")
+
         actions = ctk.CTkFrame(footer, fg_color="transparent")
-        actions.grid(row=0, column=0, padx=16, pady=16, sticky="ew")
+        actions.grid(row=2, column=0, padx=16, pady=16, sticky="ew")
         actions.grid_columnconfigure(0, weight=1)
         actions.grid_columnconfigure(1, weight=1)
 
@@ -303,3 +332,8 @@ class SettingsDialog(ctk.CTkToplevel):
 
     def _handle_save(self) -> None:
         self._on_save(self._collect_form_data())
+
+    def _handle_launch_updater(self) -> None:
+        if self._on_launch_updater is None:
+            return
+        self._on_launch_updater()

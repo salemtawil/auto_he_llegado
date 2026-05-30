@@ -1,27 +1,65 @@
 # GitHub Sync Updater
 
-Updater externo para Auto He Llegado basado en GitHub API pública.
+Updater externo para Auto He Llegado basado en GitHub API publica.
 
-## Qué hace
+## Que hace
 
-- consulta el árbol del repo público
+- consulta el arbol del repo publico
 - filtra solo archivos permitidos
 - compara SHA256 remoto vs local
 - soporta `--check`, `--dry-run` y `--apply`
 - usa staging, backup y rollback
-- no borra archivos obsoletos en esta versión
+- no borra archivos obsoletos en esta version
 - respeta rutas protegidas locales
 
-## Configuración
+## Uso desde la app
 
-1. Copie `updater/updater_config.example.json` como `updater/updater_config.json`.
-2. Defina:
+- En Configuracion, usa el boton `Actualizar app`.
+- La app valida que `updater/updater_config.json` exista y tenga `owner`, `repo` y `branch` reales.
+- Si hay launcher visible para tu sistema, la app lo abre y luego se cierra.
+- Si no hay launcher, la app hace fallback al comando Python directo.
+- La app no modifica archivos por si sola: el updater externo hace los cambios.
+
+## Configuracion
+
+1. Copia `updater/updater_config.example.json` como `updater/updater_config.json`.
+2. Define:
    - `owner`
    - `repo`
    - `branch`
-3. Ajuste `install_dir` si hace falta o use `--install-dir`.
+3. Ajusta `install_dir` si hace falta o usa `--install-dir`.
+4. No dejes placeholders como `TU_USUARIO` o `TU_REPO`.
 
-## Comandos
+## Uso manual en macOS
+
+```bash
+chmod +x updater/launchers/ActualizarApp.command
+open updater/launchers/ActualizarApp.command
+```
+
+El launcher ejecuta, en orden:
+
+```bash
+python3 updater/github_sync_updater.py --check --config updater/updater_config.json
+python3 updater/github_sync_updater.py --dry-run --config updater/updater_config.json
+python3 updater/github_sync_updater.py --apply --config updater/updater_config.json
+```
+
+## Uso manual en Windows
+
+```powershell
+updater\launchers\ActualizarApp.bat
+```
+
+El launcher ejecuta, en orden:
+
+```powershell
+python updater\github_sync_updater.py --check --config updater\updater_config.json
+python updater\github_sync_updater.py --dry-run --config updater\updater_config.json
+python updater\github_sync_updater.py --apply --config updater\updater_config.json
+```
+
+## Comandos directos
 
 ```powershell
 python updater/github_sync_updater.py --check
@@ -40,5 +78,20 @@ python updater/github_sync_updater.py --install-dir "C:\Ruta\De\App"
 
 ## Importante
 
-- cierre Auto He Llegado antes de usar `--apply`
-- esta versión no borra archivos locales obsoletos
+- Cierra Auto He Llegado antes de usar `--apply`.
+- La app no se cierra si falta el updater, falta el config, hay procesos activos o falla el lanzamiento externo.
+- Esta version no borra archivos locales obsoletos.
+
+## Nota SSL en macOS
+
+Si aparece `CERTIFICATE_VERIFY_FAILED`, ejecuta:
+
+```bash
+open "/Applications/Python 3.11/Install Certificates.command"
+```
+
+o:
+
+```bash
+open "/Applications/Python 3.12/Install Certificates.command"
+```

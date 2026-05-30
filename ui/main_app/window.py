@@ -5,18 +5,19 @@ import json
 import os
 import platform
 import re
+import subprocess
 import threading
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from time import monotonic
-from tkinter import filedialog
+from tkinter import filedialog, messagebox
 from uuid import uuid4
 
 import customtkinter as ctk
 
 from automation.browser_manager import BrowserManager
-from config.paths import DEFAULT_LOCAL_DATA_DIR
+from config.paths import DEFAULT_LOCAL_DATA_DIR, PROJECT_ROOT
 from config.settings import get_settings
 from core.models import LocalConfig, ProcessExecutionRequest, ProcessExecutionResult
 from core.validators import sanitize_phone_number, validate_non_empty_string, validate_positive_int
@@ -300,8 +301,150 @@ class MainAppWindow(ctk.CTk):
             self,
             config=self._current_config,
             on_save=self.save_local_config,
+            on_launch_updater=self.request_external_update,
         )
         self._settings_dialog.focus()
+
+    def request_external_update(self) -> None:
+        error_message = self._validate_updater_ready()
+        if error_message:
+            messagebox.showerror("Actualizar app", error_message, parent=self)
+            return
+
+        confirmed = messagebox.askyesno(
+            "Actualizar app",
+            (
+                "Se cerrara Auto He Llegado y se abrira el actualizador. "
+                "Guarda cualquier proceso o espera a que termine antes de continuar."
+            ),
+            parent=self,
+        )
+        if not confirmed:
+            return
+
+        if not self._launch_external_updater():
+            return
+
+        with contextlib.suppress(Exception):
+            self._broadcast_status_message("Actualizador iniciado. Cerrando app...", color=SUCCESS)
+        self._handle_app_close()
+
+    def _validate_updater_ready(self) -> str | None:
+        if self._active_process_count() > 0:
+            return "Hay procesos activos. Espera a que terminen o cancelalos antes de actualizar."
+
+        updater_script, updater_config = self._resolve_updater_paths()
+        if not updater_script.is_file():
+            return "No se encontro el updater externo."
+        if not updater_config.is_file():
+            return "No se encontro updater/updater_config.json. Configura el updater antes de actualizar."
+        if not self._is_updater_config_valid(updater_config):
+            return "El updater_config.json no esta configurado con owner/repo reales."
+        return None
+
+    @staticmethod
+    def _get_updater_command(
+        updater_script: Path,
+        updater_config: Path,
+        *,
+        system_name: str | None = None,
+    ) -> list[str]:
+        normalized_system = (system_name or platform.system()).strip().lower()
+        script_relpath = updater_script.relative_to(PROJECT_ROOT)
+        config_relpath = updater_config.relative_to(PROJECT_ROOT)
+        if normalized_system == "windows":
+            return [
+                "python",
+                str(script_relpath).replace("/", "\\"),
+                "--apply",
+                "--config",
+                str(config_relpath).replace("/", "\\"),
+            ]
+        return [
+            "python3",
+            str(script_relpath).replace("\\", "/"),
+            "--apply",
+            "--config",
+            str(config_relpath).replace("\\", "/"),
+        ]
+
+    @staticmethod
+    def _is_updater_config_valid(config_path: Path) -> bool:
+        try:
+            raw_config = json.loads(config_path.read_text(encoding="utf-8-sig"))
+        except Exception:
+            return False
+        if not isinstance(raw_config, dict):
+            return False
+
+        owner = raw_config.get("owner")
+        repo = raw_config.get("repo")
+        branch = raw_config.get("branch")
+        invalid_values = {"", None, "TU_USUARIO", "TU_REPO"}
+
+        if owner in invalid_values or repo in invalid_values:
+            return False
+        if not isinstance(branch, str) or not branch.strip():
+            return False
+        return True
+
+    @staticmethod
+    def _resolve_updater_paths() -> tuple[Path, Path]:
+        root_updater_dir = PROJECT_ROOT / "updater"
+        if (root_updater_dir / "github_sync_updater.py").is_file() or (root_updater_dir / "updater_config.json").is_file():
+            return root_updater_dir / "github_sync_updater.py", root_updater_dir / "updater_config.json"
+        internal_updater_dir = PROJECT_ROOT / "_internal" / "updater"
+        return internal_updater_dir / "github_sync_updater.py", internal_updater_dir / "updater_config.json"
+
+    def _resolve_external_updater_launch(
+        self,
+        *,
+        system_name: str | None = None,
+    ) -> tuple[list[str], dict[str, object]]:
+        normalized_system = (system_name or platform.system()).strip().lower()
+        popen_kwargs: dict[str, object] = {"cwd": str(PROJECT_ROOT)}
+        updater_script, updater_config = self._resolve_updater_paths()
+        launcher_root = updater_script.parent
+
+        mac_launcher = launcher_root / "launchers" / "ActualizarApp.command"
+        windows_launcher = launcher_root / "launchers" / "ActualizarApp.bat"
+
+        if normalized_system == "windows":
+            creationflags = getattr(subprocess, "CREATE_NEW_CONSOLE", 0)
+            if creationflags:
+                popen_kwargs["creationflags"] = creationflags
+            if windows_launcher.is_file():
+                return [str(windows_launcher)], popen_kwargs
+            return self._get_updater_command(updater_script, updater_config, system_name="Windows"), popen_kwargs
+
+        popen_kwargs["start_new_session"] = True
+        if normalized_system == "darwin" and mac_launcher.is_file():
+            return ["open", str(mac_launcher)], popen_kwargs
+        return self._get_updater_command(updater_script, updater_config, system_name=normalized_system), popen_kwargs
+
+    def _launch_external_updater(self) -> bool:
+        system_name = platform.system()
+        command, popen_kwargs = self._resolve_external_updater_launch(system_name=system_name)
+
+        try:
+            subprocess.Popen(command, **popen_kwargs)
+        except Exception as exc:
+            ssl_hint = ""
+            if system_name.strip().lower() == "darwin":
+                ssl_hint = (
+                    "\n\nSi luego el updater falla en macOS con "
+                    "'SSL: CERTIFICATE_VERIFY_FAILED', ejecuta:\n"
+                    'open "/Applications/Python 3.11/Install Certificates.command"\n'
+                    "o\n"
+                    'open "/Applications/Python 3.12/Install Certificates.command"'
+                )
+            messagebox.showerror(
+                "Actualizar app",
+                f"No se pudo iniciar el actualizador externo: {exc}{ssl_hint}",
+                parent=self,
+            )
+            return False
+        return True
 
     def open_admin_access(self) -> None:
         if self._admin_uploader_dialog is not None and self._admin_uploader_dialog.winfo_exists():
