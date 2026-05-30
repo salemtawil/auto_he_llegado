@@ -22,7 +22,7 @@ from ui.theme import (
 )
 
 # Modifica estos valores para cambiar los rangos visuales del contador del pool.
-POOL_LOW_MAX = 299
+POOL_LOW_MAX = 300
 POOL_MEDIUM_MAX = 600
 
 
