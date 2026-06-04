@@ -10,6 +10,8 @@ from ui.theme import ACCENT, ACCENT_HOVER, BORDER, CARD_ALT_BG, NEUTRAL_BUTTON, 
 
 
 class ProcessSlotPanel(ctk.CTkFrame):
+    _MIN_CARD_HEIGHT = 304
+
     def __init__(
         self,
         master,
@@ -21,6 +23,9 @@ class ProcessSlotPanel(ctk.CTkFrame):
         on_open_diagnostics=None,
         on_open_extensions=None,
         on_open_browser=None,
+        on_owner_selfie_toggle=None,
+        on_owner_selfie_select=None,
+        on_owner_selfie_remove=None,
         **kwargs,
     ) -> None:
         super().__init__(master, fg_color=CARD_ALT_BG, corner_radius=18, border_width=1, border_color=BORDER, **kwargs)
@@ -33,7 +38,7 @@ class ProcessSlotPanel(ctk.CTkFrame):
         self.grid_columnconfigure(0, weight=1)
         self.grid_rowconfigure(1, weight=1)
         self.grid_propagate(False)
-        self.configure(height=258)
+        self.configure(height=self._MIN_CARD_HEIGHT)
         self.header = ctk.CTkFrame(self, fg_color="transparent")
         self.header.grid(row=0, column=0, padx=10, pady=(8, 2), sticky="ew")
         self.header.grid_columnconfigure(0, weight=1)
@@ -77,21 +82,26 @@ class ProcessSlotPanel(ctk.CTkFrame):
 
         self.body = ctk.CTkFrame(self, fg_color="transparent")
         self.body.grid(row=1, column=0, padx=10, pady=(0, 6), sticky="nsew")
-        self.body.grid_columnconfigure(0, weight=9)
-        self.body.grid_columnconfigure(1, weight=11)
+        self.body.grid_columnconfigure(0, weight=1, uniform="slot_body")
+        self.body.grid_columnconfigure(1, weight=1, uniform="slot_body")
         self.body.grid_rowconfigure(0, weight=1)
         self.body.grid_rowconfigure(1, weight=0)
 
-        self.form_panel = FormPanel(self.body)
+        self.form_panel = FormPanel(
+            self.body,
+            on_owner_selfie_toggle=on_owner_selfie_toggle,
+            on_owner_selfie_select=on_owner_selfie_select,
+            on_owner_selfie_remove=on_owner_selfie_remove,
+        )
         self.form_panel.grid(row=0, column=0, sticky="nsew")
 
         self.status_panel = StatusPanel(self.body)
         self.status_panel.grid(row=0, column=1, padx=(10, 0), sticky="nsew")
 
         self.actions = self.form_panel.get_actions_container()
-        self.actions.grid_columnconfigure(0, weight=1)
-        self.actions.grid_columnconfigure(1, weight=1)
-        self.actions.grid_columnconfigure(2, weight=1)
+        self.actions.grid_columnconfigure(0, weight=1, uniform="primary_actions")
+        self.actions.grid_columnconfigure(1, weight=1, uniform="primary_actions")
+        self.actions.grid_columnconfigure(2, weight=1, uniform="primary_actions")
 
         self.run_button = ctk.CTkButton(
             self.actions,
@@ -101,9 +111,9 @@ class ProcessSlotPanel(ctk.CTkFrame):
             corner_radius=10,
             fg_color=ACCENT,
             hover_color=ACCENT_HOVER,
-            font=ctk.CTkFont(size=11, weight="bold"),
+            font=ctk.CTkFont(size=10, weight="bold"),
         )
-        self.run_button.grid(row=0, column=0, padx=(0, 6), pady=(0, 2), sticky="ew")
+        self.run_button.grid(row=0, column=0, padx=(0, 5), pady=(0, 2), sticky="ew")
 
         self.clear_button = ctk.CTkButton(
             self.actions,
@@ -116,7 +126,7 @@ class ProcessSlotPanel(ctk.CTkFrame):
             text_color=TEXT_PRIMARY,
             font=ctk.CTkFont(size=10, weight="bold"),
         )
-        self.clear_button.grid(row=0, column=1, padx=(0, 6), pady=(0, 2), sticky="ew")
+        self.clear_button.grid(row=0, column=1, padx=(0, 5), pady=(0, 2), sticky="ew")
 
         self.export_debug_button = ctk.CTkButton(
             self.actions,
@@ -135,7 +145,7 @@ class ProcessSlotPanel(ctk.CTkFrame):
         self.secondary_actions.grid_columnconfigure(0, weight=1)
         self.secondary_actions.grid_columnconfigure(1, weight=1)
         self.secondary_actions.grid_columnconfigure(2, weight=1)
-        self.secondary_actions.grid(row=2, column=0, pady=(0, 0), sticky="ew")
+        self.secondary_actions.grid(row=4, column=0, pady=(0, 0), sticky="ew")
 
         self.diagnostics_button = ctk.CTkButton(
             self.secondary_actions,
@@ -197,9 +207,9 @@ class ProcessSlotPanel(ctk.CTkFrame):
         header_padx = 10
         header_pady = (8, 2)
         body_padx = 10
-        body_pady = (0, 6)
+        body_pady = (0, 8)
 
-        self.configure(corner_radius=18)
+        self.configure(corner_radius=18, height=self._MIN_CARD_HEIGHT)
         self.header.grid_configure(padx=header_padx, pady=header_pady)
         self.body.grid_configure(padx=body_padx, pady=body_pady)
         self.eyebrow.configure(font=ctk.CTkFont(size=12, weight="bold"))
@@ -224,8 +234,8 @@ class ProcessSlotPanel(ctk.CTkFrame):
         self.extension_status_panel.set_compact_layout(True)
         self.secondary_actions.grid_remove()
         self.process_timer_label.grid_configure(row=0, column=1, pady=0, sticky="e")
-        self.body.grid_columnconfigure(0, weight=9)
-        self.body.grid_columnconfigure(1, weight=11)
+        self.body.grid_columnconfigure(0, weight=1, uniform="slot_body")
+        self.body.grid_columnconfigure(1, weight=1, uniform="slot_body")
         self.status_panel.grid_configure(row=0, column=1, columnspan=1, padx=(10, 0), pady=0, sticky="nsew")
         self.result_wrap.grid_forget()
 

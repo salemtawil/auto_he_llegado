@@ -186,7 +186,7 @@ class SettingsDialog(ctk.CTkToplevel):
 
             updater_hint = ctk.CTkLabel(
                 footer,
-                text="Cierra la app y lanza el updater externo para aplicar cambios de GitHub.",
+                text="Aplica un paquete de actualizacion staged y reinicia la app automaticamente.",
                 text_color=TEXT_MUTED,
                 font=ctk.CTkFont(size=11),
                 justify="left",

@@ -123,7 +123,9 @@ try {
         Invoke-Python -Arguments @("-m", "py_compile", "app_main.py")
         Invoke-Python -Arguments @("-m", "py_compile", "app_uploader.py")
         Invoke-Python -Arguments @("-m", "py_compile", "app_debug_inspector.py")
+        Invoke-Python -Arguments @("-m", "py_compile", "app_update_helper.py")
         Invoke-Python -Arguments @("-m", "py_compile", "updater\github_sync_updater.py")
+        Invoke-Python -Arguments @("-m", "py_compile", "updater\apply_update_helper.py")
         Invoke-Python -Arguments @("-m", "py_compile", "ui\main_app\window.py")
     }
 
@@ -208,7 +210,9 @@ try {
         Assert-PathExists -PathValue (Join-Path $PortableRoot "AutoHeLlegado.exe") -Message "Falta dist\AutoHeLlegado\AutoHeLlegado.exe"
         Assert-PathExists -PathValue (Join-Path $PortableRoot "AutoHeLlegadoUploader.exe") -Message "Falta dist\AutoHeLlegado\AutoHeLlegadoUploader.exe"
         Assert-PathExists -PathValue (Join-Path $PortableRoot "AutoHeLlegadoDebugInspector.exe") -Message "Falta dist\AutoHeLlegado\AutoHeLlegadoDebugInspector.exe"
+        Assert-PathExists -PathValue (Join-Path $PortableRoot "AutoHeLlegadoUpdateHelper.exe") -Message "Falta dist\AutoHeLlegado\AutoHeLlegadoUpdateHelper.exe"
         Assert-PathExists -PathValue (Join-Path $PortableRoot "updater\github_sync_updater.py") -Message "Falta dist\AutoHeLlegado\updater\github_sync_updater.py"
+        Assert-PathExists -PathValue (Join-Path $PortableRoot "updater\apply_update_helper.py") -Message "Falta dist\AutoHeLlegado\updater\apply_update_helper.py"
         Assert-PathExists -PathValue (Join-Path $PortableRoot "updater\launchers\ActualizarApp.bat") -Message "Falta dist\AutoHeLlegado\updater\launchers\ActualizarApp.bat"
         Assert-PathExists -PathValue (Join-Path $PortableRoot "browser_extension") -Message "Falta dist\AutoHeLlegado\browser_extension\"
         Assert-PathExists -PathValue (Join-Path $PortableRoot "logs") -Message "Falta dist\AutoHeLlegado\logs\"

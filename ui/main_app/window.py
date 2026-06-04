@@ -5,6 +5,7 @@ import json
 import os
 import platform
 import re
+import shutil
 import subprocess
 import threading
 from dataclasses import dataclass
@@ -102,6 +103,7 @@ class MainAppWindow(ctk.CTk):
 
         self._build_header()
         self._build_content()
+        self._cleanup_owner_selfie_temp_files()
         self.bind("<Configure>", self._handle_window_resize)
         self.protocol("WM_DELETE_WINDOW", self._handle_app_close)
         self._safe_after(150, self.refresh_pool_count)
@@ -157,7 +159,7 @@ class MainAppWindow(ctk.CTk):
         self.header_actions = ctk.CTkFrame(self.header, fg_color="transparent")
         self.header_actions.grid(row=0, column=2, padx=(0, 12), pady=6, sticky="nsew")
         self.header_actions.grid_rowconfigure(0, weight=1)
-        for column in range(5):
+        for column in range(6):
             self.header_actions.grid_columnconfigure(column, weight=1)
 
         self.refresh_button = self._create_header_tile(
@@ -192,6 +194,14 @@ class MainAppWindow(ctk.CTk):
         )
         self.cleanup_button.grid(row=0, column=3, padx=(0, 6), sticky="nsew")
 
+        self.theme_toggle_button = self._create_header_tile(
+            self.header_actions,
+            icon="",
+            text="Claro",
+            command=self.toggle_theme_mode,
+        )
+        self.theme_toggle_button.grid(row=0, column=4, padx=(0, 6), sticky="nsew")
+
         self.settings_button = self._create_header_tile(
             self.header_actions,
             icon="⚙",
@@ -199,7 +209,8 @@ class MainAppWindow(ctk.CTk):
             command=self.open_settings_dialog,
             highlighted=True,
         )
-        self.settings_button.grid(row=0, column=4, sticky="nsew")
+        self.settings_button.grid(row=0, column=5, sticky="nsew")
+        self._sync_theme_toggle_button()
         self._refresh_header_summary()
 
     def _create_header_tile(self, master, *, icon: str, text: str, command, highlighted: bool = False):
@@ -235,6 +246,8 @@ class MainAppWindow(ctk.CTk):
             font=ctk.CTkFont(size=10, weight="bold"),
         )
         text_label.grid(row=1, column=0, padx=6, pady=(0, 10), sticky="n")
+        tile._icon_label = icon_label
+        tile._text_label = text_label
 
         def on_enter(_event=None):
             tile.configure(border_color=ACCENT, fg_color=NEUTRAL_BUTTON_HOVER)
@@ -252,6 +265,24 @@ class MainAppWindow(ctk.CTk):
 
         return tile
 
+    @staticmethod
+    def _set_header_tile_text(tile, text: str) -> None:
+        text_label = getattr(tile, "_text_label", None)
+        if text_label is not None:
+            text_label.configure(text=text)
+
+    @staticmethod
+    def _set_header_tile_icon(tile, icon: str) -> None:
+        icon_label = getattr(tile, "_icon_label", None)
+        if icon_label is not None:
+            icon_label.configure(text=icon)
+
+    @staticmethod
+    def _get_theme_toggle_visuals(theme_mode: str) -> tuple[str, str]:
+        if theme_mode == "dark":
+            return ("◐", "Oscuro")
+        return ("☼", "Claro")
+
     def _build_content(self) -> None:
         self.content = ctk.CTkFrame(self, fg_color="transparent")
         self.content.grid(row=1, column=0, padx=10, pady=(0, 10), sticky="nsew")
@@ -261,8 +292,8 @@ class MainAppWindow(ctk.CTk):
         self.main_column = ctk.CTkFrame(self.content, fg_color="transparent")
         self.main_column.grid(row=0, column=0, sticky="nsew")
         self.main_column.grid_columnconfigure(0, weight=1)
-        self.main_column.grid_rowconfigure(0, weight=1)
-        self.main_column.grid_rowconfigure(1, weight=1)
+        self.main_column.grid_rowconfigure(0, weight=1, uniform="process_slots")
+        self.main_column.grid_rowconfigure(1, weight=1, uniform="process_slots")
 
         slot_1_panel = ProcessSlotPanel(
             self.main_column,
@@ -273,6 +304,9 @@ class MainAppWindow(ctk.CTk):
             on_open_diagnostics=self._open_diagnostics_panel,
             on_open_extensions=lambda: self.open_extension_test_browser("slot_1"),
             on_open_browser=lambda: self.open_manual_browser("slot_1"),
+            on_owner_selfie_toggle=lambda enabled: self._handle_owner_selfie_toggle("slot_1", enabled),
+            on_owner_selfie_select=lambda: self._handle_owner_selfie_select("slot_1"),
+            on_owner_selfie_remove=lambda: self._handle_owner_selfie_remove("slot_1"),
         )
 
         slot_2_panel = ProcessSlotPanel(
@@ -284,6 +318,9 @@ class MainAppWindow(ctk.CTk):
             on_open_diagnostics=self._open_diagnostics_panel,
             on_open_extensions=lambda: self.open_extension_test_browser("slot_2"),
             on_open_browser=lambda: self.open_manual_browser("slot_2"),
+            on_owner_selfie_toggle=lambda enabled: self._handle_owner_selfie_toggle("slot_2", enabled),
+            on_owner_selfie_select=lambda: self._handle_owner_selfie_select("slot_2"),
+            on_owner_selfie_remove=lambda: self._handle_owner_selfie_remove("slot_2"),
         )
 
         self._slots = {
@@ -311,62 +348,30 @@ class MainAppWindow(ctk.CTk):
             messagebox.showerror("Actualizar app", error_message, parent=self)
             return
 
-        confirmed = messagebox.askyesno(
-            "Actualizar app",
-            (
-                "Se cerrara Auto He Llegado y se abrira el actualizador. "
-                "Guarda cualquier proceso o espera a que termine antes de continuar."
-            ),
-            parent=self,
-        )
-        if not confirmed:
-            return
-
-        if not self._launch_external_updater():
+        if not self._launch_integrated_updater():
             return
 
         with contextlib.suppress(Exception):
-            self._broadcast_status_message("Actualizador iniciado. Cerrando app...", color=SUCCESS)
+            self._broadcast_status_message("Actualizando, la app se reiniciará.", color=SUCCESS)
         self._handle_app_close()
 
     def _validate_updater_ready(self) -> str | None:
         if self._active_process_count() > 0:
             return "Hay procesos activos. Espera a que terminen o cancelalos antes de actualizar."
 
-        updater_script, updater_config = self._resolve_updater_paths()
-        if not updater_script.is_file():
-            return "No se encontro el updater externo."
+        helper_source = self._resolve_update_helper_source()
+        updater_config = self._resolve_updater_config_path()
+        package_dir = self._resolve_update_package_dir()
+
+        if helper_source is None:
+            return "No se encontro el helper de actualizacion."
         if not updater_config.is_file():
             return "No se encontro updater/updater_config.json. Configura el updater antes de actualizar."
         if not self._is_updater_config_valid(updater_config):
             return "El updater_config.json no esta configurado con owner/repo reales."
+        if not package_dir.is_dir():
+            return "No se encontro updates/staging/latest_build. Prepara primero el paquete de actualizacion."
         return None
-
-    @staticmethod
-    def _get_updater_command(
-        updater_script: Path,
-        updater_config: Path,
-        *,
-        system_name: str | None = None,
-    ) -> list[str]:
-        normalized_system = (system_name or platform.system()).strip().lower()
-        script_relpath = updater_script.relative_to(PROJECT_ROOT)
-        config_relpath = updater_config.relative_to(PROJECT_ROOT)
-        if normalized_system == "windows":
-            return [
-                "python",
-                str(script_relpath).replace("/", "\\"),
-                "--apply",
-                "--config",
-                str(config_relpath).replace("/", "\\"),
-            ]
-        return [
-            "python3",
-            str(script_relpath).replace("\\", "/"),
-            "--apply",
-            "--config",
-            str(config_relpath).replace("\\", "/"),
-        ]
 
     @staticmethod
     def _is_updater_config_valid(config_path: Path) -> bool:
@@ -389,58 +394,90 @@ class MainAppWindow(ctk.CTk):
         return True
 
     @staticmethod
-    def _resolve_updater_paths() -> tuple[Path, Path]:
+    def _resolve_updater_config_path() -> Path:
         root_updater_dir = PROJECT_ROOT / "updater"
-        if (root_updater_dir / "github_sync_updater.py").is_file() or (root_updater_dir / "updater_config.json").is_file():
-            return root_updater_dir / "github_sync_updater.py", root_updater_dir / "updater_config.json"
+        if (root_updater_dir / "updater_config.json").is_file():
+            return root_updater_dir / "updater_config.json"
         internal_updater_dir = PROJECT_ROOT / "_internal" / "updater"
-        return internal_updater_dir / "github_sync_updater.py", internal_updater_dir / "updater_config.json"
+        return internal_updater_dir / "updater_config.json"
 
-    def _resolve_external_updater_launch(
-        self,
-        *,
-        system_name: str | None = None,
-    ) -> tuple[list[str], dict[str, object]]:
-        normalized_system = (system_name or platform.system()).strip().lower()
+    @staticmethod
+    def _resolve_update_package_dir() -> Path:
+        return PROJECT_ROOT / "updates" / "staging" / "latest_build"
+
+    @staticmethod
+    def _resolve_update_helper_source() -> Path | None:
+        root_helper_exe = PROJECT_ROOT / "AutoHeLlegadoUpdateHelper.exe"
+        if root_helper_exe.is_file():
+            return root_helper_exe
+
+        root_helper_script = PROJECT_ROOT / "updater" / "apply_update_helper.py"
+        if root_helper_script.is_file():
+            return root_helper_script
+
+        internal_helper_script = PROJECT_ROOT / "_internal" / "updater" / "apply_update_helper.py"
+        if internal_helper_script.is_file():
+            return internal_helper_script
+
+        return None
+
+    @staticmethod
+    def _resolve_app_executable_path() -> Path:
+        portable_exe = PROJECT_ROOT / "AutoHeLlegado.exe"
+        if portable_exe.is_file():
+            return portable_exe
+        return PROJECT_ROOT / "app_main.py"
+
+    @staticmethod
+    def _prepare_helper_runtime_copy(helper_source: Path) -> Path:
+        if helper_source.suffix.lower() == ".exe":
+            return helper_source
+
+        runtime_dir = PROJECT_ROOT / "updates" / "runtime_helper"
+        runtime_dir.mkdir(parents=True, exist_ok=True)
+        runtime_copy = runtime_dir / helper_source.name
+        shutil.copy2(helper_source, runtime_copy)
+        return runtime_copy
+
+    def _launch_integrated_updater(self) -> bool:
+        helper_source = self._resolve_update_helper_source()
+        if helper_source is None:
+            messagebox.showerror("Actualizar app", "No se encontro el helper de actualizacion.", parent=self)
+            return False
+
+        helper_runtime = self._prepare_helper_runtime_copy(helper_source)
+        package_dir = self._resolve_update_package_dir()
+        app_exe = self._resolve_app_executable_path()
+        log_dir = PROJECT_ROOT / "updates" / "update_logs"
+
+        command = [
+            str(helper_runtime),
+            "--install-dir",
+            str(PROJECT_ROOT),
+            "--package-dir",
+            str(package_dir),
+            "--app-exe",
+            str(app_exe),
+            "--wait-pid",
+            str(os.getpid()),
+            "--restart",
+            "--log-dir",
+            str(log_dir),
+        ]
+        if helper_runtime.suffix.lower() != ".exe":
+            command.insert(0, "python")
+
+        creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
         popen_kwargs: dict[str, object] = {"cwd": str(PROJECT_ROOT)}
-        updater_script, updater_config = self._resolve_updater_paths()
-        launcher_root = updater_script.parent
-
-        mac_launcher = launcher_root / "launchers" / "ActualizarApp.command"
-        windows_launcher = launcher_root / "launchers" / "ActualizarApp.bat"
-
-        if normalized_system == "windows":
-            creationflags = getattr(subprocess, "CREATE_NEW_CONSOLE", 0)
-            if creationflags:
-                popen_kwargs["creationflags"] = creationflags
-            if windows_launcher.is_file():
-                return [str(windows_launcher)], popen_kwargs
-            return self._get_updater_command(updater_script, updater_config, system_name="Windows"), popen_kwargs
-
-        popen_kwargs["start_new_session"] = True
-        if normalized_system == "darwin" and mac_launcher.is_file():
-            return ["open", str(mac_launcher)], popen_kwargs
-        return self._get_updater_command(updater_script, updater_config, system_name=normalized_system), popen_kwargs
-
-    def _launch_external_updater(self) -> bool:
-        system_name = platform.system()
-        command, popen_kwargs = self._resolve_external_updater_launch(system_name=system_name)
+        if creationflags:
+            popen_kwargs["creationflags"] = creationflags
 
         try:
             subprocess.Popen(command, **popen_kwargs)
         except Exception as exc:
-            ssl_hint = ""
-            if system_name.strip().lower() == "darwin":
-                ssl_hint = (
-                    "\n\nSi luego el updater falla en macOS con "
-                    "'SSL: CERTIFICATE_VERIFY_FAILED', ejecuta:\n"
-                    'open "/Applications/Python 3.11/Install Certificates.command"\n'
-                    "o\n"
-                    'open "/Applications/Python 3.12/Install Certificates.command"'
-                )
             messagebox.showerror(
                 "Actualizar app",
-                f"No se pudo iniciar el actualizador externo: {exc}{ssl_hint}",
+                f"No se pudo iniciar el helper de actualizacion: {exc}",
                 parent=self,
             )
             return False
@@ -506,16 +543,8 @@ class MainAppWindow(ctk.CTk):
 
     def toggle_theme_mode(self) -> None:
         next_mode = "dark" if self._current_config.theme_mode == "light" else "light"
-        config = self._current_config.model_copy(update={"theme_mode": next_mode})
         try:
-            self._persist_local_config(config)
-            self._broadcast_status_message(
-                f"Tema cambiado a {'oscuro' if next_mode == 'dark' else 'claro'} y guardado localmente.",
-                color=SUCCESS,
-            )
-            if self._settings_dialog is not None and self._settings_dialog.winfo_exists():
-                self._settings_dialog.destroy()
-                self._settings_dialog = None
+            self._persist_theme_mode_only(next_mode)
         except Exception as exc:
             self._broadcast_status_message(f"No se pudo cambiar el tema: {exc}", color=ERROR)
 
@@ -529,6 +558,17 @@ class MainAppWindow(ctk.CTk):
         self._sync_theme_toggle_button()
         self._sync_run_button_state()
         self._refresh_header_summary()
+
+    def _persist_theme_mode_only(self, theme_mode: str) -> None:
+        normalized = apply_theme_mode(theme_mode)
+        previous_theme_mode = self._current_config.theme_mode
+        updated_config = self._current_config.model_copy(update={"theme_mode": normalized})
+        self._current_config = updated_config
+        self._sync_theme_toggle_button()
+        if previous_theme_mode != normalized:
+            self._refresh_theme_widgets()
+        self._current_config = self._config_service.save(updated_config)
+        self._sync_theme_toggle_button()
 
     def _prompt_agent_name_if_needed(self) -> None:
         if self._current_config.agent_name_confirmed:
@@ -570,7 +610,16 @@ class MainAppWindow(ctk.CTk):
         self.update_idletasks()
 
     def _sync_theme_toggle_button(self) -> None:
-        return
+        button = getattr(self, "theme_toggle_button", None)
+        if button is not None:
+            icon, label = self._get_theme_toggle_visuals(self._current_config.theme_mode)
+            self._set_header_tile_icon(button, icon)
+            self._set_header_tile_text(button, label)
+        if self._settings_dialog is not None and self._settings_dialog.winfo_exists():
+            with contextlib.suppress(Exception):
+                self._settings_dialog.theme_menu.set(self._current_config.theme_mode)
+            with contextlib.suppress(Exception):
+                self._settings_dialog._sync_save_button_state()
 
     def _handle_window_resize(self, event) -> None:
         if event.widget is not self:
@@ -602,7 +651,9 @@ class MainAppWindow(ctk.CTk):
         self.main_column.grid(row=0, column=0, sticky="nsew")
         self.main_column.grid_columnconfigure(0, weight=1)
         self.main_column.grid_columnconfigure(1, weight=0)
-        slot_1.grid(row=0, column=0, pady=(0, 10), sticky="ew")
+        self.main_column.grid_rowconfigure(0, weight=1, uniform="process_slots")
+        self.main_column.grid_rowconfigure(1, weight=1, uniform="process_slots")
+        slot_1.grid(row=0, column=0, pady=(0, 10), sticky="nsew")
         slot_2.grid(row=1, column=0, sticky="nsew")
 
         self._refresh_header_summary()
@@ -745,7 +796,11 @@ class MainAppWindow(ctk.CTk):
         try:
             request = self._build_process_request(slot_id, process_id=process_id)
         except Exception as exc:
-            self._set_slot_status(slot_id, f"Formulario invalido: {exc}", color=ERROR)
+            error_message = str(exc)
+            if error_message == "Selecciona una foto valida del titular o desactiva la opcion.":
+                self._set_slot_status(slot_id, error_message, color=ERROR)
+            else:
+                self._set_slot_status(slot_id, f"Formulario invalido: {exc}", color=ERROR)
             return
 
         self._process_service.register_process_slot(process_id, slot_id)
@@ -932,10 +987,84 @@ class MainAppWindow(ctk.CTk):
 
     def clear_form(self, slot_id: str) -> None:
         slot = self._get_slot(slot_id)
+        self._clear_owner_selfie_state(slot_id, remove_file=True)
         slot.panel.form_panel.clear()
         slot.panel.status_panel.clear_persistent_alert()
         slot.panel.status_panel.clear_retry_indicator()
         self._set_slot_status(slot_id, "Formulario limpiado manualmente.")
+
+    @staticmethod
+    def _allowed_owner_selfie_suffixes() -> tuple[str, ...]:
+        return (".jpg", ".jpeg", ".png")
+
+    def _owner_selfie_dir(self) -> Path:
+        settings = self.__dict__.get("_settings")
+        if settings is None:
+            settings = get_settings()
+        directory = settings.local_data_dir / "account_selfies"
+        directory.mkdir(parents=True, exist_ok=True)
+        return directory
+
+    def _copy_owner_selfie_file(self, slot_id: str, source_path: Path) -> Path:
+        suffix = source_path.suffix.lower()
+        if suffix not in self._allowed_owner_selfie_suffixes():
+            raise ValueError("Solo se permiten archivos JPG, JPEG o PNG.")
+        if not source_path.is_file():
+            raise ValueError("Selecciona una foto valida del titular o desactiva la opcion.")
+        target_dir = self._owner_selfie_dir()
+        for existing_suffix in self._allowed_owner_selfie_suffixes():
+            existing = target_dir / f"{slot_id}_owner_selfie{existing_suffix}"
+            if existing.exists():
+                existing.unlink()
+        target_path = target_dir / f"{slot_id}_owner_selfie{suffix}"
+        shutil.copy2(source_path, target_path)
+        return target_path
+
+    def _owner_selfie_file_candidates(self, slot_id: str) -> list[Path]:
+        target_dir = self._owner_selfie_dir()
+        return [target_dir / f"{slot_id}_owner_selfie{suffix}" for suffix in self._allowed_owner_selfie_suffixes()]
+
+    def _cleanup_owner_selfie_temp_files(self) -> None:
+        for slot_id in self._slots:
+            self._delete_owner_selfie_file(slot_id)
+            form_panel = self._get_slot(slot_id).panel.form_panel
+            set_owner_selfie_state = getattr(form_panel, "set_owner_selfie_state", None)
+            if callable(set_owner_selfie_state):
+                set_owner_selfie_state(enabled=False, path=None)
+
+    def _delete_owner_selfie_file(self, slot_id: str) -> None:
+        for candidate in self._owner_selfie_file_candidates(slot_id):
+            with contextlib.suppress(FileNotFoundError):
+                candidate.unlink()
+
+    def _clear_owner_selfie_state(self, slot_id: str, *, remove_file: bool = True) -> None:
+        if remove_file:
+            self._delete_owner_selfie_file(slot_id)
+        self._get_slot(slot_id).panel.form_panel.set_owner_selfie_state(enabled=False, path=None)
+
+    def _handle_owner_selfie_toggle(self, slot_id: str, enabled: bool) -> None:
+        form_panel = self._get_slot(slot_id).panel.form_panel
+        current_path = form_panel.get_owner_selfie_data().get("owner_selfie_path")
+        form_panel.set_owner_selfie_state(enabled=enabled, path=str(current_path) if current_path else None)
+
+    def _handle_owner_selfie_select(self, slot_id: str) -> None:
+        selected_path = filedialog.askopenfilename(
+            parent=self,
+            title="Seleccionar foto del titular",
+            filetypes=[("Imagenes", "*.jpg *.jpeg *.png")],
+        )
+        if not selected_path:
+            return
+        try:
+            copied = self._copy_owner_selfie_file(slot_id, Path(selected_path))
+            self._get_slot(slot_id).panel.form_panel.set_owner_selfie_state(enabled=True, path=str(copied))
+            self._set_slot_status(slot_id, f"Foto del titular guardada: {copied.name}", color=SUCCESS)
+        except Exception as exc:
+            self._set_slot_status(slot_id, str(exc), color=ERROR)
+
+    def _handle_owner_selfie_remove(self, slot_id: str) -> None:
+        self._clear_owner_selfie_state(slot_id, remove_file=True)
+        self._set_slot_status(slot_id, "Foto del titular eliminada.", color=SUCCESS)
 
     def open_extension_test_browser(self, slot_id: str) -> None:
         if self._is_closing:
@@ -1371,6 +1500,7 @@ class MainAppWindow(ctk.CTk):
         if self._is_closing:
             return
         self._is_closing = True
+        self._cleanup_owner_selfie_temp_files()
         for slot_id, slot in self._slots.items():
             self._stop_process_timer(slot_id, prefix="Tiempo final")
             with contextlib.suppress(Exception):
@@ -1405,18 +1535,29 @@ class MainAppWindow(ctk.CTk):
             self.destroy()
 
     def _build_process_request(self, slot_id: str, *, process_id: str) -> ProcessExecutionRequest:
-        data = self._get_slot(slot_id).panel.form_panel.get_form_data()
+        form_panel = self._get_slot(slot_id).panel.form_panel
+        data = form_panel.get_form_data()
+        owner_selfie_data = form_panel.get_owner_selfie_data()
         agent_name = validate_non_empty_string(self._current_config.agent_name, "agent_name")
         phone_number = sanitize_phone_number(data["phone_number"])
         validate_non_empty_string(data["password"], "password")
+        owner_selfie_enabled = bool(owner_selfie_data.get("owner_selfie_enabled"))
+        owner_selfie_path = str(owner_selfie_data.get("owner_selfie_path") or "").strip() or None
+        if owner_selfie_enabled:
+            suffix = Path(owner_selfie_path or "").suffix.lower()
+            if not owner_selfie_path or not Path(owner_selfie_path).is_file() or suffix not in self._allowed_owner_selfie_suffixes():
+                raise ValueError("Selecciona una foto valida del titular o desactiva la opcion.")
         return ProcessExecutionRequest(
             process_id=process_id,
+            slot_id=slot_id,
             page_name=data["page_name"],
             action_name=data["action_name"],
             phone_number=phone_number,
             password=data["password"],
             agent_name=agent_name,
             execution_mode=self._current_config.flow_engine,
+            owner_selfie_enabled=owner_selfie_enabled,
+            owner_selfie_path=owner_selfie_path,
         )
 
     @staticmethod

@@ -135,3 +135,25 @@ def test_load_old_config_migrates_browser_extension_defaults(tmp_path) -> None:
     assert raw_data["flow_engine"] == "traditional"
     assert raw_data["enable_browser_extension"] is True
     assert raw_data["browser_extension_overlay"] is True
+
+
+def test_load_ignores_legacy_owner_selfie_slot_fields(tmp_path) -> None:
+    service = LocalConfigService()
+    service._config_dir = tmp_path  # noqa: SLF001
+    service._config_path = tmp_path / "main_app_config.json"  # noqa: SLF001
+    service._config_path.write_text(  # noqa: SLF001
+        json.dumps(
+            {
+                "agent_name": "Agente Local",
+                "page_timeout_seconds": 180,
+                "action_timeout_seconds": 180,
+                "slot_1_owner_selfie_enabled": True,
+                "slot_1_owner_selfie_path": "local_data/account_selfies/slot_1_owner_selfie.jpg",
+            }
+        ),
+        encoding="utf-8",
+    )
+    config = service.load()
+
+    assert config.agent_name == "Agente Local"
+    assert not hasattr(config, "slot_1_owner_selfie_enabled")

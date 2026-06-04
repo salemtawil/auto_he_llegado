@@ -62,6 +62,48 @@ class _FakeSession:
         raise RuntimeError("Cannot switch to a different thread")
 
 
+class _FakeTileLabel:
+    def __init__(self, text: str = "") -> None:
+        self.text = text
+
+    def configure(self, *, text: str) -> None:
+        self.text = text
+
+
+class _FakeTile:
+    def __init__(self, text: str = "", icon: str = "") -> None:
+        self._icon_label = _FakeTileLabel(icon)
+        self._text_label = _FakeTileLabel(text)
+
+
+class _FakeThemeMenu:
+    def __init__(self) -> None:
+        self.value = None
+
+    def set(self, value: str) -> None:
+        self.value = value
+
+
+class _FakeSettingsDialog:
+    def __init__(self) -> None:
+        self.theme_menu = _FakeThemeMenu()
+        self.sync_calls = 0
+
+    def winfo_exists(self) -> bool:
+        return True
+
+    def _sync_save_button_state(self) -> None:
+        self.sync_calls += 1
+
+
+class _FakeThemeConfig:
+    def __init__(self, theme_mode: str) -> None:
+        self.theme_mode = theme_mode
+
+    def model_copy(self, *, update: dict) -> "_FakeThemeConfig":
+        return _FakeThemeConfig(update["theme_mode"])
+
+
 def test_window_export_keeps_process_debug_when_frame_debug_fails(monkeypatch, tmp_path) -> None:
     written: dict[str, object] = {}
     slot = ProcessSlotRuntime(slot_id="slot_1", panel=_FakePanel(), process_id=None, last_process_id="proc-1")
@@ -171,3 +213,61 @@ def test_handle_app_close_continues_when_status_broadcast_fails(monkeypatch) -> 
 
     assert window._is_closing is True  # noqa: SLF001
     assert started == [True]
+
+
+def test_sync_theme_toggle_button_updates_header_label_for_light_and_dark() -> None:
+    window = MainAppWindow.__new__(MainAppWindow)
+    window.theme_toggle_button = _FakeTile("Inicial")  # noqa: SLF001
+    window._settings_dialog = None  # noqa: SLF001
+    window._current_config = SimpleNamespace(theme_mode="light")  # noqa: SLF001
+
+    window._sync_theme_toggle_button()
+
+    assert window.theme_toggle_button._text_label.text == "Claro"  # noqa: SLF001
+    assert window.theme_toggle_button._icon_label.text == "☼"  # noqa: SLF001
+
+    window._current_config = SimpleNamespace(theme_mode="dark")  # noqa: SLF001
+    window._sync_theme_toggle_button()
+
+    assert window.theme_toggle_button._text_label.text == "Oscuro"  # noqa: SLF001
+    assert window.theme_toggle_button._icon_label.text == "◐"  # noqa: SLF001
+
+
+def test_toggle_theme_mode_persists_next_theme_without_refresh_or_messages(monkeypatch) -> None:
+    window = MainAppWindow.__new__(MainAppWindow)
+    window._current_config = _FakeThemeConfig("light")  # noqa: SLF001
+    window._settings_dialog = None  # noqa: SLF001
+    persisted = []
+    refresh_calls = []
+    messages = []
+    theme_syncs = []
+    repaint_calls = []
+    window._config_service = SimpleNamespace(save=lambda config: persisted.append(config) or config)  # noqa: SLF001
+    window.refresh_extension_status = lambda: refresh_calls.append("refresh")  # type: ignore[method-assign]  # noqa: SLF001
+    window._broadcast_status_message = lambda message, color=None: messages.append((message, color))  # type: ignore[method-assign]  # noqa: SLF001
+    window._sync_theme_toggle_button = lambda: theme_syncs.append(window._current_config.theme_mode)  # type: ignore[method-assign]  # noqa: SLF001
+    window._refresh_theme_widgets = lambda: repaint_calls.append(window._current_config.theme_mode)  # type: ignore[method-assign]  # noqa: SLF001
+    monkeypatch.setattr("ui.main_app.window.apply_theme_mode", lambda mode: mode)
+
+    window.toggle_theme_mode()
+
+    assert persisted[0].theme_mode == "dark"
+    assert window._current_config.theme_mode == "dark"  # noqa: SLF001
+    assert refresh_calls == []
+    assert messages == []
+    assert theme_syncs == ["dark", "dark"]
+    assert repaint_calls == ["dark"]
+
+
+def test_sync_theme_toggle_button_updates_open_settings_dialog_theme_menu() -> None:
+    window = MainAppWindow.__new__(MainAppWindow)
+    window.theme_toggle_button = _FakeTile("Inicial")  # noqa: SLF001
+    window._current_config = SimpleNamespace(theme_mode="dark")  # noqa: SLF001
+    window._settings_dialog = _FakeSettingsDialog()  # noqa: SLF001
+
+    window._sync_theme_toggle_button()
+
+    assert window.theme_toggle_button._text_label.text == "Oscuro"  # noqa: SLF001
+    assert window.theme_toggle_button._icon_label.text == "◐"  # noqa: SLF001
+    assert window._settings_dialog.theme_menu.value == "dark"  # noqa: SLF001
+    assert window._settings_dialog.sync_calls == 1  # noqa: SLF001

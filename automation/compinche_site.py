@@ -74,6 +74,14 @@ class CompincheSelectors:
         "[class*='photo']",
         "[class*='avatar']",
     )
+    owner_selfie_option_texts: tuple[str, ...] = (
+        "permitirme subir una selfie del propietario",
+        "selfie del propietario",
+        "selfie del titular",
+        "subir una selfie",
+        "upload an owner selfie",
+        "owner selfie",
+    )
     processing_done_markers: tuple[str, ...] = ("estacion", "station", "estacao", "precio", "price", "valor", "hora", "time", "horario")
     processing_texts: tuple[str, ...] = (
         "validando",
@@ -589,6 +597,7 @@ class CompincheSite(BaseSite):
 
     def _execute_pipeline(self, request: ProcessExecutionRequest, *, local_config: LocalConfig, progress_callback: ProgressCallback | None) -> SiteExecutionResult:
         self._reset_process_debug_state()
+        self._request = request
         self._mark_phase_timing("process_started", process_id=getattr(request, "process_id", None))
         self._record_run_stat("process_started", process_id=getattr(request, "process_id", None))
         self._photo_service.validate_atomic_reservation_support()
@@ -1386,6 +1395,110 @@ class CompincheSite(BaseSite):
             return
         raise CompincheFlowError("photo_upload", "No se pudo confirmar que la foto quedo cargada antes de continuar.")
 
+    def _upload_owner_selfie_file(
+        self,
+        root: Page | Frame | Locator,
+        *,
+        file_input: Locator,
+        owner_selfie_path: Path,
+        timeout_ms: int,
+    ) -> None:
+        file_input.set_input_files(owner_selfie_path)
+        if self._wait_for_uploaded_file_input(file_input=file_input, timeout_ms=min(timeout_ms, 3_000)):
+            return
+        raise RuntimeError("No se pudo confirmar la carga de la selfie del titular.")
+
+    def _wait_for_uploaded_file_input(self, *, file_input: Locator, timeout_ms: int) -> bool:
+        deadline = monotonic() + max(timeout_ms, 200) / 1000
+        while monotonic() < deadline:
+            if self._locator_has_uploaded_file(file_input):
+                return True
+            self._wait_interval(150)
+        return self._locator_has_uploaded_file(file_input)
+
+    def _find_owner_selfie_option(self, root: Page | Frame | Locator) -> Locator | None:
+        return self._find_best_text_candidate(root, self._selectors.owner_selfie_option_texts)
+
+    def _click_owner_selfie_option(self, option_locator: Locator) -> None:
+        checkbox = self._try_locator(option_locator, "input[type='checkbox']")
+        if checkbox is not None and self._try_click_candidate(checkbox, use_force=False):
+            return
+        label = self._try_locator(option_locator, "xpath=ancestor-or-self::label[1]")
+        if label is not None and self._try_click_candidate(label, use_force=False):
+            return
+        if self._try_click_candidate(option_locator, use_force=True):
+            return
+        raise RuntimeError("No se pudo marcar la opcion de selfie del propietario.")
+
+    def _resolve_owner_selfie_file_input(
+        self,
+        root: Page | Frame | Locator,
+        option_locator: Locator,
+        timeout_ms: int,
+    ) -> Locator:
+        candidates = (
+            self._try_locator(option_locator, "xpath=ancestor-or-self::label[1]//input[@type='file']"),
+            self._try_locator(option_locator, "xpath=ancestor-or-self::*[1]//input[@type='file']"),
+            self._find_photo_input(root, timeout_ms=min(timeout_ms, 2_000)),
+        )
+        for candidate in candidates:
+            if candidate is not None:
+                return candidate
+        raise RuntimeError("No aparecio el input file para la selfie del titular.")
+
+    def _maybe_handle_owner_selfie_option(
+        self,
+        root: Page | Frame | Locator,
+        *,
+        request: ProcessExecutionRequest,
+        progress_callback: ProgressCallback | None,
+        timeout_ms: int,
+    ) -> None:
+        if not request.owner_selfie_enabled:
+            return
+        self._record_timeline_event("owner_selfie_enabled", path=request.owner_selfie_path)
+        self._record_run_stat("owner_selfie_enabled", path=request.owner_selfie_path)
+        self.emit_progress(progress_callback, phase="selfie_stage", message="Selfie del titular habilitada.")
+        owner_selfie_path = Path(request.owner_selfie_path or "")
+        if not request.owner_selfie_path or not owner_selfie_path.is_file():
+            self._record_timeline_event("owner_selfie_upload_failed", reason="missing_file", path=str(owner_selfie_path))
+            self._record_run_stat("owner_selfie_upload_failed", reason="missing_file", path=str(owner_selfie_path))
+            error_message = "Error cargando selfie del titular: no se encontro la foto local del titular."
+            self.emit_progress(progress_callback, phase="selfie_stage", message=error_message)
+            raise RuntimeError("no se encontro la foto local del titular")
+        option_locator = self._find_owner_selfie_option(root)
+        if option_locator is None:
+            self._record_timeline_event("owner_selfie_option_not_available")
+            self._record_run_stat("owner_selfie_option_not_available")
+            self.emit_progress(
+                progress_callback,
+                phase="selfie_stage",
+                message="Opcion de selfie del propietario no disponible; continuando flujo normal.",
+            )
+            return
+        self._record_timeline_event("owner_selfie_option_detected")
+        self._record_run_stat("owner_selfie_option_detected")
+        self.emit_progress(progress_callback, phase="selfie_stage", message="Opcion de selfie del propietario detectada.")
+        self._click_owner_selfie_option(option_locator)
+        self._record_timeline_event("owner_selfie_checkbox_clicked")
+        self._record_run_stat("owner_selfie_checkbox_clicked")
+        try:
+            owner_file_input = self._resolve_owner_selfie_file_input(root, option_locator, timeout_ms=timeout_ms)
+            self._upload_owner_selfie_file(
+                root,
+                file_input=owner_file_input,
+                owner_selfie_path=owner_selfie_path,
+                timeout_ms=timeout_ms,
+            )
+        except Exception as exc:
+            self._record_timeline_event("owner_selfie_upload_failed", error=str(exc))
+            self._record_run_stat("owner_selfie_upload_failed", error=str(exc))
+            self.emit_progress(progress_callback, phase="selfie_stage", message=f"Error cargando selfie del titular: {exc}")
+            raise
+        self._record_timeline_event("owner_selfie_uploaded", file_name=owner_selfie_path.name)
+        self._record_run_stat("owner_selfie_uploaded", file_name=owner_selfie_path.name)
+        self.emit_progress(progress_callback, phase="selfie_stage", message="Foto del titular cargada correctamente.")
+
     def _continue_from_modal(self, root: Page | Frame | Locator, *, continue_button: Locator | None = None) -> None:
         continue_button = continue_button or self._require_continue_button(root)
         self._wait_for_enabled(continue_button, timeout_ms=2_000, phase="modal_continue", error_message="El boton equivalente a 'Continuar' sigue deshabilitado en compinche.io.")
@@ -1473,6 +1586,12 @@ class CompincheSite(BaseSite):
                 self.emit_progress(progress_callback, phase="selfie_stage", message="Foto cargada.")
                 self._mark_phase_timing("photo_upload_done", attempt=attempt, file_name=reserved_photo.original_filename)
                 self._record_run_stat("photo_upload_done", attempt=attempt, file_name=reserved_photo.original_filename)
+                self._maybe_handle_owner_selfie_option(
+                    current_root,
+                    request=self._request,
+                    progress_callback=progress_callback,
+                    timeout_ms=action_timeout_ms,
+                )
                 self.emit_progress(progress_callback, phase="selfie_stage", message="Presionando Continuar para seguir el flujo...")
                 continue_button = self._require_continue_button(current_root)
                 self.emit_progress(progress_callback, phase="selfie_stage", message="Continuar encontrado.")

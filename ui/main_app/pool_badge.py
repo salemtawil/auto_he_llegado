@@ -22,8 +22,8 @@ from ui.theme import (
 )
 
 # Modifica estos valores para cambiar los rangos visuales del contador del pool.
-POOL_LOW_MAX = 300
-POOL_MEDIUM_MAX = 600
+POOL_LOW_MAX = 1000
+POOL_MEDIUM_MAX = 2200
 
 
 @dataclass(frozen=True)
@@ -34,7 +34,24 @@ class PoolBadgeVisualState:
     count_color: str | tuple[str, str]
 
 
-def resolve_pool_badge_visual_state(available_count: int) -> PoolBadgeVisualState:
+def _normalize_pool_thresholds(
+    low_max: int | None = None,
+    medium_max: int | None = None,
+) -> tuple[int, int]:
+    resolved_low_max = low_max if isinstance(low_max, int) and low_max > 0 else POOL_LOW_MAX
+    resolved_medium_max = medium_max if isinstance(medium_max, int) and medium_max > 0 else POOL_MEDIUM_MAX
+    if resolved_low_max >= resolved_medium_max:
+        return POOL_LOW_MAX, POOL_MEDIUM_MAX
+    return resolved_low_max, resolved_medium_max
+
+
+def resolve_pool_badge_visual_state(
+    available_count: int,
+    *,
+    low_max: int | None = None,
+    medium_max: int | None = None,
+) -> PoolBadgeVisualState:
+    resolved_low_max, resolved_medium_max = _normalize_pool_thresholds(low_max, medium_max)
     if available_count <= 0:
         return PoolBadgeVisualState(
             chip_text="Vacio",
@@ -42,14 +59,14 @@ def resolve_pool_badge_visual_state(available_count: int) -> PoolBadgeVisualStat
             chip_text_color=ERROR,
             count_color=ERROR,
         )
-    if available_count <= POOL_LOW_MAX:
+    if available_count <= resolved_low_max:
         return PoolBadgeVisualState(
             chip_text="Bajo",
             chip_fg=ERROR_SOFT,
             chip_text_color=ERROR,
             count_color=ERROR,
         )
-    if available_count <= POOL_MEDIUM_MAX:
+    if available_count <= resolved_medium_max:
         return PoolBadgeVisualState(
             chip_text="Medio",
             chip_fg=WARNING_SOFT,

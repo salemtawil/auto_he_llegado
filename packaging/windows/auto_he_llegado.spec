@@ -64,6 +64,7 @@ datas += collect_tree(PROJECT_ROOT / "updater" / "launchers", "updater/launchers
 
 updater_files = (
     PROJECT_ROOT / "updater" / "github_sync_updater.py",
+    PROJECT_ROOT / "updater" / "apply_update_helper.py",
     PROJECT_ROOT / "updater" / "README.md",
     PROJECT_ROOT / "updater" / "updater_config.example.json",
 )
@@ -105,17 +106,21 @@ def build_executable(script_name: str, exe_name: str):
 a_main, exe_main = build_executable("app_main.py", "AutoHeLlegado")
 a_uploader, exe_uploader = build_executable("app_uploader.py", "AutoHeLlegadoUploader")
 a_debug, exe_debug = build_executable("app_debug_inspector.py", "AutoHeLlegadoDebugInspector")
+a_helper, exe_helper = build_executable("app_update_helper.py", "AutoHeLlegadoUpdateHelper")
 
 coll = COLLECT(
     exe_main,
     exe_uploader,
     exe_debug,
+    exe_helper,
     a_main.binaries,
     a_main.datas,
     a_uploader.binaries,
     a_uploader.datas,
     a_debug.binaries,
     a_debug.datas,
+    a_helper.binaries,
+    a_helper.datas,
     strip=False,
     upx=False,
     upx_exclude=[],

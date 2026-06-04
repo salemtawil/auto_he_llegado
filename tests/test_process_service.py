@@ -1135,3 +1135,42 @@ def test_process_service_evicted_process_debug_does_not_break_slot_lookup() -> N
     fallback = service.get_process_debug_export(None, slot_id="slot-evict-51")
     assert fallback["process_id"] == "proc-evict-51"
     assert fallback["timeline"] == [{"event": "evict-51"}]
+
+
+def test_execute_preserves_owner_selfie_request_fields_for_site_run() -> None:
+    site = StubCompincheSite(
+        SiteExecutionResult(
+            success=True,
+            message="Proceso completado correctamente en compinche.io.",
+            final_status="success",
+            phase="final_result",
+        )
+    )
+    service = ProcessService(
+        log_service_factory=build_log_service_factory(StubLogService()),
+        local_config_service=StubLocalConfigService(),
+        compinche_site=site,
+        paripe_site=StubParipeSite(
+            SiteExecutionResult(success=True, message="unused", final_status="success", phase="final_result")
+        ),
+    )
+
+    service.execute(
+        ProcessExecutionRequest(
+            process_id="proc-owner-selfie",
+            page_name="Compinche",
+            action_name="He llegado",
+            phone_number="8095551234",
+            password="secret",
+            agent_name="Agente Local",
+            execution_mode="normal",
+            slot_id="slot_1",
+            owner_selfie_enabled=True,
+            owner_selfie_path="C:/tmp/owner-selfie.jpg",
+        )
+    )
+
+    request_used = site.execute_calls[0][1]
+    assert request_used.slot_id == "slot_1"
+    assert request_used.owner_selfie_enabled is True
+    assert request_used.owner_selfie_path == "C:/tmp/owner-selfie.jpg"

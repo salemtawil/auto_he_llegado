@@ -269,12 +269,20 @@ class LocalConfig(DomainModel):
 
 class ProcessExecutionRequest(DomainModel):
     process_id: str | None = None
+    slot_id: str | None = None
     page_name: str
     action_name: str
     phone_number: str
     password: str
     agent_name: str
     execution_mode: str = "traditional"
+    owner_selfie_enabled: bool = False
+    owner_selfie_path: str | None = None
+
+    @field_validator("slot_id", "owner_selfie_path")
+    @classmethod
+    def _validate_optional_request_text(cls, value: str | None) -> str | None:
+        return validate_optional_string(value, "optional_text")
 
 
 class ProcessExecutionResult(DomainModel):

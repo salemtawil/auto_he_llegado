@@ -1,4 +1,6 @@
+from pathlib import Path
 from types import SimpleNamespace
+import pytest
 
 from automation.compinche_site import CompincheSite, FlowRoot
 from core.models import LocalConfig, ProcessExecutionRequest, ReservedPhoto, SiteExecutionResult
@@ -448,3 +450,124 @@ def test_compinche_timing_summary_uses_combined_site_validation_and_block_click(
     assert "selfie" not in summary
     assert "bloque 4.0s" not in summary_text
     assert "validacion sitio 4.0s" in summary_text
+
+
+def test_compinche_owner_selfie_disabled_does_not_change_flow() -> None:
+    site = CompincheSite()
+    progress_events: list[tuple[str, str]] = []
+    timeline_before = list(site.export_process_debug_state().get("timeline", []))
+
+    site._maybe_handle_owner_selfie_option(  # noqa: SLF001
+        root="iframe",
+        request=_request(),
+        progress_callback=lambda phase, message: progress_events.append((phase, message)),
+        timeout_ms=5_000,
+    )
+
+    timeline_after = site.export_process_debug_state().get("timeline", [])
+    assert progress_events == []
+    assert timeline_after == timeline_before
+
+
+def test_compinche_owner_selfie_without_site_option_records_not_available_and_continues(tmp_path: Path) -> None:
+    site = CompincheSite()
+    owner_selfie = tmp_path / "owner-selfie.jpg"
+    owner_selfie.write_text("demo", encoding="utf-8")
+    progress_events: list[tuple[str, str]] = []
+    request = _request().model_copy(update={"owner_selfie_enabled": True, "owner_selfie_path": str(owner_selfie)})
+    site._find_owner_selfie_option = lambda _root: None  # type: ignore[method-assign]  # noqa: SLF001
+
+    site._maybe_handle_owner_selfie_option(  # noqa: SLF001
+        root="iframe",
+        request=request,
+        progress_callback=lambda phase, message: progress_events.append((phase, message)),
+        timeout_ms=5_000,
+    )
+
+    messages = [message for _phase, message in progress_events]
+    exported = site.export_process_debug_state()
+    assert "Selfie del titular habilitada." in messages
+    assert "Opcion de selfie del propietario no disponible; continuando flujo normal." in messages
+    assert any(item["event"] == "owner_selfie_option_not_available" for item in exported["timeline"])
+
+
+def test_compinche_owner_selfie_option_present_clicks_checkbox_and_uploads_file(tmp_path: Path) -> None:
+    site = CompincheSite()
+    owner_selfie = tmp_path / "owner-selfie.jpg"
+    owner_selfie.write_text("demo", encoding="utf-8")
+    progress_events: list[tuple[str, str]] = []
+    actions: list[str] = []
+    request = _request().model_copy(update={"owner_selfie_enabled": True, "owner_selfie_path": str(owner_selfie)})
+
+    site._find_owner_selfie_option = lambda _root: "option"  # type: ignore[method-assign]  # noqa: SLF001
+    site._click_owner_selfie_option = lambda _option: actions.append("clicked")  # type: ignore[method-assign]  # noqa: SLF001
+    site._resolve_owner_selfie_file_input = lambda _root, _option, timeout_ms: "input"  # type: ignore[method-assign]  # noqa: SLF001
+    site._upload_owner_selfie_file = lambda _root, *, file_input, owner_selfie_path, timeout_ms: actions.append(f"uploaded:{file_input}:{owner_selfie_path}")  # type: ignore[method-assign]  # noqa: SLF001
+
+    site._maybe_handle_owner_selfie_option(  # noqa: SLF001
+        root="iframe",
+        request=request,
+        progress_callback=lambda phase, message: progress_events.append((phase, message)),
+        timeout_ms=5_000,
+    )
+
+    exported = site.export_process_debug_state()
+    assert actions == ["clicked", f"uploaded:input:{owner_selfie}"]
+    assert any(item["event"] == "owner_selfie_option_detected" for item in exported["timeline"])
+    assert any(item["event"] == "owner_selfie_checkbox_clicked" for item in exported["timeline"])
+    assert any(item["event"] == "owner_selfie_uploaded" for item in exported["timeline"])
+    assert ("selfie_stage", "Foto del titular cargada correctamente.") in progress_events
+
+
+def test_compinche_owner_selfie_upload_failure_records_event(tmp_path: Path) -> None:
+    site = CompincheSite()
+    owner_selfie = tmp_path / "owner-selfie.jpg"
+    owner_selfie.write_text("demo", encoding="utf-8")
+    progress_events: list[tuple[str, str]] = []
+    request = _request().model_copy(update={"owner_selfie_enabled": True, "owner_selfie_path": str(owner_selfie)})
+
+    site._find_owner_selfie_option = lambda _root: "option"  # type: ignore[method-assign]  # noqa: SLF001
+    site._click_owner_selfie_option = lambda _option: None  # type: ignore[method-assign]  # noqa: SLF001
+    site._resolve_owner_selfie_file_input = lambda _root, _option, timeout_ms: "input"  # type: ignore[method-assign]  # noqa: SLF001
+
+    def fail_upload(_root, *, file_input, owner_selfie_path, timeout_ms):
+        raise RuntimeError("fallo file input")
+
+    site._upload_owner_selfie_file = fail_upload  # type: ignore[method-assign]  # noqa: SLF001
+
+    with pytest.raises(RuntimeError, match="fallo file input"):
+        site._maybe_handle_owner_selfie_option(  # noqa: SLF001
+            root="iframe",
+            request=request,
+            progress_callback=lambda phase, message: progress_events.append((phase, message)),
+            timeout_ms=5_000,
+        )
+
+    exported = site.export_process_debug_state()
+    assert any(item["event"] == "owner_selfie_upload_failed" for item in exported["timeline"])
+    assert any(message.startswith("Error cargando selfie del titular:") for _phase, message in progress_events)
+
+
+def test_compinche_owner_selfie_missing_path_fails_before_upload_attempt(tmp_path: Path) -> None:
+    site = CompincheSite()
+    progress_events: list[tuple[str, str]] = []
+    request = _request().model_copy(
+        update={"owner_selfie_enabled": True, "owner_selfie_path": str(tmp_path / "missing-owner.jpg")}
+    )
+    upload_attempted = {"value": False}
+    site._find_owner_selfie_option = lambda _root: "option"  # type: ignore[method-assign]  # noqa: SLF001
+    site._click_owner_selfie_option = lambda _option: None  # type: ignore[method-assign]  # noqa: SLF001
+    site._resolve_owner_selfie_file_input = lambda _root, _option, timeout_ms: "input"  # type: ignore[method-assign]  # noqa: SLF001
+    site._upload_owner_selfie_file = lambda *_args, **_kwargs: upload_attempted.__setitem__("value", True)  # type: ignore[method-assign]  # noqa: SLF001
+
+    with pytest.raises(RuntimeError, match="no se encontro la foto local del titular"):
+        site._maybe_handle_owner_selfie_option(  # noqa: SLF001
+            root="iframe",
+            request=request,
+            progress_callback=lambda phase, message: progress_events.append((phase, message)),
+            timeout_ms=5_000,
+        )
+
+    exported = site.export_process_debug_state()
+    assert upload_attempted["value"] is False
+    assert any(item["event"] == "owner_selfie_upload_failed" for item in exported["timeline"])
