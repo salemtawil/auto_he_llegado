@@ -2,6 +2,7 @@
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 APP_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+PYTHON_BIN="${PYTHON_BIN:-python3}"
 
 cd "$APP_ROOT" || {
   echo "No se pudo abrir la carpeta de la app."
@@ -37,12 +38,16 @@ run_step() {
   fi
 }
 
-run_step "Verificando configuracion remota" python3 updater/github_sync_updater.py --check --config updater/updater_config.json
-run_step "Simulando cambios" python3 updater/github_sync_updater.py --dry-run --config updater/updater_config.json
-run_step "Aplicando actualizacion" python3 updater/github_sync_updater.py --apply --config updater/updater_config.json
+run_step "Verificando configuracion remota" "$PYTHON_BIN" updater/github_sync_updater.py --check --config updater/updater_config.json
+run_step "Simulando cambios" "$PYTHON_BIN" updater/github_sync_updater.py --dry-run --config updater/updater_config.json
+run_step "Aplicando actualizacion" "$PYTHON_BIN" updater/github_sync_updater.py --apply --config updater/updater_config.json
 
 echo
 echo "La actualizacion termino correctamente."
+if [ -d "$APP_ROOT/AutoHeLlegado.app" ]; then
+  echo "Abriendo Auto He Llegado..."
+  open "$APP_ROOT/AutoHeLlegado.app" || true
+fi
 echo "Si aparece CERTIFICATE_VERIFY_FAILED, ejecuta:"
 echo 'open "/Applications/Python 3.11/Install Certificates.command"'
 echo "o"

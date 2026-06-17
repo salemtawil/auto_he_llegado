@@ -5,7 +5,8 @@
   "install_dir": ".",
   "app_entrypoints": [
     "app_main.py",
-    "app_main.exe"
+    "app_main.exe",
+    "AutoHeLlegado.app"
   ],
   "allowed_roots": [
     "app_main.py",

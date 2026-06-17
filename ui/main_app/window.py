@@ -7,6 +7,7 @@ import platform
 import re
 import shutil
 import subprocess
+import sys
 import threading
 from dataclasses import dataclass
 from datetime import datetime
@@ -431,6 +432,15 @@ class MainAppWindow(ctk.CTk):
 
     @staticmethod
     def _resolve_app_executable_path() -> Path:
+        if sys.platform == "darwin":
+            executable_path = Path(sys.executable).resolve()
+            for parent in (executable_path, *executable_path.parents):
+                if parent.suffix.lower() == ".app" and parent.is_dir():
+                    return parent
+            portable_app = PROJECT_ROOT / "AutoHeLlegado.app"
+            if portable_app.is_dir():
+                return portable_app
+
         portable_exe = PROJECT_ROOT / "AutoHeLlegado.exe"
         if portable_exe.is_file():
             return portable_exe
@@ -446,6 +456,14 @@ class MainAppWindow(ctk.CTk):
         runtime_copy = runtime_dir / helper_source.name
         shutil.copy2(helper_source, runtime_copy)
         return runtime_copy
+
+    @staticmethod
+    def _resolve_helper_python_command() -> str:
+        if not getattr(sys, "frozen", False):
+            return sys.executable
+        if sys.platform == "darwin":
+            return "python3"
+        return "python"
 
     def _launch_integrated_updater(self) -> bool:
         helper_source = self._resolve_update_helper_source()
@@ -473,7 +491,7 @@ class MainAppWindow(ctk.CTk):
             str(log_dir),
         ]
         if helper_runtime.suffix.lower() != ".exe":
-            command.insert(0, "python")
+            command.insert(0, self._resolve_helper_python_command())
 
         creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
         popen_kwargs: dict[str, object] = {"cwd": str(PROJECT_ROOT)}

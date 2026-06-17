@@ -744,7 +744,9 @@ class BrowserSession:
     @staticmethod
     def _is_real_google_chrome_executable(executable_path: str | None) -> bool:
         normalized = str(executable_path or "").replace("/", "\\").lower()
-        return normalized.endswith("\\google\\chrome\\application\\chrome.exe")
+        if normalized.endswith("\\google\\chrome\\application\\chrome.exe"):
+            return True
+        return "/google chrome.app/contents/macos/google chrome" in str(executable_path or "").lower()
 
     @staticmethod
     def _has_extension_launch_arg(args: list[str], prefix: str) -> bool:
@@ -1346,7 +1348,12 @@ class BrowserManager:
         normalized = str(candidate).replace("/", "\\").lower()
         if cls._is_playwright_bundled_chromium(normalized):
             return False
-        return candidate.name.lower() == "chrome.exe"
+        executable_name = candidate.name.lower()
+        if executable_name == "chrome.exe":
+            return True
+        if executable_name == "google chrome":
+            return "google chrome.app" in str(candidate).lower()
+        return False
 
     @classmethod
     def _build_installed_profile_cdp_command(

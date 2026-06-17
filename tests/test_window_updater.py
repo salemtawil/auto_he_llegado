@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -183,7 +184,7 @@ def test_launch_integrated_updater_uses_helper_and_current_pid(tmp_path: Path, m
 
     assert ok is True
     assert seen["command"] == [
-        "python",
+        sys.executable,
         str(tmp_path / "updater" / "apply_update_helper.py"),
         "--install-dir",
         str(tmp_path),
@@ -198,6 +199,17 @@ def test_launch_integrated_updater_uses_helper_and_current_pid(tmp_path: Path, m
         str(tmp_path / "updates" / "update_logs"),
     ]
     assert seen["kwargs"] == {"cwd": str(tmp_path), "creationflags": 134218240}
+
+
+def test_resolve_app_executable_path_accepts_macos_app_bundle(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(window_module, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr(window_module.sys, "platform", "darwin")
+    (tmp_path / "AutoHeLlegado.app").mkdir()
+    window = _build_window()
+
+    app_path = window._resolve_app_executable_path()
+
+    assert app_path == tmp_path / "AutoHeLlegado.app"
 
 
 def test_launch_integrated_updater_prefers_helper_exe(tmp_path: Path, monkeypatch) -> None:

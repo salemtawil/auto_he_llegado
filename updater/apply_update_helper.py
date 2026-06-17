@@ -123,6 +123,14 @@ def _write_log(log_path: Path, result: ApplyHelperResult, install_dir: Path, pac
     log_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
+def build_restart_command(app_path: Path) -> list[str]:
+    if sys.platform == "darwin" and app_path.suffix.lower() == ".app":
+        return ["open", str(app_path)]
+    if app_path.suffix.lower() == ".py":
+        return [sys.executable, str(app_path)]
+    return [str(app_path)]
+
+
 def apply_staged_update(
     *,
     install_dir: Path,
@@ -211,7 +219,7 @@ def apply_staged_update(
         app_path = Path(app_exe)
         if not app_path.is_absolute():
             app_path = install_dir / app_path
-        starter([str(app_path)], cwd=str(install_dir))
+        starter(build_restart_command(app_path), cwd=str(install_dir))
         restarted = True
 
     result = ApplyHelperResult(

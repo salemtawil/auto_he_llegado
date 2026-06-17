@@ -5,7 +5,8 @@ from pathlib import Path
 
 import pytest
 
-from updater.apply_update_helper import apply_staged_update, wait_for_process_exit
+import updater.apply_update_helper as helper_module
+from updater.apply_update_helper import apply_staged_update, build_restart_command, wait_for_process_exit
 
 
 def _write_file(path: Path, content: str) -> None:
@@ -178,6 +179,41 @@ def test_apply_staged_update_restarts_app_on_success(tmp_path: Path) -> None:
     assert result.applied is True
     assert result.restarted is True
     assert popen_calls == [([str(install_dir / "AutoHeLlegado.exe")], {"cwd": str(install_dir)})]
+
+
+def test_build_restart_command_uses_open_for_macos_app_bundle(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(helper_module.sys, "platform", "darwin")
+    app_path = tmp_path / "AutoHeLlegado.app"
+
+    command = build_restart_command(app_path)
+
+    assert command == ["open", str(app_path)]
+
+
+def test_apply_staged_update_restarts_macos_app_bundle_with_open(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(helper_module.sys, "platform", "darwin")
+    install_dir = tmp_path / "install"
+    package_dir = tmp_path / "package"
+    (install_dir / "AutoHeLlegado.app").mkdir(parents=True)
+    _write_file(package_dir / "AutoHeLlegado.app" / "Contents" / "Info.plist", "plist")
+    popen_calls: list[tuple[list[str], dict[str, object]]] = []
+
+    def fake_popen(command: list[str], **kwargs):
+        popen_calls.append((command, kwargs))
+        return object()
+
+    result = apply_staged_update(
+        install_dir=install_dir,
+        package_dir=package_dir,
+        app_exe="AutoHeLlegado.app",
+        restart=True,
+        popen_factory=fake_popen,
+        now_factory=lambda: datetime(2026, 5, 30, 17, 3, 30),
+    )
+
+    assert result.applied is True
+    assert result.restarted is True
+    assert popen_calls == [(["open", str(install_dir / "AutoHeLlegado.app")], {"cwd": str(install_dir)})]
 
 
 def test_apply_staged_update_does_not_restart_on_failure(tmp_path: Path) -> None:

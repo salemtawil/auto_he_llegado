@@ -13,7 +13,7 @@ from typing import Callable
 from urllib.request import Request, urlopen
 
 
-APP_ENTRYPOINTS_DEFAULT = ["app_main.py", "app_main.exe"]
+APP_ENTRYPOINTS_DEFAULT = ["app_main.py", "app_main.exe", "AutoHeLlegado.app"]
 EXPECTED_DIRS = ("ui", "services", "automation")
 PORTABLE_INTERNAL_DIR = "_internal"
 BUILTIN_EXCLUDED_PREFIXES = (
@@ -186,16 +186,22 @@ def _validate_install_dir_by_layout(install_dir: Path, app_entrypoints: list[str
     checked_dirs = list(EXPECTED_DIRS)
     found_dirs = [item for item in EXPECTED_DIRS if (install_dir / item).is_dir()]
     has_internal = (install_dir / PORTABLE_INTERNAL_DIR).is_dir()
+    found_app_bundles = [
+        item
+        for item in checked_entrypoints
+        if Path(item).suffix.lower() == ".app" and (install_dir / item).is_dir()
+    ]
 
-    if has_internal:
+    if has_internal or found_app_bundles:
         if found_entrypoints:
             return
         raise InstallDirError(
-            "Instalacion portable PyInstaller invalida. "
+            "Instalacion portable PyInstaller/macOS invalida. "
             f"install_dir={install_dir}. "
             "Tipo detectado=portable. "
             f"Entrypoints revisados={checked_entrypoints}. "
             f"Entrypoints encontrados={found_entrypoints or 'ninguno'}. "
+            f"Bundles .app encontrados={found_app_bundles or 'ninguno'}. "
             f"Carpetas revisadas={checked_dirs}. "
             f"Carpetas encontradas={found_dirs or 'ninguna'}. "
             f"_internal={'si' if has_internal else 'no'}."

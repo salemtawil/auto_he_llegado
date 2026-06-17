@@ -40,7 +40,11 @@ def make_portable_install_dir(
     install_dir = tmp_path / "portable"
     install_dir.mkdir()
     for entrypoint in entrypoints:
-        (install_dir / entrypoint).write_text("portable\n", encoding="utf-8")
+        entrypoint_path = install_dir / entrypoint
+        if entrypoint_path.suffix.lower() == ".app":
+            entrypoint_path.mkdir()
+        else:
+            entrypoint_path.write_text("portable\n", encoding="utf-8")
     if with_internal:
         (install_dir / "_internal").mkdir()
     return install_dir
@@ -52,7 +56,7 @@ def make_config(install_dir: Path) -> UpdaterConfig:
         repo="demo-repo",
         branch="main",
         install_dir=str(install_dir),
-        app_entrypoints=["app_main.py", "app_main.exe"],
+        app_entrypoints=["app_main.py", "app_main.exe", "AutoHeLlegado.app"],
         allowed_roots=["app_main.py", "automation/", "core/", "services/", "storage/", "ui/", "requirements.txt"],
         protected_paths=[".env", "config/", "logs/", "exports/", "data/", "local_data/", "chrome_profiles/", "backups/", "updates/", ".venv/", "__pycache__/", "*.local.json"],
     )
@@ -135,6 +139,16 @@ def test_validate_install_dir_accepts_portable_with_multiple_entrypoints_from_co
         install_dir,
         ["AutoHeLlegado.exe", "AutoHeLlegadoUploader.exe", "AutoHeLlegadoDebugInspector.exe"],
     )
+
+
+def test_validate_install_dir_accepts_macos_app_bundle(tmp_path: Path) -> None:
+    install_dir = make_portable_install_dir(
+        tmp_path,
+        entrypoints=("AutoHeLlegado.app",),
+        with_internal=False,
+    )
+
+    validate_install_dir(install_dir, ["AutoHeLlegado.app"])
 
 
 def test_validate_install_dir_invalid(tmp_path: Path) -> None:
