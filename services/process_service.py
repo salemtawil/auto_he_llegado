@@ -20,6 +20,7 @@ from core.validators import sanitize_phone_number
 from services.last_result_service import LastResultService
 from services.local_config_service import LocalConfigService
 from services.log_service import LogService
+from services.photo_source_tracker import get_photo_source_summary, reset_photo_source_counts
 from services.process_run_context import ProcessRunContext
 
 
@@ -121,6 +122,7 @@ class ProcessService:
                 "execution_mode": resolved_engine,
             }
         )
+        reset_photo_source_counts(normalized_request.process_id)
         initial_phase = "login"
         flow_engine = self._engine_router.resolve(resolved_engine)
 
@@ -274,7 +276,12 @@ class ProcessService:
                     run_context.log_record_id,
                     phase=site_result.phase,
                     final_status=site_result.final_status,
-                    message=self._build_finish_message(site_result, run_context=run_context, runner=site_runner.runner),
+                    message=self._build_finish_message(
+                        site_result,
+                        run_context=run_context,
+                        runner=site_runner.runner,
+                        process_id=normalized_request.process_id,
+                    ),
                     station_name=site_result.station_name,
                     block_price=site_result.block_price,
                     block_time=site_result.block_time,
@@ -300,7 +307,7 @@ class ProcessService:
             agent_name=normalized_request.agent_name,
             execution_mode=normalized_request.execution_mode,
             success=site_result.success,
-            message=site_result.message,
+            message=self._build_result_message(site_result, process_id=normalized_request.process_id),
             final_status=site_result.final_status,
             phase=site_result.phase,
             station_name=site_result.station_name,
@@ -321,15 +328,25 @@ class ProcessService:
         *,
         run_context: ProcessRunContext | None = None,
         runner=None,
+        process_id: str | None = None,
     ) -> str:
         retry_suffix = (
             f" Reintentos selfie: {site_result.selfie_retry_count}. "
             f"Deepfakescore: {'activado' if site_result.deepfakescore_activated else 'no activado'}."
         )
+        source_suffix = self._build_photo_source_suffix(process_id)
         timing_summary = self._resolve_preferred_timing_summary_text(run_context=run_context, runner=runner)
         if timing_summary:
-            return f"{site_result.message}{retry_suffix} {timing_summary}"
-        return f"{site_result.message}{retry_suffix}"
+            return f"{site_result.message}{retry_suffix}{source_suffix} {timing_summary}"
+        return f"{site_result.message}{retry_suffix}{source_suffix}"
+
+    def _build_result_message(self, site_result: SiteExecutionResult, *, process_id: str | None) -> str:
+        return f"{site_result.message}{self._build_photo_source_suffix(process_id)}"
+
+    @staticmethod
+    def _build_photo_source_suffix(process_id: str | None) -> str:
+        source_summary = get_photo_source_summary(process_id)
+        return f" Fotos usadas: {source_summary}." if source_summary else ""
 
     def _execute_stub(self, request: ProcessExecutionRequest) -> ProcessExecutionResult:
         log_record = self._log_service.log_info(

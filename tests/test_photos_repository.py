@@ -68,6 +68,7 @@ def test_create_only_sends_real_photos_columns() -> None:
             "id": "550e8400-e29b-41d4-a716-446655440000",
             "original_name": "example.jpg",
             "file_path": "available/example.jpg",
+            "storage_bucket": "photos",
             "status": "available",
             "created_at": "2026-04-13T00:00:00",
         }
@@ -82,6 +83,7 @@ def test_create_only_sends_real_photos_columns() -> None:
             id="550e8400-e29b-41d4-a716-446655440000",
             original_filename="example.jpg",
             storage_path="available/example.jpg",
+            storage_bucket="photos",
             status=PhotoStatus.AVAILABLE,
             source="uploader_app",
             metadata={"debug": True},
@@ -95,6 +97,7 @@ def test_create_only_sends_real_photos_columns() -> None:
         "id": "550e8400-e29b-41d4-a716-446655440000",
         "original_name": "example.jpg",
         "file_path": "available\\example.jpg",
+        "storage_bucket": "photos",
         "status": "available",
     }
     assert record.original_filename == "example.jpg"
@@ -107,8 +110,9 @@ def test_bulk_create_only_sends_confirmed_photos_columns() -> None:
         {
             "id": "550e8400-e29b-41d4-a716-446655440000",
             "original_name": "one.jpg",
-            "file_path": "available/one.jpg",
-            "status": "available",
+                "file_path": "available/one.jpg",
+                "storage_bucket": "photos",
+                "status": "available",
             "created_at": "2026-04-13T00:00:00",
         },
         {
@@ -129,8 +133,9 @@ def test_bulk_create_only_sends_confirmed_photos_columns() -> None:
             PhotoCreate(
                 id="550e8400-e29b-41d4-a716-446655440000",
                 original_filename="one.jpg",
-                storage_path="available/one.jpg",
-                status=PhotoStatus.AVAILABLE,
+            storage_path="available/one.jpg",
+            storage_bucket="photos",
+            status=PhotoStatus.AVAILABLE,
                 source="uploader_app",
                 metadata={"ignored": True},
             ),
@@ -149,6 +154,7 @@ def test_bulk_create_only_sends_confirmed_photos_columns() -> None:
             "id": "550e8400-e29b-41d4-a716-446655440000",
             "original_name": "one.jpg",
             "file_path": "available\\one.jpg",
+            "storage_bucket": "photos",
             "status": "available",
         },
         {

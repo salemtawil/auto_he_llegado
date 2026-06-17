@@ -13,10 +13,11 @@ from storage.supabase_client import SupabaseClientProvider
 
 class PhotosRepository:
     _DB_ERROR_AFTER_STORAGE_DELETE_PREFIX = "Storage borrado, pero fallo update DB:"
-    _CREATE_FIELDS = {"id", "original_name", "file_path", "status"}
+    _CREATE_FIELDS = {"id", "original_name", "file_path", "status", "storage_bucket"}
     _UPDATE_FIELDS = {
         "status",
         "file_path",
+        "storage_bucket",
         "reserved_at",
         "consumed_at",
         "reserved_by_process_id",

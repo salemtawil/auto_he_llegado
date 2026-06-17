@@ -25,6 +25,8 @@ from core.validators import sanitize_phone_number, validate_non_empty_string, va
 from services.last_result_service import LastResultService
 from services.local_config_service import LocalConfigService
 from services.log_service import LogService
+from services.auth_context import get_current_session
+from services.background_video_status import get_video_status
 from services.photo_pool_service import PhotoPoolService
 from services.process_service import ProcessService
 from ui.main_app.admin_dialogs import AdminPasswordDialog, AdminUploaderDialog
@@ -109,6 +111,7 @@ class MainAppWindow(ctk.CTk):
         self._safe_after(150, self.refresh_pool_count)
         self._safe_after(200, self.refresh_extension_status)
         self._safe_after(220, self._prompt_agent_name_if_needed)
+        self._safe_after(500, self.refresh_background_video_status)
         self._safe_after(50, lambda: self._apply_responsive_layout(self.winfo_width()))
 
     def _build_header(self) -> None:
@@ -148,10 +151,15 @@ class MainAppWindow(ctk.CTk):
         self.header_status_label = ctk.CTkLabel(
             self.title_wrap,
             text="",
-            font=ctk.CTkFont(size=1),
+            font=ctk.CTkFont(size=9, weight="bold"),
             text_color=TEXT_MUTED,
         )
         self.header_status_label.grid_forget()
+
+        self.header_video_progress = ctk.CTkProgressBar(self.title_wrap, height=8, corner_radius=999)
+        self.header_video_progress.grid(row=3, column=0, pady=(4, 0), sticky="ew")
+        self.header_video_progress.set(0)
+        self.header_video_progress.grid_remove()
 
         self.pool_badge = PoolBadge(self.header, refresh_callback=self.refresh_pool_count)
         self.pool_badge.grid(row=0, column=1, padx=(0, 16), pady=6, sticky="nsew")
@@ -511,6 +519,12 @@ class MainAppWindow(ctk.CTk):
                 self._admin_password_dialog.set_error("Contrasena incorrecta. Acceso Admin denegado.")
             self._broadcast_status_message("Acceso Admin denegado por contrasena incorrecta.", color=ERROR)
             return
+        current_session = get_current_session()
+        if current_session is None or not current_session.is_admin:
+            if self._admin_password_dialog is not None and self._admin_password_dialog.winfo_exists():
+                self._admin_password_dialog.set_error("Tu usuario no tiene rol admin.")
+            self._broadcast_status_message("Acceso Admin denegado por rol de usuario.", color=ERROR)
+            return
 
         if self._admin_password_dialog is not None and self._admin_password_dialog.winfo_exists():
             self._admin_password_dialog.destroy()
@@ -752,6 +766,32 @@ class MainAppWindow(ctk.CTk):
                 self._set_slot_status(slot_id, message, color=color)
             except Exception:
                 continue
+
+    def refresh_background_video_status(self) -> None:
+        if self._is_closing:
+            return
+        status = get_video_status()
+        try:
+            if status.phase == "idle":
+                self.header_status_label.grid_forget()
+                self.header_video_progress.grid_remove()
+            else:
+                color = ERROR if status.is_error else (SUCCESS if status.is_complete else TEXT_MUTED)
+                self.header_status_label.configure(text=status.message, text_color=color)
+                self.header_status_label.grid(row=2, column=0, pady=(2, 0), sticky="w")
+                self.header_video_progress.grid(row=3, column=0, pady=(4, 0), sticky="ew")
+                if status.total > 0:
+                    self.header_video_progress.set(status.fraction)
+                elif status.is_running:
+                    self.header_video_progress.set(0.08)
+                elif status.is_complete:
+                    self.header_video_progress.set(1.0)
+                else:
+                    self.header_video_progress.set(0.0)
+        except Exception:
+            pass
+        finally:
+            self._safe_after(1000, self.refresh_background_video_status)
 
     def refresh_pool_count(self) -> None:
         if self._is_closing:

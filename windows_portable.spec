@@ -24,6 +24,8 @@ packages_to_collect = (
     "httpcore",
     "pydantic",
     "pydantic_core",
+    "cv2",
+    "numpy",
 )
 
 for package_name in packages_to_collect:

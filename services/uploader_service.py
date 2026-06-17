@@ -225,6 +225,7 @@ class UploaderService:
             id=photo_id,
             original_filename=path.name,
             storage_path=storage_path,
+            storage_bucket=self._settings.supabase_storage_bucket,
             status=PhotoStatus.AVAILABLE,
             source="uploader_app",
         )

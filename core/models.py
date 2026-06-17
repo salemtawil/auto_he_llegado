@@ -22,6 +22,7 @@ class PhotoCreate(DomainModel):
     original_filename: str = Field(alias="original_name")
     storage_path: str = Field(alias="file_path")
     status: PhotoStatus = PhotoStatus.PENDING
+    storage_bucket: str | None = None
     source: str | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
     error_message: str | None = None
@@ -36,7 +37,7 @@ class PhotoCreate(DomainModel):
     def _validate_storage_path(cls, value: str) -> str:
         return validate_image_path(value, "storage_path")
 
-    @field_validator("source", "error_message")
+    @field_validator("storage_bucket", "source", "error_message")
     @classmethod
     def _validate_optional_text(cls, value: str | None) -> str | None:
         return validate_optional_string(value, "optional_text")
@@ -57,6 +58,7 @@ class PhotoRecord(PhotoCreate):
 class PhotoUpdate(DomainModel):
     status: PhotoStatus | None = None
     storage_path: str | None = Field(default=None, alias="file_path")
+    storage_bucket: str | None = None
     reserved_at: datetime | None = None
     consumed_at: datetime | None = None
     reserved_by_process_id: str | None = None
@@ -76,6 +78,7 @@ class PhotoUpdate(DomainModel):
     @field_validator(
         "reserved_by_process_id",
         "error_message",
+        "storage_bucket",
         "cleanup_reason",
         "cleanup_error",
         "cleaned_by",
@@ -312,6 +315,7 @@ class ReservedPhoto(DomainModel):
     storage_path: str
     local_path: str
     original_filename: str
+    storage_bucket: str = ""
     reserved_by_process_id: str | None = None
 
 

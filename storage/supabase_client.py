@@ -6,6 +6,7 @@ from supabase import Client, create_client
 
 from config.settings import Settings, get_settings
 from core.exceptions import RepositoryError, SupabaseClientError
+from services.auth_context import get_current_session
 
 
 class SupabaseClientProvider:
@@ -22,6 +23,12 @@ class SupabaseClientProvider:
                     self._settings.supabase_url or "",
                     self._settings.supabase_key or "",
                 )
+                current_session = get_current_session()
+                if current_session is not None:
+                    self._client.auth.set_session(
+                        current_session.access_token,
+                        current_session.refresh_token,
+                    )
             except Exception as exc:
                 raise SupabaseClientError(
                     "Failed to create the Supabase client: "

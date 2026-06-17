@@ -128,11 +128,12 @@ class PoolBadge(ctk.CTkFrame):
     def set_compact_layout(self, compact: bool) -> None:
         self._compact = compact
         self.count_label.configure(font=ctk.CTkFont(size=20 if compact else 24, weight="bold"))
-        self.caption_label.configure(font=ctk.CTkFont(size=8 if compact else 9))
+        self.caption_label.configure(font=ctk.CTkFont(size=7 if compact else 8))
 
     def set_snapshot(self, snapshot: PhotoPoolSnapshot) -> None:
         visual_state = resolve_pool_badge_visual_state(snapshot.available_count)
         self.count_label.configure(text=str(snapshot.available_count), text_color=visual_state.count_color)
+        self.caption_label.configure(text=self._format_caption(snapshot))
         self.level_chip.configure(
             text=visual_state.chip_text,
             fg_color=visual_state.chip_fg,
@@ -141,4 +142,14 @@ class PoolBadge(ctk.CTkFrame):
 
     def set_loading(self) -> None:
         self.count_label.configure(text="...", text_color=TEXT_PRIMARY)
+        self.caption_label.configure(text="Fotos disponibles")
         self.level_chip.configure(text="Actualizando", fg_color=INFO_SOFT, text_color=INFO)
+
+    @staticmethod
+    def _format_caption(snapshot: PhotoPoolSnapshot) -> str:
+        parts = []
+        if snapshot.new_bucket_name:
+            parts.append(f"Nuevo {snapshot.new_bucket_count}")
+        if snapshot.old_bucket_name:
+            parts.append(f"Viejo {snapshot.old_bucket_count}")
+        return " | ".join(parts) if parts else "Fotos disponibles"

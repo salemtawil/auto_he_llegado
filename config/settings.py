@@ -33,6 +33,18 @@ def _get_int_env(name: str, default: int) -> int:
         ) from exc
 
 
+def _get_float_env(name: str, default: float) -> float:
+    raw_value = _get_env(name)
+    if raw_value in (None, ""):
+        return default
+    try:
+        return float(raw_value)
+    except ValueError as exc:
+        raise ConfigurationError(
+            f"Environment variable '{name}' must be a number."
+        ) from exc
+
+
 def _get_bool_env(name: str, default: bool = False) -> bool:
     raw_value = _get_env(name)
     if raw_value in (None, ""):
@@ -47,6 +59,16 @@ def _get_bool_env(name: str, default: bool = False) -> bool:
     )
 
 
+def _get_csv_env(name: str) -> tuple[str, ...]:
+    raw_value = _get_env(name, "") or ""
+    values = []
+    for item in raw_value.split(","):
+        normalized = item.strip()
+        if normalized:
+            values.append(normalized)
+    return tuple(values)
+
+
 @dataclass(frozen=True)
 class Settings:
     app_name: str
@@ -59,11 +81,19 @@ class Settings:
     supabase_storage_bucket: str
     supabase_photos_table: str
     supabase_process_logs_table: str
+    supabase_photo_batches_table: str
+    supabase_photo_candidates_table: str
+    supabase_profiles_table: str
     supabase_timeout_seconds: int
     admin_access_password: str
+    weekly_min_approved_photos: int
+    video_frame_interval_seconds: float
+    video_max_candidate_frames: int
+    video_jpeg_quality: int
     use_chrome_profile_extension: bool = False
     chrome_profile_dir: Path | None = None
     chrome_executable_path: Path | None = None
+    supabase_legacy_storage_buckets: tuple[str, ...] = ()
 
     @property
     def supabase_enabled(self) -> bool:
@@ -121,12 +151,28 @@ def get_settings() -> Settings:
             _get_env("SUPABASE_PROCESS_LOGS_TABLE", "process_logs")
             or "process_logs"
         ),
+        supabase_photo_batches_table=(
+            _get_env("SUPABASE_PHOTO_BATCHES_TABLE", "photo_ingest_batches")
+            or "photo_ingest_batches"
+        ),
+        supabase_photo_candidates_table=(
+            _get_env("SUPABASE_PHOTO_CANDIDATES_TABLE", "photo_candidates")
+            or "photo_candidates"
+        ),
+        supabase_profiles_table=(
+            _get_env("SUPABASE_PROFILES_TABLE", "profiles") or "profiles"
+        ),
         supabase_timeout_seconds=_get_int_env("SUPABASE_TIMEOUT_SECONDS", 30),
         admin_access_password=_get_env("ADMIN_ACCESS_PASSWORD", "123456987") or "123456987",
+        weekly_min_approved_photos=_get_int_env("WEEKLY_MIN_APPROVED_PHOTOS", 20),
+        video_frame_interval_seconds=_get_float_env("VIDEO_FRAME_INTERVAL_SECONDS", 0.0),
+        video_max_candidate_frames=_get_int_env("VIDEO_MAX_CANDIDATE_FRAMES", 300),
+        video_jpeg_quality=_get_int_env("VIDEO_JPEG_QUALITY", 88),
         use_chrome_profile_extension=_get_bool_env(
             "AUTO_HE_LLEGADO_USE_CHROME_PROFILE_EXTENSION",
             False,
         ),
         chrome_profile_dir=chrome_profile_dir,
         chrome_executable_path=chrome_executable_path,
+        supabase_legacy_storage_buckets=_get_csv_env("SUPABASE_LEGACY_STORAGE_BUCKETS"),
     )

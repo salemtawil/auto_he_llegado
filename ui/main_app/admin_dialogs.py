@@ -8,6 +8,8 @@ import customtkinter as ctk
 from services.photo_cleanup_service import PhotoCleanupService
 from ui.main_app.current_result_panel import CurrentResultPanel
 from ui.main_app.extension_status_panel import ExtensionStatusPanel
+from ui.main_app.photo_review_panel import PhotoReviewPanel
+from ui.main_app.user_access_panel import UserAccessPanel
 from ui.theme import (
     ACCENT,
     ACCENT_HOVER,
@@ -165,14 +167,24 @@ class AdminUploaderDialog(ctk.CTkToplevel):
 
         self.tabs = ctk.CTkTabview(container, corner_radius=20)
         self.tabs.grid(row=0, column=0, sticky="nsew")
+        self.tabs.add("Usuarios")
         self.tabs.add("Carga")
+        self.tabs.add("Revision fotos")
         self.tabs.add("Limpieza fotos")
         self.tabs.add("Diagnóstico")
 
+        self._build_user_access_tab(self.tabs.tab("Usuarios"))
         self._build_upload_tab(self.tabs.tab("Carga"), uploader_service)
+        self._build_photo_review_tab(self.tabs.tab("Revision fotos"))
         self._build_photo_cleanup_tab(self.tabs.tab("Limpieza fotos"))
         self._build_diagnostics_tab(self.tabs.tab("Diagnóstico"))
         self._set_diagnostics_idle_state()
+
+    def _build_user_access_tab(self, master) -> None:
+        master.grid_columnconfigure(0, weight=1)
+        master.grid_rowconfigure(0, weight=1)
+        panel = UserAccessPanel(master)
+        panel.grid(row=0, column=0, sticky="nsew")
 
     def _build_upload_tab(self, master, uploader_service) -> None:
         master.grid_columnconfigure(0, weight=1)
@@ -247,6 +259,12 @@ class AdminUploaderDialog(ctk.CTkToplevel):
             ),
         )
         panel.grid(row=1, column=0, sticky="nsew")
+
+    def _build_photo_review_tab(self, master) -> None:
+        master.grid_columnconfigure(0, weight=1)
+        master.grid_rowconfigure(0, weight=1)
+        panel = PhotoReviewPanel(master)
+        panel.grid(row=0, column=0, sticky="nsew")
 
     def _build_photo_cleanup_tab(self, master) -> None:
         master.grid_columnconfigure(0, weight=1)

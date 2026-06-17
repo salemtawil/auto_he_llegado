@@ -1,9 +1,3 @@
-alter table if exists public.photos
-add column if not exists reserved_by_process_id text;
-
-create index if not exists idx_photos_reserved_by_process_id
-on public.photos (reserved_by_process_id);
-
 create or replace function public.claim_available_photo(
     p_process_id text default null,
     p_validate_only boolean default false
