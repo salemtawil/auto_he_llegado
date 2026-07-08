@@ -147,6 +147,8 @@ class PoolBadge(ctk.CTkFrame):
 
     @staticmethod
     def _format_caption(snapshot: PhotoPoolSnapshot) -> str:
+        if snapshot.new_bucket_name and not snapshot.old_bucket_name:
+            return f"{snapshot.new_bucket_name} {snapshot.new_bucket_count}"
         parts = []
         if snapshot.new_bucket_name:
             parts.append(f"Nuevo {snapshot.new_bucket_count}")

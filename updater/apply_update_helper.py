@@ -131,6 +131,21 @@ def build_restart_command(app_path: Path) -> list[str]:
     return [str(app_path)]
 
 
+def resolve_update_target_path(install_dir: Path, app_exe: str, relative_path: Path) -> Path:
+    app_path = Path(app_exe)
+    if not app_path.is_absolute():
+        app_path = install_dir / app_path
+    parts = relative_path.parts
+    if (
+        sys.platform == "darwin"
+        and app_path.suffix.lower() == ".app"
+        and parts
+        and parts[0] == app_path.name
+    ):
+        return app_path.joinpath(*parts[1:])
+    return install_dir / relative_path
+
+
 def apply_staged_update(
     *,
     install_dir: Path,
@@ -181,7 +196,7 @@ def apply_staged_update(
             relative_text = normalize_relpath(relative_path)
             if is_protected_path(relative_text):
                 continue
-            target_path = install_dir / relative_path
+            target_path = resolve_update_target_path(install_dir, app_exe, relative_path)
             if target_path.exists():
                 backup_path = backup_dir / relative_path
                 if not backup_path.exists():

@@ -1,9 +1,19 @@
 {
-  "revision": "2026.05.30.1",
-  "url": "https://github.com/salemtawil/auto_he_llegado/releases/download/2026.05.30.1/AutoHeLlegado_Update_20260530.zip",
-  "sha256": "REEMPLAZAR_CON_SHA256_REAL",
+  "revision": "2026.06.19.1",
+  "assets": {
+    "windows": {
+      "url": "https://github.com/salemtawil/auto_he_llegado/releases/download/2026.06.19.1/AutoHeLlegado_Update_20260619_120000.zip",
+      "sha256": "REEMPLAZAR_CON_SHA256_REAL",
+      "file_name": "AutoHeLlegado_Windows_Update_20260619_120000.zip"
+    },
+    "macos-x86_64": {
+      "url": "https://github.com/salemtawil/auto_he_llegado/releases/download/2026.06.19.1/AutoHeLlegado_Mac_x86_64_Update_1.0.0_20260619_120000.zip",
+      "sha256": "REEMPLAZAR_CON_SHA256_REAL",
+      "file_name": "AutoHeLlegado_Mac_x86_64_Update_1.0.0_20260619_120000.zip"
+    }
+  },
   "notes": [
-    "Mejoras visuales",
-    "Correcciones del updater"
+    "Mejoras generales",
+    "Actualizacion automatica desde GitHub"
   ]
 }

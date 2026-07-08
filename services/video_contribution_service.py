@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 import shutil
 from time import sleep
@@ -30,8 +31,8 @@ class VideoContributionResult:
 
 class VideoContributionService:
     _DB_BATCH_SIZE = 25
+    _MAX_CONCURRENT_UPLOADS = 3
     _RETRY_DELAYS_SECONDS = (0.8, 1.6, 3.0)
-    _STORAGE_UPLOAD_DELAY_SECONDS = 0.08
 
     def __init__(
         self,
@@ -110,42 +111,52 @@ class VideoContributionService:
         total = len(frames)
         uploaded_count = 0
         pending_candidates: list[dict] = []
-        for index, frame in enumerate(frames, start=1):
-            self._emit(
-                progress_callback,
-                "uploading",
-                f"Subiendo foto candidata {index} de {total}...",
-                current=index,
-                total=total,
+        max_workers = min(self._MAX_CONCURRENT_UPLOADS, max(total, 1))
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            uploaded_candidates = executor.map(
+                lambda current_frame: self._upload_single_frame(
+                    current_frame,
+                    batch_id=batch_id,
+                    user_id=user_id,
+                ),
+                frames,
             )
-            candidate_id = frame.path.stem
-            storage_path = f"candidates/{user_id}/{batch_id}/{candidate_id}.jpg"
-            self._retry_supabase_write(
-                lambda current_path=storage_path, current_frame=frame: self._review_service.upload_candidate_binary(
-                    storage_path=current_path,
-                    content=current_frame.path.read_bytes(),
+            for index, candidate in enumerate(uploaded_candidates, start=1):
+                uploaded_count += 1
+                pending_candidates.append(candidate)
+                self._emit(
+                    progress_callback,
+                    "uploading",
+                    f"Subiendo foto candidata {index} de {total}...",
+                    current=index,
+                    total=total,
                 )
-            )
-            uploaded_count += 1
-            pending_candidates.append(
-                {
-                    "batch_id": batch_id,
-                    "user_id": user_id,
-                    "storage_path": storage_path,
-                    "original_name": frame.path.name,
-                    "frame_index": frame.frame_index,
-                    "timestamp_seconds": frame.timestamp_seconds,
-                    "blur_score": frame.blur_score,
-                    "brightness_score": frame.brightness_score,
-                }
-            )
-            if len(pending_candidates) >= self._DB_BATCH_SIZE:
-                self._flush_candidates(pending_candidates)
-                pending_candidates = []
-            sleep(self._STORAGE_UPLOAD_DELAY_SECONDS)
+                if len(pending_candidates) >= self._DB_BATCH_SIZE:
+                    self._flush_candidates(pending_candidates)
+                    pending_candidates = []
         if pending_candidates:
             self._flush_candidates(pending_candidates)
         return uploaded_count
+
+    def _upload_single_frame(self, frame: ExtractedFrame, *, batch_id: str, user_id: str) -> dict:
+        candidate_id = frame.path.stem
+        storage_path = f"candidates/{user_id}/{batch_id}/{candidate_id}.jpg"
+        self._retry_supabase_write(
+            lambda current_path=storage_path, current_frame=frame: self._review_service.upload_candidate_binary(
+                storage_path=current_path,
+                content=current_frame.path.read_bytes(),
+            )
+        )
+        return {
+            "batch_id": batch_id,
+            "user_id": user_id,
+            "storage_path": storage_path,
+            "original_name": frame.path.name,
+            "frame_index": frame.frame_index,
+            "timestamp_seconds": frame.timestamp_seconds,
+            "blur_score": frame.blur_score,
+            "brightness_score": frame.brightness_score,
+        }
 
     def _flush_candidates(self, candidates: list[dict]) -> None:
         self._retry_supabase_write(lambda: self._review_service.create_candidates(candidates))

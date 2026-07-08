@@ -32,7 +32,7 @@ def get_photo_source_summary(process_id: str | None) -> str:
         counts = Counter(_counts_by_process.get(process_id) or {})
     if not counts:
         return ""
-    ordered_labels = ["pool viejo", "pool nuevo"]
+    ordered_labels = ["photo-pool", "pool viejo", "pool nuevo"]
     parts = [f"{label}: {counts[label]}" for label in ordered_labels if counts.get(label)]
     parts.extend(
         f"{label}: {count}"
@@ -45,6 +45,8 @@ def get_photo_source_summary(process_id: str | None) -> str:
 def _bucket_label(bucket_name: str, settings: Settings) -> str:
     normalized = bucket_name.strip()
     if normalized == settings.supabase_storage_bucket:
+        if not settings.supabase_legacy_storage_buckets:
+            return normalized or "bucket activo"
         return "pool nuevo"
     if normalized in settings.supabase_legacy_storage_buckets:
         return "pool viejo"

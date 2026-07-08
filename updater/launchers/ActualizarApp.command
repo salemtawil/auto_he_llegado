@@ -3,6 +3,7 @@
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 APP_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
+MACOS_APP_PATH="${MACOS_APP_PATH:-/Applications/AutoHeLlegado.app}"
 
 cd "$APP_ROOT" || {
   echo "No se pudo abrir la carpeta de la app."
@@ -47,6 +48,9 @@ echo "La actualizacion termino correctamente."
 if [ -d "$APP_ROOT/AutoHeLlegado.app" ]; then
   echo "Abriendo Auto He Llegado..."
   open "$APP_ROOT/AutoHeLlegado.app" || true
+elif [ -d "$MACOS_APP_PATH" ]; then
+  echo "Abriendo Auto He Llegado..."
+  open "$MACOS_APP_PATH" || true
 fi
 echo "Si aparece CERTIFICATE_VERIFY_FAILED, ejecuta:"
 echo 'open "/Applications/Python 3.11/Install Certificates.command"'

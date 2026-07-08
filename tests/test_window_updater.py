@@ -7,6 +7,7 @@ from types import SimpleNamespace
 
 import ui.main_app.window as window_module
 from ui.main_app.window import MainAppWindow, ProcessSlotRuntime
+from updater.release_update_client import DownloadedUpdate, ReleaseAsset
 
 
 class _FakePanel:
@@ -63,11 +64,43 @@ def _write_staged_package(root: Path) -> Path:
     return package_dir
 
 
+def _write_update_config(root: Path, *, relative_dir: str = "updater") -> Path:
+    updater_dir = root / relative_dir
+    updater_dir.mkdir(parents=True, exist_ok=True)
+    update_config = updater_dir / "update_config.json"
+    update_config.write_text(
+        json.dumps({"latest_url": "https://example.test/update_latest.json"}, ensure_ascii=True),
+        encoding="utf-8",
+    )
+    return update_config
+
+
+def _write_downloaded_update_zip(root: Path) -> Path:
+    package_zip = root / "updates" / "staging" / "downloaded" / "AutoHeLlegado_Update.zip"
+    package_zip.parent.mkdir(parents=True, exist_ok=True)
+    package_zip.write_text("zip", encoding="utf-8")
+    return package_zip
+
+
+def _downloaded_update(path: Path) -> DownloadedUpdate:
+    return DownloadedUpdate(
+        asset=ReleaseAsset(
+            revision="2026.06.19.1",
+            url="https://example.test/AutoHeLlegado_Update.zip",
+            sha256="a" * 64,
+            platform_key="windows",
+            file_name="AutoHeLlegado_Update.zip",
+        ),
+        path=path,
+        sha256="a" * 64,
+    )
+
+
 def test_validate_updater_ready_rejects_active_processes(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr(window_module, "PROJECT_ROOT", tmp_path)
     _write_updater_config(tmp_path)
     _write_helper_layout(tmp_path)
-    _write_staged_package(tmp_path)
+    _write_update_config(tmp_path)
     window = _build_window(thread=object())
 
     error = window._validate_updater_ready()
@@ -78,7 +111,7 @@ def test_validate_updater_ready_rejects_active_processes(tmp_path: Path, monkeyp
 def test_validate_updater_ready_rejects_missing_helper(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr(window_module, "PROJECT_ROOT", tmp_path)
     _write_updater_config(tmp_path)
-    _write_staged_package(tmp_path)
+    _write_update_config(tmp_path)
     window = _build_window()
 
     error = window._validate_updater_ready()
@@ -89,7 +122,7 @@ def test_validate_updater_ready_rejects_missing_helper(tmp_path: Path, monkeypat
 def test_validate_updater_ready_rejects_missing_config(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr(window_module, "PROJECT_ROOT", tmp_path)
     _write_helper_layout(tmp_path)
-    _write_staged_package(tmp_path)
+    _write_update_config(tmp_path)
     window = _build_window()
 
     error = window._validate_updater_ready()
@@ -97,7 +130,7 @@ def test_validate_updater_ready_rejects_missing_config(tmp_path: Path, monkeypat
     assert error == "No se encontro updater/updater_config.json. Configura el updater antes de actualizar."
 
 
-def test_validate_updater_ready_rejects_missing_staged_package(tmp_path: Path, monkeypatch) -> None:
+def test_validate_updater_ready_rejects_missing_release_update_config(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr(window_module, "PROJECT_ROOT", tmp_path)
     _write_helper_layout(tmp_path)
     _write_updater_config(tmp_path)
@@ -105,14 +138,14 @@ def test_validate_updater_ready_rejects_missing_staged_package(tmp_path: Path, m
 
     error = window._validate_updater_ready()
 
-    assert error == "No se encontro updates/staging/latest_build. Prepara primero el paquete de actualizacion."
+    assert error == "No se encontro updater/update_config.json. Configura la URL de actualizacion de GitHub."
 
 
 def test_validate_updater_ready_accepts_internal_helper_fallback(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr(window_module, "PROJECT_ROOT", tmp_path)
     _write_helper_layout(tmp_path, relative_dir="_internal/updater")
     _write_updater_config(tmp_path, relative_dir="_internal/updater")
-    _write_staged_package(tmp_path)
+    _write_update_config(tmp_path, relative_dir="_internal/updater")
     window = _build_window()
 
     error = window._validate_updater_ready()
@@ -163,7 +196,7 @@ def test_launch_integrated_updater_uses_helper_and_current_pid(tmp_path: Path, m
     monkeypatch.setattr(window_module, "PROJECT_ROOT", tmp_path)
     _write_helper_layout(tmp_path)
     _write_updater_config(tmp_path)
-    package_dir = _write_staged_package(tmp_path)
+    package_zip = _write_downloaded_update_zip(tmp_path)
     (tmp_path / "AutoHeLlegado.exe").write_text("current exe", encoding="utf-8")
     monkeypatch.setattr(window_module.os, "getpid", lambda: 4242)
     monkeypatch.setattr(window_module.subprocess, "CREATE_NO_WINDOW", 134217728, raising=False)
@@ -180,7 +213,7 @@ def test_launch_integrated_updater_uses_helper_and_current_pid(tmp_path: Path, m
 
     monkeypatch.setattr(window_module.subprocess, "Popen", _FakePopen)
 
-    ok = window._launch_integrated_updater()
+    ok = window._launch_integrated_updater(package_zip)
 
     assert ok is True
     assert seen["command"] == [
@@ -188,8 +221,8 @@ def test_launch_integrated_updater_uses_helper_and_current_pid(tmp_path: Path, m
         str(tmp_path / "updater" / "apply_update_helper.py"),
         "--install-dir",
         str(tmp_path),
-        "--package-dir",
-        str(package_dir),
+        "--package-zip",
+        str(package_zip),
         "--app-exe",
         str(tmp_path / "AutoHeLlegado.exe"),
         "--wait-pid",
@@ -216,7 +249,7 @@ def test_launch_integrated_updater_prefers_helper_exe(tmp_path: Path, monkeypatc
     monkeypatch.setattr(window_module, "PROJECT_ROOT", tmp_path)
     _write_helper_layout(tmp_path, use_exe=True)
     _write_updater_config(tmp_path)
-    package_dir = _write_staged_package(tmp_path)
+    package_zip = _write_downloaded_update_zip(tmp_path)
     (tmp_path / "AutoHeLlegado.exe").write_text("current exe", encoding="utf-8")
     monkeypatch.setattr(window_module.os, "getpid", lambda: 4242)
     monkeypatch.setattr(window_module.subprocess, "CREATE_NO_WINDOW", 134217728, raising=False)
@@ -233,15 +266,15 @@ def test_launch_integrated_updater_prefers_helper_exe(tmp_path: Path, monkeypatc
 
     monkeypatch.setattr(window_module.subprocess, "Popen", _FakePopen)
 
-    ok = window._launch_integrated_updater()
+    ok = window._launch_integrated_updater(package_zip)
 
     assert ok is True
     assert seen["command"] == [
         str(tmp_path / "AutoHeLlegadoUpdateHelper.exe"),
         "--install-dir",
         str(tmp_path),
-        "--package-dir",
-        str(package_dir),
+        "--package-zip",
+        str(package_zip),
         "--app-exe",
         str(tmp_path / "AutoHeLlegado.exe"),
         "--wait-pid",
@@ -256,7 +289,7 @@ def test_launch_integrated_updater_shows_error_when_popen_fails(tmp_path: Path, 
     monkeypatch.setattr(window_module, "PROJECT_ROOT", tmp_path)
     _write_helper_layout(tmp_path)
     _write_updater_config(tmp_path)
-    _write_staged_package(tmp_path)
+    package_zip = _write_downloaded_update_zip(tmp_path)
     (tmp_path / "AutoHeLlegado.exe").write_text("current exe", encoding="utf-8")
     window = _build_window()
     errors: list[str] = []
@@ -265,7 +298,7 @@ def test_launch_integrated_updater_shows_error_when_popen_fails(tmp_path: Path, 
     monkeypatch.setattr(window_module.messagebox, "showerror", lambda _title, message, parent=None: errors.append(message))
     monkeypatch.setattr(window_module.subprocess, "Popen", lambda *args, **kwargs: (_ for _ in ()).throw(OSError("boom")))
 
-    ok = window._launch_integrated_updater()
+    ok = window._launch_integrated_updater(package_zip)
 
     assert ok is False
     assert errors == ["No se pudo iniciar el helper de actualizacion: boom"]
@@ -292,7 +325,8 @@ def test_request_external_update_does_not_close_when_launch_fails(monkeypatch) -
     messages: list[str] = []
 
     window._validate_updater_ready = lambda: None  # type: ignore[method-assign]  # noqa: SLF001
-    window._launch_integrated_updater = lambda: False  # type: ignore[method-assign]  # noqa: SLF001
+    window._download_update_package_from_github = lambda: _downloaded_update(Path("downloaded.zip"))  # type: ignore[method-assign]  # noqa: SLF001
+    window._launch_integrated_updater = lambda package_zip=None: False  # type: ignore[method-assign]  # noqa: SLF001
     window._handle_app_close = lambda: closed.append(True)  # type: ignore[method-assign]  # noqa: SLF001
     window._broadcast_status_message = lambda message, color=None: messages.append(message)  # type: ignore[method-assign]  # noqa: SLF001
     monkeypatch.setattr(window_module.messagebox, "showerror", lambda *args, **kwargs: None)
@@ -309,12 +343,13 @@ def test_request_external_update_launches_helper_shows_message_and_closes(monkey
     messages: list[str] = []
 
     window._validate_updater_ready = lambda: None  # type: ignore[method-assign]  # noqa: SLF001
-    window._launch_integrated_updater = lambda: True  # type: ignore[method-assign]  # noqa: SLF001
+    window._download_update_package_from_github = lambda: _downloaded_update(Path("downloaded.zip"))  # type: ignore[method-assign]  # noqa: SLF001
+    window._launch_integrated_updater = lambda package_zip=None: True  # type: ignore[method-assign]  # noqa: SLF001
     window._handle_app_close = lambda: closed.append(True)  # type: ignore[method-assign]  # noqa: SLF001
     window._broadcast_status_message = lambda message, color=None: messages.append(message)  # type: ignore[method-assign]  # noqa: SLF001
     monkeypatch.setattr(window_module.messagebox, "showerror", lambda *args, **kwargs: None)
 
     window.request_external_update()
 
-    assert messages == ["Actualizando, la app se reiniciará."]
+    assert messages == ["Actualizando a 2026.06.19.1, la app se reiniciara."]
     assert closed == [True]

@@ -31,6 +31,9 @@ class PhotoCleanupService:
 
     def audit(self, older_than_hours: int = 2) -> PhotoCleanupAudit:
         normalized_hours = max(int(older_than_hours), 1)
+        rpc_audit = self._audit_from_rpc(normalized_hours)
+        if rpc_audit is not None:
+            return rpc_audit
         return PhotoCleanupAudit(
             available_count=self._photos_repository.count_by_status(PhotoStatus.AVAILABLE),
             reserved_count=self._photos_repository.count_by_status(PhotoStatus.RESERVED),
@@ -52,6 +55,37 @@ class PhotoCleanupService:
             older_than_hours=normalized_hours,
         )
 
+    def _audit_from_rpc(self, older_than_hours: int) -> PhotoCleanupAudit | None:
+        try:
+            response = self._client_provider.execute_response_factory(
+                lambda: self._client_provider.client.rpc(
+                    "photo_cleanup_audit",
+                    {"p_older_than_hours": older_than_hours},
+                )
+            )
+        except Exception:
+            return None
+        rows = list(getattr(response, "data", []) or [])
+        if not rows:
+            return None
+        row = dict(rows[0])
+        return PhotoCleanupAudit(
+            available_count=int(row.get("available_count") or 0),
+            reserved_count=int(row.get("reserved_count") or 0),
+            consumed_count=int(row.get("consumed_count") or 0),
+            discarded_count=int(row.get("discarded_count") or 0),
+            consumed_pending_storage_cleanup=int(row.get("consumed_pending_storage_cleanup") or 0),
+            consumed_cleanable_pending_storage_cleanup=int(row.get("consumed_cleanable_pending_storage_cleanup") or 0),
+            stale_reserved_pending_storage_cleanup=int(row.get("stale_reserved_pending_storage_cleanup") or 0),
+            stale_reserved_cleanable_pending_storage_cleanup=int(row.get("stale_reserved_cleanable_pending_storage_cleanup") or 0),
+            storage_cleaned_count=int(row.get("storage_cleaned_count") or 0),
+            consumed_storage_cleaned_count=int(row.get("consumed_storage_cleaned_count") or 0),
+            stale_reserved_storage_cleaned_count=int(row.get("stale_reserved_storage_cleaned_count") or 0),
+            cleanup_error_count=int(row.get("cleanup_error_count") or 0),
+            db_error_after_storage_delete_count=int(row.get("db_error_after_storage_delete_count") or 0),
+            older_than_hours=older_than_hours,
+        )
+
     def count_db_error_after_storage_delete(self) -> int:
         return self._photos_repository.count_db_error_after_storage_delete()
 
@@ -71,6 +105,11 @@ class PhotoCleanupService:
             dry_run=dry_run,
             limit=limit,
             reason=self._CONSUMED_REASON,
+            bulk_success=lambda cleanable_records: self._photos_repository.mark_storage_cleaned_many(
+                [record.id for record in cleanable_records],
+                reason=self._CONSUMED_REASON,
+                cleaned_by=self._CLEANED_BY,
+            ),
             on_success=lambda record: self._photos_repository.mark_storage_cleaned(
                 record.id,
                 reason=self._CONSUMED_REASON,
@@ -99,6 +138,11 @@ class PhotoCleanupService:
             limit=limit,
             older_than_hours=normalized_hours,
             reason=self._STALE_RESERVED_REASON,
+            bulk_success=lambda cleanable_records: self._photos_repository.mark_stale_reserved_cleaned_many(
+                [record.id for record in cleanable_records],
+                reason=self._STALE_RESERVED_REASON,
+                cleaned_by=self._CLEANED_BY,
+            ),
             on_success=lambda record: self._photos_repository.mark_stale_reserved_cleaned(
                 record.id,
                 reason=self._STALE_RESERVED_REASON,
@@ -226,6 +270,7 @@ class PhotoCleanupService:
         dry_run: bool,
         limit: int,
         reason: str,
+        bulk_success,
         on_success,
         on_db_error,
         older_than_hours: int | None = None,
@@ -237,6 +282,7 @@ class PhotoCleanupService:
             dry_run=dry_run,
             matched_count=len(records),
         )
+        prepared_items: list[tuple[PhotoRecord, dict, str]] = []
         for record in records:
             normalized_path = self._normalize_storage_path(record.storage_path)
             item = {
@@ -259,6 +305,14 @@ class PhotoCleanupService:
                 item["message"] = "Dry-run: no se borro Storage ni se actualizo DB."
                 result.items.append(item)
                 continue
+            prepared_items.append((record, item, normalized_path))
+        if not prepared_items:
+            return result
+
+        if self._cleanup_records_bulk(result, prepared_items, reason=reason, bulk_success=bulk_success):
+            return result
+
+        for record, item, normalized_path in prepared_items:
             try:
                 self._client_provider.remove_file(
                     bucket_name=self._settings.supabase_storage_bucket,
@@ -288,6 +342,42 @@ class PhotoCleanupService:
             result.items.append(item)
         return result
 
+    def _cleanup_records_bulk(
+        self,
+        result: PhotoCleanupResult,
+        prepared_items: list[tuple[PhotoRecord, dict, str]],
+        *,
+        reason: str,
+        bulk_success,
+    ) -> bool:
+        remove_files = getattr(self._client_provider, "remove_files", None)
+        if not callable(remove_files):
+            return False
+        try:
+            remove_files(
+                bucket_name=self._settings.supabase_storage_bucket,
+                storage_paths=[storage_path for _record, _item, storage_path in prepared_items],
+            )
+        except Exception:
+            return False
+        try:
+            bulk_success([record for record, _item, _path in prepared_items])
+        except Exception as exc:
+            message = f"{self._DB_ERROR_AFTER_STORAGE_DELETE_PREFIX} bulk update: {exc}"
+            for record, item, _path in prepared_items:
+                result.error_count += 1
+                item["result"] = "db_error_after_storage_delete"
+                item["message"] = message
+                result.items.append(item)
+                self._mark_cleanup_error_safe(record.id, f"{self._DB_ERROR_AFTER_STORAGE_DELETE_PREFIX} {exc}")
+            return True
+        for record, item, _path in prepared_items:
+            result.deleted_count += 1
+            item["result"] = "cleaned"
+            item["message"] = f"Archivo eliminado de Storage en lote y DB actualizada. Motivo: {reason}."
+            result.items.append(item)
+        return True
+
     def _cleanup_in_batches(
         self,
         *,
@@ -299,8 +389,7 @@ class PhotoCleanupService:
         max_consecutive_stalled_batches: int = 3,
     ) -> PhotoCleanupResult:
         normalized_batch_size = max(int(batch_size), 1)
-        audit = self.audit(older_than_hours=older_than_hours)
-        total_initial = self._pending_cleanable_count(audit, kind)
+        total_initial = self._pending_cleanable_count_for_kind(kind, older_than_hours=older_than_hours)
         result = PhotoCleanupResult(
             action=f"cleanup_all_{kind}_photos",
             older_than_hours=older_than_hours if kind == "stale_reserved" else None,
@@ -333,7 +422,10 @@ class PhotoCleanupService:
                     kind=kind,
                     batch_size=normalized_batch_size,
                     total_initial=total_initial,
-                    pending_current=self._pending_cleanable_count(self.audit(older_than_hours=older_than_hours), kind),
+                    pending_current=max(
+                        total_initial - result.deleted_count - result.error_count - result.skipped_count,
+                        0,
+                    ),
                     result=result,
                     batch_index=batch_index,
                     stop_reason="cancelled_by_user",
@@ -348,15 +440,17 @@ class PhotoCleanupService:
             result.skipped_count += batch_result.skipped_count
             result.items.extend(batch_result.items)
 
-            refreshed_audit = self.audit(older_than_hours=older_than_hours)
-            pending_current = self._pending_cleanable_count(refreshed_audit, kind)
+            pending_current = max(
+                total_initial - result.deleted_count - result.error_count - result.skipped_count,
+                0,
+            )
 
             stalled = batch_result.deleted_count <= 0
             consecutive_stalled_batches = consecutive_stalled_batches + 1 if stalled else 0
 
             stop_reason: str | None = None
             is_complete = False
-            if pending_current <= 0:
+            if pending_current <= 0 or batch_result.matched_count <= 0:
                 stop_reason = "pending_zero"
                 is_complete = True
             elif callable(cancel_callback) and cancel_callback():
@@ -410,6 +504,13 @@ class PhotoCleanupService:
         if kind == "consumed":
             return int(audit.consumed_cleanable_pending_storage_cleanup)
         return int(audit.stale_reserved_cleanable_pending_storage_cleanup)
+
+    def _pending_cleanable_count_for_kind(self, kind: str, *, older_than_hours: int) -> int:
+        if kind == "consumed":
+            return self._photos_repository.count_consumed_cleanable_pending_cleanup()
+        return self._photos_repository.count_stale_reserved_cleanable_pending_cleanup(
+            older_than_hours=older_than_hours
+        )
 
     def _emit_batch_progress(
         self,

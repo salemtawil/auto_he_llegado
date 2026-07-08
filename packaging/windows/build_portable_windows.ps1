@@ -126,6 +126,7 @@ try {
         Invoke-Python -Arguments @("-m", "py_compile", "app_update_helper.py")
         Invoke-Python -Arguments @("-m", "py_compile", "updater\github_sync_updater.py")
         Invoke-Python -Arguments @("-m", "py_compile", "updater\apply_update_helper.py")
+        Invoke-Python -Arguments @("-m", "py_compile", "updater\release_update_client.py")
         Invoke-Python -Arguments @("-m", "py_compile", "ui\main_app\window.py")
     }
 

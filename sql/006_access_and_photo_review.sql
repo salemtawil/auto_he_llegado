@@ -251,7 +251,7 @@ create policy "photo_candidate_storage_insert"
 on storage.objects for insert
 to authenticated
 with check (
-    bucket_id = 'photos'
+    bucket_id = 'photo-pool'
     and (storage.foldername(name))[1] = 'candidates'
     and (storage.foldername(name))[2] = auth.uid()::text
     and public.can_submit_weekly_video(auth.uid())
@@ -262,7 +262,7 @@ create policy "photo_candidate_storage_select"
 on storage.objects for select
 to authenticated
 using (
-    bucket_id = 'photos'
+    bucket_id = 'photo-pool'
     and (
         public.is_profile_admin(auth.uid())
         or (storage.foldername(name))[1] = 'available'
@@ -277,8 +277,8 @@ drop policy if exists "photo_admin_storage_write" on storage.objects;
 create policy "photo_admin_storage_write"
 on storage.objects for all
 to authenticated
-using (bucket_id = 'photos' and public.is_profile_admin(auth.uid()))
-with check (bucket_id = 'photos' and public.is_profile_admin(auth.uid()));
+using (bucket_id = 'photo-pool' and public.is_profile_admin(auth.uid()))
+with check (bucket_id = 'photo-pool' and public.is_profile_admin(auth.uid()));
 
 do $$
 begin

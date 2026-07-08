@@ -27,9 +27,11 @@ from services.last_result_service import LastResultService
 from services.local_config_service import LocalConfigService
 from services.log_service import LogService
 from services.auth_context import get_current_session
-from services.background_video_status import get_video_status
+from services.background_video_status import get_video_status, set_video_status
 from services.photo_pool_service import PhotoPoolService
 from services.process_service import ProcessService
+from services.video_contribution_service import VideoContributionProgress, VideoContributionService
+from updater.release_update_client import ReleaseUpdateError, prepare_release_update
 from ui.main_app.admin_dialogs import AdminPasswordDialog, AdminUploaderDialog
 from ui.main_app.agent_name_dialog import AgentNameDialog
 from ui.main_app.pool_badge import PoolBadge
@@ -80,6 +82,7 @@ class MainAppWindow(ctk.CTk):
         self._config_service = config_service or LocalConfigService()
         self._photo_pool_service = photo_pool_service or PhotoPoolService()
         self._process_service = process_service or ProcessService()
+        self._video_contribution_service = VideoContributionService()
         self._log_service = log_service or LogService()
         self._last_result_service = last_result_service or LastResultService()
         self._settings = get_settings()
@@ -95,6 +98,8 @@ class MainAppWindow(ctk.CTk):
         self._active_slot_id = "slot_1"
         self._latest_debug_slot_id = "slot_1"
         self._pending_admin_tab: str | None = None
+        self._auth_session = get_current_session()
+        self._video_upload_running = False
 
         apply_theme_mode(self._current_config.theme_mode)
         self.title("Auto He Llegado")
@@ -168,7 +173,7 @@ class MainAppWindow(ctk.CTk):
         self.header_actions = ctk.CTkFrame(self.header, fg_color="transparent")
         self.header_actions.grid(row=0, column=2, padx=(0, 12), pady=6, sticky="nsew")
         self.header_actions.grid_rowconfigure(0, weight=1)
-        for column in range(6):
+        for column in range(7):
             self.header_actions.grid_columnconfigure(column, weight=1)
 
         self.refresh_button = self._create_header_tile(
@@ -203,13 +208,21 @@ class MainAppWindow(ctk.CTk):
         )
         self.cleanup_button.grid(row=0, column=3, padx=(0, 6), sticky="nsew")
 
+        self.video_button = self._create_header_tile(
+            self.header_actions,
+            icon="↑",
+            text="Subir video",
+            command=self.open_video_uploader,
+        )
+        self.video_button.grid(row=0, column=4, padx=(0, 6), sticky="nsew")
+
         self.theme_toggle_button = self._create_header_tile(
             self.header_actions,
             icon="",
             text="Claro",
             command=self.toggle_theme_mode,
         )
-        self.theme_toggle_button.grid(row=0, column=4, padx=(0, 6), sticky="nsew")
+        self.theme_toggle_button.grid(row=0, column=5, padx=(0, 6), sticky="nsew")
 
         self.settings_button = self._create_header_tile(
             self.header_actions,
@@ -218,7 +231,8 @@ class MainAppWindow(ctk.CTk):
             command=self.open_settings_dialog,
             highlighted=True,
         )
-        self.settings_button.grid(row=0, column=5, sticky="nsew")
+        self.settings_button.grid(row=0, column=6, sticky="nsew")
+        self._layout_header_actions()
         self._sync_theme_toggle_button()
         self._refresh_header_summary()
 
@@ -292,6 +306,43 @@ class MainAppWindow(ctk.CTk):
             return ("◐", "Oscuro")
         return ("☼", "Claro")
 
+    def _layout_header_actions(self) -> None:
+        visible_actions = [
+            self.refresh_button,
+            self.video_button,
+            self.theme_toggle_button,
+            self.settings_button,
+        ]
+        if self._current_user_is_admin():
+            visible_actions = [
+                self.refresh_button,
+                self.admin_button,
+                self.uploader_button,
+                self.cleanup_button,
+                self.video_button,
+                self.theme_toggle_button,
+                self.settings_button,
+            ]
+
+        all_actions = [
+            self.refresh_button,
+            self.admin_button,
+            self.uploader_button,
+            self.cleanup_button,
+            self.video_button,
+            self.theme_toggle_button,
+            self.settings_button,
+        ]
+        for tile in all_actions:
+            tile.grid_forget()
+
+        for index, tile in enumerate(visible_actions):
+            tile.grid(row=0, column=index, padx=(0, 0 if index == len(visible_actions) - 1 else 6), sticky="nsew")
+
+    def _current_user_is_admin(self) -> bool:
+        session = getattr(self, "_auth_session", None) or get_current_session()
+        return bool(session and session.is_admin)
+
     def _build_content(self) -> None:
         self.content = ctk.CTkFrame(self, fg_color="transparent")
         self.content.grid(row=1, column=0, padx=10, pady=(0, 10), sticky="nsew")
@@ -339,6 +390,88 @@ class MainAppWindow(ctk.CTk):
 
         self._sync_primary_slot_refs()
 
+    def open_video_uploader(self) -> None:
+        if self._video_upload_running:
+            messagebox.showinfo(
+                "Subir video",
+                "Ya hay un video procesandose en segundo plano.",
+                parent=self,
+            )
+            return
+        session = self._auth_session or get_current_session()
+        if session is None:
+            messagebox.showerror("Subir video", "No hay una sesion activa.", parent=self)
+            return
+        selected = filedialog.askopenfilename(
+            title="Seleccionar video",
+            filetypes=[
+                ("Videos", "*.mp4 *.mov *.m4v *.avi *.mkv"),
+                ("Todos", "*.*"),
+            ],
+            parent=self,
+        )
+        if not selected:
+            return
+        video_path = Path(selected)
+        self._video_upload_running = True
+        set_video_status(
+            phase="queued",
+            message=f"Video recibido: {video_path.name}. Preparando extraccion...",
+            is_running=True,
+        )
+        self._broadcast_status_message(
+            "Video recibido. La extraccion y subida continuan en segundo plano.",
+            color=SUCCESS,
+        )
+        thread = threading.Thread(
+            target=lambda: self._submit_optional_video_background_worker(video_path, session),
+            daemon=True,
+        )
+        thread.start()
+
+    def _submit_optional_video_background_worker(self, video_path: Path, session) -> None:
+        try:
+            result = self._video_contribution_service.submit_video(
+                video_path,
+                session=session,
+                progress_callback=self._apply_optional_video_progress,
+            )
+            photo_count = result.candidates_uploaded
+            set_video_status(
+                phase="done",
+                message=f"Video procesado. {photo_count} fotos candidatas listas para revision.",
+                current=photo_count,
+                total=max(photo_count, 1),
+                is_complete=True,
+            )
+            self._safe_after(
+                0,
+                lambda: self._broadcast_status_message(
+                    f"Video procesado. {photo_count} fotos candidatas listas para revision.",
+                    color=SUCCESS,
+                ),
+            )
+        except Exception as exc:
+            error_message = f"No se pudo procesar el video: {exc}"
+            set_video_status(
+                phase="error",
+                message=error_message,
+                is_error=True,
+            )
+            self._safe_after(0, lambda message=error_message: self._broadcast_status_message(message, color=ERROR))
+        finally:
+            self._video_upload_running = False
+
+    @staticmethod
+    def _apply_optional_video_progress(progress: VideoContributionProgress) -> None:
+        set_video_status(
+            phase=progress.phase,
+            message=progress.message,
+            current=progress.current,
+            total=progress.total,
+            is_running=True,
+        )
+
     def open_settings_dialog(self) -> None:
         if self._settings_dialog is not None and self._settings_dialog.winfo_exists():
             self._settings_dialog.focus()
@@ -357,11 +490,20 @@ class MainAppWindow(ctk.CTk):
             messagebox.showerror("Actualizar app", error_message, parent=self)
             return
 
-        if not self._launch_integrated_updater():
+        try:
+            downloaded_update = self._download_update_package_from_github()
+        except ReleaseUpdateError as exc:
+            messagebox.showerror("Actualizar app", str(exc), parent=self)
+            return
+
+        if not self._launch_integrated_updater(downloaded_update.path):
             return
 
         with contextlib.suppress(Exception):
-            self._broadcast_status_message("Actualizando, la app se reiniciará.", color=SUCCESS)
+            self._broadcast_status_message(
+                f"Actualizando a {downloaded_update.asset.revision}, la app se reiniciara.",
+                color=SUCCESS,
+            )
         self._handle_app_close()
 
     def _validate_updater_ready(self) -> str | None:
@@ -370,7 +512,7 @@ class MainAppWindow(ctk.CTk):
 
         helper_source = self._resolve_update_helper_source()
         updater_config = self._resolve_updater_config_path()
-        package_dir = self._resolve_update_package_dir()
+        update_config = self._resolve_release_update_config_path()
 
         if helper_source is None:
             return "No se encontro el helper de actualizacion."
@@ -378,8 +520,8 @@ class MainAppWindow(ctk.CTk):
             return "No se encontro updater/updater_config.json. Configura el updater antes de actualizar."
         if not self._is_updater_config_valid(updater_config):
             return "El updater_config.json no esta configurado con owner/repo reales."
-        if not package_dir.is_dir():
-            return "No se encontro updates/staging/latest_build. Prepara primero el paquete de actualizacion."
+        if not update_config.is_file():
+            return "No se encontro updater/update_config.json. Configura la URL de actualizacion de GitHub."
         return None
 
     @staticmethod
@@ -413,6 +555,18 @@ class MainAppWindow(ctk.CTk):
     @staticmethod
     def _resolve_update_package_dir() -> Path:
         return PROJECT_ROOT / "updates" / "staging" / "latest_build"
+
+    @staticmethod
+    def _resolve_release_update_config_path() -> Path:
+        root_update_config = PROJECT_ROOT / "updater" / "update_config.json"
+        if root_update_config.is_file():
+            return root_update_config
+        internal_update_config = PROJECT_ROOT / "_internal" / "updater" / "update_config.json"
+        return internal_update_config
+
+    @staticmethod
+    def _resolve_downloaded_update_dir() -> Path:
+        return PROJECT_ROOT / "updates" / "staging" / "downloaded"
 
     @staticmethod
     def _resolve_update_helper_source() -> Path | None:
@@ -465,14 +619,28 @@ class MainAppWindow(ctk.CTk):
             return "python3"
         return "python"
 
-    def _launch_integrated_updater(self) -> bool:
+    def _download_update_package_from_github(self):
+        with contextlib.suppress(Exception):
+            self._broadcast_status_message("Buscando actualizacion en GitHub...", color=SUCCESS)
+        downloaded_update = prepare_release_update(
+            config_path=self._resolve_release_update_config_path(),
+            staging_dir=self._resolve_downloaded_update_dir(),
+        )
+        with contextlib.suppress(Exception):
+            self._broadcast_status_message(
+                f"Actualizacion descargada: {downloaded_update.asset.revision}. Preparando reinicio...",
+                color=SUCCESS,
+            )
+        return downloaded_update
+
+    def _launch_integrated_updater(self, package_zip: Path | None = None) -> bool:
         helper_source = self._resolve_update_helper_source()
         if helper_source is None:
             messagebox.showerror("Actualizar app", "No se encontro el helper de actualizacion.", parent=self)
             return False
 
         helper_runtime = self._prepare_helper_runtime_copy(helper_source)
-        package_dir = self._resolve_update_package_dir()
+        package_zip = package_zip or (self._resolve_update_package_dir() / "update.zip")
         app_exe = self._resolve_app_executable_path()
         log_dir = PROJECT_ROOT / "updates" / "update_logs"
 
@@ -480,8 +648,8 @@ class MainAppWindow(ctk.CTk):
             str(helper_runtime),
             "--install-dir",
             str(PROJECT_ROOT),
-            "--package-dir",
-            str(package_dir),
+            "--package-zip",
+            str(package_zip),
             "--app-exe",
             str(app_exe),
             "--wait-pid",
@@ -529,7 +697,7 @@ class MainAppWindow(ctk.CTk):
         self.open_admin_access()
 
     def _open_diagnostics_panel(self) -> None:
-        self._open_admin_tool("Diagnóstico")
+        self._open_admin_tool("Diagnostico")
 
     def _validate_admin_access(self, password: str) -> None:
         if password != self._settings.admin_access_password:
@@ -710,6 +878,8 @@ class MainAppWindow(ctk.CTk):
             return
         with contextlib.suppress(Exception):
             self._admin_uploader_dialog.tabs.set(self._pending_admin_tab)
+        with contextlib.suppress(Exception):
+            self._admin_uploader_dialog._handle_tab_selected()
         self._pending_admin_tab = None
 
     def _refresh_header_summary(self) -> None:

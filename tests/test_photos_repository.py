@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from pathlib import Path
 from types import SimpleNamespace
 
 from core.enums import PhotoStatus
@@ -36,6 +37,10 @@ class FakeTable:
     def eq(self, field, value):
         self._sink["eq"] = (field, value)
         return FakeOperation(self._response_data, self._sink, "update")
+
+    def in_(self, field, values):
+        self._sink["in"] = (field, values)
+        return FakeOperation(self._response_data, self._sink, "update_many")
 
 
 class FakeClient:
@@ -96,12 +101,12 @@ def test_create_only_sends_real_photos_columns() -> None:
     assert sink["payload"] == {
         "id": "550e8400-e29b-41d4-a716-446655440000",
         "original_name": "example.jpg",
-        "file_path": "available\\example.jpg",
+        "file_path": str(Path("available/example.jpg")),
         "storage_bucket": "photos",
         "status": "available",
     }
     assert record.original_filename == "example.jpg"
-    assert record.storage_path == "available\\example.jpg"
+    assert record.storage_path == str(Path("available/example.jpg"))
 
 
 def test_bulk_create_only_sends_confirmed_photos_columns() -> None:
@@ -110,15 +115,16 @@ def test_bulk_create_only_sends_confirmed_photos_columns() -> None:
         {
             "id": "550e8400-e29b-41d4-a716-446655440000",
             "original_name": "one.jpg",
-                "file_path": "available/one.jpg",
-                "storage_bucket": "photos",
-                "status": "available",
+            "file_path": "available/one.jpg",
+            "storage_bucket": "photos",
+            "status": "available",
             "created_at": "2026-04-13T00:00:00",
         },
         {
             "id": "550e8400-e29b-41d4-a716-446655440001",
             "original_name": "two.jpg",
             "file_path": "available/two.jpg",
+            "storage_bucket": "photos",
             "status": "available",
             "created_at": "2026-04-13T00:00:01",
         },
@@ -133,9 +139,9 @@ def test_bulk_create_only_sends_confirmed_photos_columns() -> None:
             PhotoCreate(
                 id="550e8400-e29b-41d4-a716-446655440000",
                 original_filename="one.jpg",
-            storage_path="available/one.jpg",
-            storage_bucket="photos",
-            status=PhotoStatus.AVAILABLE,
+                storage_path="available/one.jpg",
+                storage_bucket="photos",
+                status=PhotoStatus.AVAILABLE,
                 source="uploader_app",
                 metadata={"ignored": True},
             ),
@@ -143,6 +149,7 @@ def test_bulk_create_only_sends_confirmed_photos_columns() -> None:
                 id="550e8400-e29b-41d4-a716-446655440001",
                 original_filename="two.jpg",
                 storage_path="available/two.jpg",
+                storage_bucket="photos",
                 status=PhotoStatus.AVAILABLE,
                 error_message="ignored",
             ),
@@ -153,14 +160,15 @@ def test_bulk_create_only_sends_confirmed_photos_columns() -> None:
         {
             "id": "550e8400-e29b-41d4-a716-446655440000",
             "original_name": "one.jpg",
-            "file_path": "available\\one.jpg",
+            "file_path": str(Path("available/one.jpg")),
             "storage_bucket": "photos",
             "status": "available",
         },
         {
             "id": "550e8400-e29b-41d4-a716-446655440001",
             "original_name": "two.jpg",
-            "file_path": "available\\two.jpg",
+            "file_path": str(Path("available/two.jpg")),
+            "storage_bucket": "photos",
             "status": "available",
         },
     ]
@@ -213,6 +221,48 @@ def test_update_sends_confirmed_cleanup_columns() -> None:
         "cleanup_error": None,
         "cleaned_by": "admin_cleanup",
     }
+
+
+def test_update_many_sends_single_in_filter_for_cleanup_columns() -> None:
+    sink: dict = {}
+    response_data = [
+        {
+            "id": "550e8400-e29b-41d4-a716-446655440000",
+            "original_name": "one.jpg",
+            "file_path": "available/one.jpg",
+            "status": "consumed",
+            "storage_deleted_at": "2026-04-13T01:00:00+00:00",
+            "cleanup_reason": "consumed_cleanup",
+            "cleanup_error": None,
+            "cleaned_by": "admin_cleanup",
+            "created_at": "2026-04-13T00:00:00",
+        }
+    ]
+    repository = PhotosRepository(
+        client_provider=FakeClientProvider(sink, response_data),
+        settings=FakeSettings(),
+    )
+
+    rows = repository.mark_storage_cleaned_many(
+        [
+            "550e8400-e29b-41d4-a716-446655440000",
+            "550e8400-e29b-41d4-a716-446655440001",
+        ],
+        reason="consumed_cleanup",
+        cleaned_by="admin_cleanup",
+    )
+
+    assert sink["operation"] == "update_many"
+    assert sink["in"] == (
+        "id",
+        [
+            "550e8400-e29b-41d4-a716-446655440000",
+            "550e8400-e29b-41d4-a716-446655440001",
+        ],
+    )
+    assert sink["payload"]["cleanup_reason"] == "consumed_cleanup"
+    assert sink["payload"]["cleanup_error"] is None
+    assert rows[0].id == "550e8400-e29b-41d4-a716-446655440000"
 
 
 def test_update_status_rejects_unconfirmed_error_message_column() -> None:

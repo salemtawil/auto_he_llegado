@@ -1,29 +1,61 @@
 from __future__ import annotations
 
 from pathlib import Path
+import os
 import sys
 
 
 SOURCE_ROOT = Path(__file__).resolve().parent.parent
 BUNDLE_ROOT = Path(getattr(sys, "_MEIPASS", SOURCE_ROOT)).resolve()
+APP_NAME = "AutoHeLlegado"
 
 
-def _resolve_runtime_root() -> Path:
-    if not getattr(sys, "frozen", False):
-        return SOURCE_ROOT
+def _macos_application_support_root() -> Path:
+    override = os.getenv("AUTO_HE_LLEGADO_APP_SUPPORT_DIR", "").strip()
+    if override:
+        return Path(override).expanduser().resolve()
+    return (Path.home() / "Library" / "Application Support" / APP_NAME).resolve()
 
-    executable_dir = Path(sys.executable).resolve().parent
 
-    # PyInstaller app bundles on macOS run from:
-    #   <release>/app_main.app/Contents/MacOS/app_main
-    # The portable release needs .env, local_data and ms-playwright next to the .app.
+def _macos_app_bundle_from_executable(executable_dir: Path) -> Path | None:
     if (
         sys.platform == "darwin"
         and executable_dir.name == "MacOS"
         and executable_dir.parent.name == "Contents"
         and executable_dir.parent.parent.suffix == ".app"
     ):
-        return executable_dir.parent.parent.parent
+        return executable_dir.parent.parent
+    return None
+
+
+def _is_installed_macos_app(app_bundle: Path) -> bool:
+    normalized = app_bundle.as_posix()
+    marker = f"/Applications/{APP_NAME}.app"
+    return (
+        normalized == marker
+        or normalized.endswith(marker)
+        or normalized.startswith(f"{marker}/")
+        or f"{marker}/" in normalized
+    )
+
+
+def _resolve_runtime_root() -> Path:
+    override = os.getenv("AUTO_HE_LLEGADO_RUNTIME_ROOT", "").strip()
+    if override:
+        return Path(override).expanduser().resolve()
+
+    if not getattr(sys, "frozen", False):
+        return SOURCE_ROOT
+
+    executable_dir = Path(sys.executable).resolve().parent
+
+    # PyInstaller app bundles on macOS run from:
+    #   <release>/AutoHeLlegado.app/Contents/MacOS/AutoHeLlegado
+    app_bundle = _macos_app_bundle_from_executable(executable_dir)
+    if app_bundle is not None:
+        if _is_installed_macos_app(app_bundle):
+            return _macos_application_support_root()
+        return app_bundle.parent
 
     return executable_dir
 

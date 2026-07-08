@@ -60,11 +60,36 @@ class StubClientProvider:
     def __init__(self, *, remove_error: Exception | None = None) -> None:
         self.remove_error = remove_error
         self.remove_calls: list[tuple[str, str]] = []
+        self.remove_files_calls: list[tuple[str, tuple[str, ...]]] = []
 
     def remove_file(self, *, bucket_name: str, storage_path: str) -> None:
         self.remove_calls.append((bucket_name, storage_path))
         if self.remove_error is not None:
             raise self.remove_error
+
+    def remove_files(self, *, bucket_name: str, storage_paths: list[str]) -> None:
+        self.remove_files_calls.append((bucket_name, tuple(storage_paths)))
+        if self.remove_error is not None:
+            raise self.remove_error
+
+
+class StubRpcClient:
+    def __init__(self) -> None:
+        self.calls = []
+
+    def rpc(self, name, params):
+        self.calls.append((name, params))
+        return object()
+
+
+class StubRpcClientProvider:
+    def __init__(self, row: dict) -> None:
+        self.client = StubRpcClient()
+        self.row = row
+
+    def execute_response_factory(self, operation_factory):
+        operation_factory()
+        return SimpleNamespace(data=[self.row])
 
 
 class StubPhotosRepository:
@@ -82,11 +107,15 @@ class StubPhotosRepository:
         self.mark_storage_cleaned_error = mark_storage_cleaned_error
         self.mark_cleanup_error_calls: list[tuple[str, str]] = []
         self.mark_storage_cleaned_calls: list[tuple[str, str, str]] = []
+        self.mark_storage_cleaned_many_calls: list[tuple[tuple[str, ...], str, str]] = []
         self.mark_stale_reserved_cleaned_calls: list[tuple[str, str, str]] = []
+        self.mark_stale_reserved_cleaned_many_calls: list[tuple[tuple[str, ...], str, str]] = []
         self.list_consumed_pending_cleanup_calls: list[bool] = []
         self.list_stale_reserved_pending_cleanup_calls: list[tuple[int, bool]] = []
         self.list_reconcile_calls: list[int] = []
         self.count_reconcile_errors_calls = 0
+        self.count_consumed_cleanable_calls = 0
+        self.count_stale_reserved_cleanable_calls = 0
 
     def count_by_status(self, _status):
         return 0
@@ -95,12 +124,14 @@ class StubPhotosRepository:
         return 0
 
     def count_consumed_cleanable_pending_cleanup(self):
+        self.count_consumed_cleanable_calls += 1
         return 0
 
     def count_stale_reserved_pending_cleanup(self, *, older_than_hours: int):
         return 0
 
     def count_stale_reserved_cleanable_pending_cleanup(self, *, older_than_hours: int):
+        self.count_stale_reserved_cleanable_calls += 1
         return 0
 
     def count_storage_cleaned(self, _status=None):
@@ -143,11 +174,23 @@ class StubPhotosRepository:
             raise self.mark_storage_cleaned_error
         return SimpleNamespace(id=photo_id)
 
+    def mark_storage_cleaned_many(self, photo_ids, *, reason: str, cleaned_by: str):
+        self.mark_storage_cleaned_many_calls.append((tuple(photo_ids), reason, cleaned_by))
+        if self.mark_storage_cleaned_error is not None:
+            raise self.mark_storage_cleaned_error
+        return [SimpleNamespace(id=photo_id) for photo_id in photo_ids]
+
     def mark_stale_reserved_cleaned(self, photo_id: str, *, reason: str, cleaned_by: str):
         self.mark_stale_reserved_cleaned_calls.append((photo_id, reason, cleaned_by))
         if self.mark_storage_cleaned_error is not None:
             raise self.mark_storage_cleaned_error
         return SimpleNamespace(id=photo_id)
+
+    def mark_stale_reserved_cleaned_many(self, photo_ids, *, reason: str, cleaned_by: str):
+        self.mark_stale_reserved_cleaned_many_calls.append((tuple(photo_ids), reason, cleaned_by))
+        if self.mark_storage_cleaned_error is not None:
+            raise self.mark_storage_cleaned_error
+        return [SimpleNamespace(id=photo_id) for photo_id in photo_ids]
 
     def mark_cleanup_error(self, photo_id: str, *, error: str):
         self.mark_cleanup_error_calls.append((photo_id, error))
@@ -181,6 +224,84 @@ def test_cleanup_marks_recoverable_db_error_after_storage_delete(tmp_path) -> No
             "Storage borrado, pero fallo update DB: db write failed",
         )
     ]
+
+
+def test_audit_uses_rpc_when_available(tmp_path) -> None:
+    client_provider = StubRpcClientProvider(
+        {
+            "available_count": 10,
+            "reserved_count": 2,
+            "consumed_count": 30,
+            "discarded_count": 4,
+            "consumed_pending_storage_cleanup": 5,
+            "consumed_cleanable_pending_storage_cleanup": 3,
+            "stale_reserved_pending_storage_cleanup": 2,
+            "stale_reserved_cleanable_pending_storage_cleanup": 1,
+            "storage_cleaned_count": 20,
+            "consumed_storage_cleaned_count": 15,
+            "stale_reserved_storage_cleaned_count": 5,
+            "cleanup_error_count": 1,
+            "db_error_after_storage_delete_count": 1,
+        }
+    )
+    service = PhotoCleanupService(
+        photos_repository=StubPhotosRepository(),
+        client_provider=client_provider,
+        settings=build_settings(tmp_path),
+    )
+
+    audit = service.audit(older_than_hours=3)
+
+    assert audit.available_count == 10
+    assert audit.consumed_cleanable_pending_storage_cleanup == 3
+    assert audit.db_error_after_storage_delete_count == 1
+    assert client_provider.client.calls == [
+        ("photo_cleanup_audit", {"p_older_than_hours": 3})
+    ]
+
+
+def test_cleanup_consumed_photos_uses_bulk_storage_and_bulk_db(tmp_path) -> None:
+    records = [
+        make_photo_record(
+            photo_id="550e8400-e29b-41d4-a716-446655440000",
+            status=PhotoStatus.CONSUMED,
+            storage_path="available/one.jpg",
+            consumed_at=datetime.now(timezone.utc),
+        ),
+        make_photo_record(
+            photo_id="550e8400-e29b-41d4-a716-446655440001",
+            status=PhotoStatus.CONSUMED,
+            storage_path="available/two.jpg",
+            consumed_at=datetime.now(timezone.utc),
+        ),
+    ]
+    repository = StubPhotosRepository(consumed_records=records)
+    client_provider = StubClientProvider()
+    service = PhotoCleanupService(
+        photos_repository=repository,
+        client_provider=client_provider,
+        settings=build_settings(tmp_path),
+    )
+
+    result = service.cleanup_consumed_photos(limit=2)
+
+    assert result.deleted_count == 2
+    assert result.error_count == 0
+    assert client_provider.remove_files_calls == [
+        ("photo-pool", ("available/one.jpg", "available/two.jpg"))
+    ]
+    assert client_provider.remove_calls == []
+    assert repository.mark_storage_cleaned_many_calls == [
+        (
+            (
+                "550e8400-e29b-41d4-a716-446655440000",
+                "550e8400-e29b-41d4-a716-446655440001",
+            ),
+            "consumed_cleanup",
+            "admin_cleanup",
+        )
+    ]
+    assert repository.mark_storage_cleaned_calls == []
 
 
 def test_reconcile_db_error_after_storage_delete_marks_consumed_photo_as_cleaned(tmp_path) -> None:

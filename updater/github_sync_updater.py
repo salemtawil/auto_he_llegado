@@ -15,6 +15,7 @@ from urllib.request import Request, urlopen
 
 APP_ENTRYPOINTS_DEFAULT = ["app_main.py", "app_main.exe", "AutoHeLlegado.app"]
 EXPECTED_DIRS = ("ui", "services", "automation")
+EXPECTED_RESOURCE_DIRS = ("browser_extension", "updater")
 PORTABLE_INTERNAL_DIR = "_internal"
 BUILTIN_EXCLUDED_PREFIXES = (
     ".git/",
@@ -185,6 +186,7 @@ def _validate_install_dir_by_layout(install_dir: Path, app_entrypoints: list[str
     found_entrypoints = [item for item in checked_entrypoints if (install_dir / item).exists()]
     checked_dirs = list(EXPECTED_DIRS)
     found_dirs = [item for item in EXPECTED_DIRS if (install_dir / item).is_dir()]
+    found_resource_dirs = [item for item in EXPECTED_RESOURCE_DIRS if (install_dir / item).is_dir()]
     has_internal = (install_dir / PORTABLE_INTERNAL_DIR).is_dir()
     found_app_bundles = [
         item
@@ -209,6 +211,8 @@ def _validate_install_dir_by_layout(install_dir: Path, app_entrypoints: list[str
 
     if found_entrypoints and found_dirs:
         return
+    if found_resource_dirs == list(EXPECTED_RESOURCE_DIRS):
+        return
     raise InstallDirError(
         "Instalacion source/dev invalida. "
         f"install_dir={install_dir}. "
@@ -217,6 +221,7 @@ def _validate_install_dir_by_layout(install_dir: Path, app_entrypoints: list[str
         f"Entrypoints encontrados={found_entrypoints or 'ninguno'}. "
         f"Carpetas revisadas={checked_dirs}. "
         f"Carpetas encontradas={found_dirs or 'ninguna'}. "
+        f"Recursos encontrados={found_resource_dirs or 'ninguno'}. "
         f"_internal={'si' if has_internal else 'no'}. "
         "Debe contener un entrypoint configurado y al menos una carpeta ui/services/automation."
     )

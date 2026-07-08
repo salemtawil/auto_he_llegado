@@ -151,6 +151,14 @@ def test_validate_install_dir_accepts_macos_app_bundle(tmp_path: Path) -> None:
     validate_install_dir(install_dir, ["AutoHeLlegado.app"])
 
 
+def test_validate_install_dir_accepts_macos_application_support_resources(tmp_path: Path) -> None:
+    install_dir = tmp_path / "Application Support" / "AutoHeLlegado"
+    (install_dir / "browser_extension").mkdir(parents=True)
+    (install_dir / "updater").mkdir()
+
+    validate_install_dir(install_dir, ["AutoHeLlegado.app"])
+
+
 def test_validate_install_dir_invalid(tmp_path: Path) -> None:
     install_dir = tmp_path / "bad"
     install_dir.mkdir()

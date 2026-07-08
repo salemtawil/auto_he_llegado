@@ -82,7 +82,9 @@ class LoginWindow(ctk.CTk):
 
         self.email_entry = self._entry("Usuario o email", "usuario o correo@ejemplo.com", row=2)
         self.password_entry = self._entry("Contrasena", "Contrasena", row=3, show="*")
+        self.email_entry.bind("<Return>", lambda _event: self._handle_login())
         self.password_entry.bind("<Return>", lambda _event: self._handle_login())
+        self.bind("<Return>", lambda _event: self._handle_login())
 
         self.remember_var = tk.BooleanVar(value=False)
         self.remember_checkbox = ctk.CTkCheckBox(

@@ -112,6 +112,29 @@ def test_upload_failure_reports_storage_phase_and_moves_file(tmp_path) -> None:
     assert client_provider.remove_calls == []
 
 
+def test_transient_upload_failure_retries_and_keeps_local_file(tmp_path, monkeypatch) -> None:
+    source = tmp_path / "example.jpg"
+    source.write_bytes(b"jpg-data")
+    settings = build_settings(tmp_path)
+    client_provider = StubClientProvider(upload_error=RuntimeError("JWT expired"))
+    service = UploaderService(
+        photos_repository=StubPhotosRepository(),
+        client_provider=client_provider,
+        settings=settings,
+    )
+    monkeypatch.setattr("services.uploader_service.sleep", lambda _seconds: None)
+
+    result = service.upload_file(source)
+
+    assert result.success is False
+    assert result.storage_uploaded is False
+    assert result.storage_error == "JWT expired"
+    assert "error temporal" in (result.local_cleanup_message or "")
+    assert result.failed_file_path is None
+    assert source.exists() is True
+    assert len(client_provider.upload_calls) == 4
+
+
 def test_database_failure_reports_insert_phase_and_not_storage_phase(tmp_path) -> None:
     source = tmp_path / "example.jpg"
     source.write_bytes(b"jpg-data")

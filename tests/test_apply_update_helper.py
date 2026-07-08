@@ -216,6 +216,28 @@ def test_apply_staged_update_restarts_macos_app_bundle_with_open(tmp_path: Path,
     assert popen_calls == [(["open", str(install_dir / "AutoHeLlegado.app")], {"cwd": str(install_dir)})]
 
 
+def test_apply_staged_update_replaces_absolute_macos_app_bundle(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(helper_module.sys, "platform", "darwin")
+    install_dir = tmp_path / "Application Support" / "AutoHeLlegado"
+    package_dir = tmp_path / "package"
+    app_path = tmp_path / "Applications" / "AutoHeLlegado.app"
+    _write_file(app_path / "Contents" / "Info.plist", "old-plist")
+    _write_file(package_dir / "AutoHeLlegado.app" / "Contents" / "Info.plist", "new-plist")
+
+    result = apply_staged_update(
+        install_dir=install_dir,
+        package_dir=package_dir,
+        app_exe=str(app_path),
+        restart=False,
+        now_factory=lambda: datetime(2026, 5, 30, 17, 3, 30),
+    )
+
+    assert result.applied is True
+    assert (app_path / "Contents" / "Info.plist").read_text(encoding="utf-8") == "new-plist"
+    backup_file = install_dir / "updates" / "backups" / "20260530_170330" / "AutoHeLlegado.app" / "Contents" / "Info.plist"
+    assert backup_file.read_text(encoding="utf-8") == "old-plist"
+
+
 def test_apply_staged_update_does_not_restart_on_failure(tmp_path: Path) -> None:
     install_dir = tmp_path / "install"
     package_dir = tmp_path / "package"

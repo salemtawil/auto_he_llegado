@@ -106,23 +106,16 @@ class AccessService:
 
         latest_batch = self._latest_weekly_batch(session.user_id, week_start)
         latest_status = str((latest_batch or {}).get("status") or "").strip().lower()
-        if latest_status not in self.ACTIVE_BATCH_STATUSES:
-            if latest_status == "rejected":
-                reason = "Tu video semanal fue rechazado. Sube un video nuevo para solicitar acceso."
-            else:
-                reason = "Debes subir tu video semanal para activar el acceso."
-            return AccessSnapshot(
-                can_use_app=False,
-                needs_weekly_video=True,
-                reason=reason,
-                week_start=week_start,
-                profile=profile,
-            latest_batch=latest_batch,
-        )
+        if latest_status == "rejected":
+            reason = "Acceso aprobado. Puedes subir un video nuevo cuando quieras."
+        elif latest_status in self.ACTIVE_BATCH_STATUSES:
+            reason = "Acceso aprobado. Video semanal recibido."
+        else:
+            reason = "Acceso aprobado. Puedes subir tu video cuando quieras."
         return AccessSnapshot(
             can_use_app=True,
             needs_weekly_video=False,
-            reason="Video semanal cargado. Acceso activo.",
+            reason=reason,
             week_start=week_start,
             profile=profile,
             latest_batch=latest_batch,

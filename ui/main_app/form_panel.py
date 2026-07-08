@@ -78,6 +78,8 @@ class FormPanel(ctk.CTkFrame):
         self.phone_entry = self._build_entry_field("Telefono", "+58 4121234567", textvariable=self._phone_var)
         self.phone_entry.bind("<FocusOut>", self._handle_phone_focus_out)
         self.password_entry = self._build_entry_field("Contrasena", "Contrasena")
+        self.password_entry.bind("<KeyRelease>", self._sanitize_password_in_place)
+        self.password_entry.bind("<FocusOut>", self._sanitize_password_in_place)
         self._attach_entry_context_menu(self.phone_entry)
         self._attach_entry_context_menu(self.password_entry)
         self.owner_selfie_checkbox = ctk.CTkCheckBox(
@@ -229,6 +231,7 @@ class FormPanel(ctk.CTkFrame):
 
     def get_form_data(self) -> dict[str, str]:
         self._apply_phone_cleanup()
+        self._sanitize_password_in_place()
         return {
             "page_name": self.page_menu.get(),
             "action_name": self.action_menu.get(),
@@ -275,6 +278,19 @@ class FormPanel(ctk.CTkFrame):
         cleaned = strip_phone_number(self.phone_entry.get())[-10:]
         if cleaned != self.phone_entry.get():
             self._phone_var.set(cleaned)
+
+    def _sanitize_password_in_place(self, _event=None) -> None:
+        cleaned = self.sanitize_password(self.password_entry.get())
+        if cleaned == self.password_entry.get():
+            return
+        cursor_index = self.password_entry.index("insert")
+        self.password_entry.delete(0, "end")
+        self.password_entry.insert(0, cleaned)
+        self.password_entry.icursor(min(cursor_index, len(cleaned)))
+
+    @staticmethod
+    def sanitize_password(value: str) -> str:
+        return "".join(str(value or "").split())
 
     @staticmethod
     def _owner_selfie_display_name(path: str | None) -> str:

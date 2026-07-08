@@ -3,12 +3,13 @@ from __future__ import annotations
 import shutil
 import subprocess
 import sys
+import tempfile
 import textwrap
 from pathlib import Path
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-BUILD_DIR = PROJECT_ROOT / "build"
+BUILD_DIR = Path(tempfile.gettempdir()) / "auto_he_llegado_pyinstaller_build"
 DIST_DIR = PROJECT_ROOT / "dist"
 RELEASE_ROOT = PROJECT_ROOT / "release"
 WINDOWS_RELEASE_DIR = RELEASE_ROOT / "windows" / "AutoHeLlegadoPortable"
@@ -53,7 +54,16 @@ def _clean_outputs() -> None:
 
 def _run_pyinstaller() -> None:
     subprocess.run(
-        [sys.executable, "-m", "PyInstaller", "--noconfirm", "--clean", str(WINDOWS_SPEC_FILE)],
+        [
+            sys.executable,
+            "-m",
+            "PyInstaller",
+            "--noconfirm",
+            "--clean",
+            "--workpath",
+            str(BUILD_DIR),
+            str(WINDOWS_SPEC_FILE),
+        ],
         cwd=PROJECT_ROOT,
         check=True,
     )
@@ -81,6 +91,7 @@ def _stage_playwright_browsers() -> None:
 
 def _prepare_runtime_files() -> None:
     _copy_env_files()
+    _copy_runtime_resources()
     _create_local_directories()
     _write_run_scripts()
     _write_readme()
@@ -95,6 +106,20 @@ def _copy_env_files() -> None:
         shutil.copy2(env_file, WINDOWS_RELEASE_DIR / ".env")
     elif env_example.exists():
         shutil.copy2(env_example, WINDOWS_RELEASE_DIR / ".env")
+
+
+def _copy_runtime_resources() -> None:
+    for folder_name in ("browser_extension", "sql", "updater"):
+        source = PROJECT_ROOT / folder_name
+        target = WINDOWS_RELEASE_DIR / folder_name
+        if target.exists():
+            shutil.rmtree(target)
+        if source.exists():
+            shutil.copytree(
+                source,
+                target,
+                ignore=shutil.ignore_patterns("__pycache__", "*.pyc", ".pytest_cache"),
+            )
 
 
 def _create_local_directories() -> None:

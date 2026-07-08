@@ -145,6 +145,20 @@ class PhotoCleanupBatchProgress(DomainModel):
     photos_per_minute: float = 0.0
 
 
+class StorageHealthSnapshot(DomainModel):
+    bucket_names: list[str] = Field(default_factory=list)
+    active_photo_count: int = 0
+    sampled_file_count: int = 0
+    average_file_size_bytes: int = 0
+    estimated_used_bytes: int = 0
+    configured_limit_bytes: int | None = None
+    estimated_available_bytes: int | None = None
+    estimated_capacity_photos: int | None = None
+    estimated_remaining_photos: int | None = None
+    status: str = "unknown"
+    note: str = ""
+
+
 class ProcessLogCreate(DomainModel):
     started_at: datetime | None = None
     finished_at: datetime | None = None

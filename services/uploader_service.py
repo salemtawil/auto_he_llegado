@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from shutil import move
+from time import sleep
 from typing import Callable
 from uuid import uuid4
 
@@ -14,6 +15,7 @@ from storage.supabase_client import SupabaseClientProvider
 
 class UploaderService:
     _DB_BATCH_SIZE = 25
+    _STORAGE_RETRY_DELAYS_SECONDS = (0.8, 1.6, 3.0)
 
     def __init__(
         self,
@@ -189,7 +191,7 @@ class UploaderService:
             return result, None
 
         try:
-            self._client_provider.upload_binary(
+            self._upload_binary_with_retries(
                 bucket_name=self._settings.supabase_storage_bucket,
                 storage_path=storage_path,
                 content=path.read_bytes(),
@@ -203,7 +205,11 @@ class UploaderService:
             )
         except Exception as exc:
             result.storage_error = str(exc)
-            self._apply_failed_upload_local_cleanup(result, path)
+            if self._is_retryable_storage_error(exc):
+                result.processing_status = "Error"
+                result.local_cleanup_message = "Archivo local conservado por error temporal de Storage."
+            else:
+                self._apply_failed_upload_local_cleanup(result, path)
             result.message = f"Fallo en storage upload: {result.storage_error}"
             self._update_item_progress(
                 progress_callback,
@@ -214,6 +220,31 @@ class UploaderService:
             return result, None
 
         return result, self._build_photo_create(path, photo_id, storage_path)
+
+    def _upload_binary_with_retries(
+        self,
+        *,
+        bucket_name: str,
+        storage_path: str,
+        content: bytes,
+    ) -> None:
+        last_error: Exception | None = None
+        for attempt_index, delay_seconds in enumerate((0.0, *self._STORAGE_RETRY_DELAYS_SECONDS)):
+            if delay_seconds > 0:
+                sleep(delay_seconds)
+            try:
+                self._client_provider.upload_binary(
+                    bucket_name=bucket_name,
+                    storage_path=storage_path,
+                    content=content,
+                )
+                return
+            except Exception as exc:
+                last_error = exc
+                if not self._is_retryable_storage_error(exc) or attempt_index >= len(self._STORAGE_RETRY_DELAYS_SECONDS):
+                    raise
+        if last_error is not None:
+            raise last_error
 
     def _build_photo_create(
         self,
@@ -468,6 +499,25 @@ class UploaderService:
                 "No se pudo mover el archivo a failed_uploads: "
                 f"{exc}"
             )
+
+    @staticmethod
+    def _is_retryable_storage_error(exc: Exception) -> bool:
+        message = str(exc or "").strip().lower()
+        return any(
+            marker in message
+            for marker in (
+                "jwt expired",
+                "pgrst303",
+                "exp claim timestamp check failed",
+                "too_many_connections",
+                "too many connections",
+                "statuscode': 429",
+                'statuscode": 429',
+                "timeout",
+                "temporarily unavailable",
+                "connection",
+            )
+        )
 
     @staticmethod
     def _update_item_progress(

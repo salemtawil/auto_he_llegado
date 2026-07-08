@@ -147,7 +147,7 @@ def test_video_submission_uploads_extracted_jpg_candidates_only(tmp_path) -> Non
 
     assert result.frames_extracted == 2
     assert result.candidates_uploaded == 2
-    assert review_service.uploads == [
+    assert sorted(review_service.uploads) == [
         ("candidates/user-1/batch-1/frame_0.jpg", b"jpg-0"),
         ("candidates/user-1/batch-1/frame_1.jpg", b"jpg-1"),
     ]

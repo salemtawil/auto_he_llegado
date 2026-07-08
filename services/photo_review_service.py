@@ -57,6 +57,8 @@ class PhotoReviewSnapshot:
 
 
 class PhotoReviewService:
+    _BULK_ACTION_CHUNK_SIZE = 100
+
     def __init__(
         self,
         client_provider: SupabaseClientProvider | None = None,
@@ -288,6 +290,67 @@ class PhotoReviewService:
         self._refresh_batch_counts(candidate.batch_id)
         return updated
 
+    def approve_candidates(
+        self,
+        candidate_ids: list[str],
+        *,
+        reviewer: AuthSession | None = None,
+        progress_callback=None,
+    ) -> list[PhotoCandidateRecord]:
+        reviewer = reviewer or require_current_session()
+        candidates = self._get_candidates_by_ids(candidate_ids)
+        pending_candidates = [candidate for candidate in candidates if candidate.status == "pending"]
+        total = len(pending_candidates)
+        if total <= 0:
+            return []
+
+        approved_photos: list[PhotoCreate] = []
+        candidate_updates: list[dict] = []
+        batch_ids: set[str] = set()
+        updated_count = 0
+        reviewed_at = self._utcnow()
+        for candidate in pending_candidates:
+            photo_id = str(uuid4())
+            available_path = f"available/{photo_id}.jpg"
+            self._client_provider.move_file(
+                bucket_name=self._settings.supabase_storage_bucket,
+                from_path=self._normalize_storage_path(candidate.storage_path),
+                to_path=available_path,
+            )
+            approved_photos.append(
+                PhotoCreate(
+                    id=photo_id,
+                    original_filename=candidate.original_name,
+                    storage_path=available_path,
+                    storage_bucket=self._settings.supabase_storage_bucket,
+                    status=PhotoStatus.AVAILABLE,
+                    source="reviewed_video_frame",
+                )
+            )
+            candidate_updates.append(
+                {
+                    "id": candidate.id,
+                    "status": "approved",
+                    "reviewed_by": reviewer.user_id,
+                    "reviewed_at": reviewed_at,
+                    "approved_photo_id": photo_id,
+                    "rejection_reason": None,
+                    "updated_at": reviewed_at,
+                }
+            )
+            batch_ids.add(candidate.batch_id)
+            updated_count += 1
+            if callable(progress_callback):
+                progress_callback(updated_count, total)
+
+        for chunk in self._chunks(approved_photos, self._BULK_ACTION_CHUNK_SIZE):
+            self._photos_repository.bulk_create(chunk)
+        updated_candidates: list[PhotoCandidateRecord] = []
+        for chunk in self._chunks(candidate_updates, self._BULK_ACTION_CHUNK_SIZE):
+            updated_candidates.extend(self._bulk_upsert_candidates(chunk))
+        self._refresh_many_batch_counts(batch_ids)
+        return updated_candidates
+
     def reject_candidate(
         self,
         candidate_id: str,
@@ -312,6 +375,58 @@ class PhotoReviewService:
         self._refresh_batch_counts(candidate.batch_id)
         return updated
 
+    def reject_candidates(
+        self,
+        candidate_ids: list[str],
+        *,
+        reason: str = "",
+        delete_remote: bool = True,
+        reviewer: AuthSession | None = None,
+        progress_callback=None,
+    ) -> list[PhotoCandidateRecord]:
+        reviewer = reviewer or require_current_session()
+        candidates = self._get_candidates_by_ids(candidate_ids)
+        pending_candidates = [candidate for candidate in candidates if candidate.status == "pending"]
+        total = len(pending_candidates)
+        if total <= 0:
+            return []
+
+        reviewed_at = self._utcnow()
+        if delete_remote:
+            storage_paths = [
+                self._normalize_storage_path(candidate.storage_path)
+                for candidate in pending_candidates
+                if candidate.storage_path
+            ]
+            for chunk in self._chunks(storage_paths, self._BULK_ACTION_CHUNK_SIZE):
+                self._client_provider.remove_files(
+                    bucket_name=self._settings.supabase_storage_bucket,
+                    storage_paths=chunk,
+                )
+
+        updates = []
+        batch_ids: set[str] = set()
+        for index, candidate in enumerate(pending_candidates, start=1):
+            updates.append(
+                {
+                    "id": candidate.id,
+                    "status": "deleted" if delete_remote else "rejected",
+                    "reviewed_by": reviewer.user_id,
+                    "reviewed_at": reviewed_at,
+                    "rejection_reason": reason.strip() or "rechazada por revision",
+                    "updated_at": reviewed_at,
+                }
+            )
+            batch_ids.add(candidate.batch_id)
+            if callable(progress_callback):
+                progress_callback(index, total)
+
+        updated_candidates: list[PhotoCandidateRecord] = []
+        for chunk in self._chunks(updates, self._BULK_ACTION_CHUNK_SIZE):
+            updated_candidates.extend(self._bulk_upsert_candidates(chunk))
+        self._refresh_many_batch_counts(batch_ids)
+        return updated_candidates
+
     def _remove_candidate_storage(self, candidate: PhotoCandidateRecord) -> None:
         if not candidate.storage_path:
             return
@@ -331,6 +446,24 @@ class PhotoReviewService:
             .limit(1)
         )
         return self._candidate_from_row(self._single(rows, "Foto candidata no encontrada."))
+
+    def _get_candidates_by_ids(self, candidate_ids: list[str]) -> list[PhotoCandidateRecord]:
+        normalized_ids = []
+        seen = set()
+        for candidate_id in candidate_ids:
+            normalized = str(candidate_id or "").strip()
+            if normalized and normalized not in seen:
+                normalized_ids.append(normalized)
+                seen.add(normalized)
+        if not normalized_ids:
+            return []
+        rows = self._client_provider.execute(
+            self._client_provider.client.table(self._candidates_table)
+            .select("*")
+            .in_("id", normalized_ids)
+        )
+        records_by_id = {str(row.get("id") or ""): self._candidate_from_row(row) for row in rows}
+        return [records_by_id[candidate_id] for candidate_id in normalized_ids if candidate_id in records_by_id]
 
     def get_thumbnail_path(self, candidate: PhotoCandidateRecord, *, max_size: int = 220) -> Path:
         thumbnail_path = self._thumbnail_dir / f"{candidate.id}.png"
@@ -403,6 +536,25 @@ class PhotoReviewService:
             )
             .eq("id", batch_id)
         )
+
+    def _refresh_many_batch_counts(self, batch_ids: set[str]) -> None:
+        for batch_id in sorted(batch_ids):
+            if batch_id:
+                self._refresh_batch_counts(batch_id)
+
+    def _bulk_upsert_candidates(self, payload: list[dict]) -> list[PhotoCandidateRecord]:
+        if not payload:
+            return []
+        rows = self._client_provider.execute(
+            self._client_provider.client.table(self._candidates_table).upsert(payload)
+        )
+        return [self._candidate_from_row(row) for row in rows]
+
+    @staticmethod
+    def _chunks(items: list, size: int):
+        normalized_size = max(int(size), 1)
+        for index in range(0, len(items), normalized_size):
+            yield items[index : index + normalized_size]
 
     def _get_batch_status(self, batch_id: str) -> str:
         rows = self._client_provider.execute(

@@ -133,6 +133,7 @@ function Copy-UpdaterFilesForInstaller {
     $updaterFiles = @(
         "apply_update_helper.py",
         "github_sync_updater.py",
+        "release_update_client.py",
         "README.md",
         "updater_config.example.json",
         "updater_config.json",
@@ -243,6 +244,7 @@ try {
         Invoke-Python -Arguments @("-m", "py_compile", "app_debug_inspector.py")
         Invoke-Python -Arguments @("-m", "py_compile", "app_update_helper.py")
         Invoke-Python -Arguments @("-m", "py_compile", "updater\apply_update_helper.py")
+        Invoke-Python -Arguments @("-m", "py_compile", "updater\release_update_client.py")
         Invoke-Python -Arguments @("-m", "py_compile", "ui\main_app\window.py")
     }
 

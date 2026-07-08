@@ -94,6 +94,7 @@ class Settings:
     chrome_profile_dir: Path | None = None
     chrome_executable_path: Path | None = None
     supabase_legacy_storage_buckets: tuple[str, ...] = ()
+    supabase_storage_limit_mb: int = 0
 
     @property
     def supabase_enabled(self) -> bool:
@@ -142,7 +143,7 @@ def get_settings() -> Settings:
         supabase_url=_get_env("SUPABASE_URL"),
         supabase_key=_get_env("SUPABASE_KEY"),
         supabase_storage_bucket=(
-            _get_env("SUPABASE_STORAGE_BUCKET", "photos") or "photos"
+            _get_env("SUPABASE_STORAGE_BUCKET", "photo-pool") or "photo-pool"
         ),
         supabase_photos_table=(
             _get_env("SUPABASE_PHOTOS_TABLE", "photos") or "photos"
@@ -163,6 +164,7 @@ def get_settings() -> Settings:
             _get_env("SUPABASE_PROFILES_TABLE", "profiles") or "profiles"
         ),
         supabase_timeout_seconds=_get_int_env("SUPABASE_TIMEOUT_SECONDS", 30),
+        supabase_storage_limit_mb=_get_int_env("SUPABASE_STORAGE_LIMIT_MB", 0),
         admin_access_password=_get_env("ADMIN_ACCESS_PASSWORD", "123456987") or "123456987",
         weekly_min_approved_photos=_get_int_env("WEEKLY_MIN_APPROVED_PHOTOS", 20),
         video_frame_interval_seconds=_get_float_env("VIDEO_FRAME_INTERVAL_SECONDS", 0.0),

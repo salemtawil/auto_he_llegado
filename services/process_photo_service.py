@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 from datetime import datetime, timezone
 
 from config.settings import Settings, get_settings
@@ -41,8 +42,45 @@ class ProcessPhotoService:
         try:
             self._photos_repository.validate_atomic_claim_support()
         except RepositoryError as exc:
-            raise RuntimeError("Falta aplicar la migracion sql/004_functions.sql en Supabase.") from exc
+            if self._is_missing_atomic_claim_function_error(exc):
+                raise RuntimeError("Falta aplicar la migracion sql/004_functions.sql en Supabase.") from exc
+            retry_error = self._retry_atomic_reservation_validation_with_fresh_client()
+            if retry_error is None:
+                self._atomic_claim_support_validated = True
+                return
+            raise RuntimeError(
+                "No se pudo validar la reserva atomica del pool de fotos. "
+                "Esto suele pasar por sesion vencida, cache temporal de Supabase o conexion inestable. "
+                f"Detalle: {retry_error}"
+            ) from retry_error
         self._atomic_claim_support_validated = True
+
+    def _retry_atomic_reservation_validation_with_fresh_client(self) -> RepositoryError | None:
+        reset_client = getattr(self._client_provider, "reset_client", None)
+        if callable(reset_client):
+            with contextlib.suppress(Exception):
+                reset_client()
+        try:
+            self._photos_repository.validate_atomic_claim_support()
+        except RepositoryError as exc:
+            return exc
+        return None
+
+    @staticmethod
+    def _is_missing_atomic_claim_function_error(exc: Exception) -> bool:
+        detail = str(exc).lower()
+        return (
+            "falta aplicar la migracion sql/004_functions.sql" in detail
+            or (
+                "claim_available_photo" in detail
+                and (
+                    "pgrst202" in detail
+                    or "could not find the function" in detail
+                    or "schema cache" in detail
+                    or "function public.claim_available_photo" in detail
+                )
+            )
+        )
 
     def reserve_photo(self, *, process_id: str | None = None) -> ReservedPhoto:
         self.validate_atomic_reservation_support()

@@ -283,7 +283,7 @@ def test_begin_new_run_initializes_extension_config_snapshot() -> None:
     assert payload["note"] == "process_start_pending"
     assert payload["extension_enabled"] is True
     assert str(payload["extension_path"]).endswith("browser_extension")
-    assert str(payload["manifest_path"]).endswith("browser_extension\\manifest.json")
+    assert str(payload["manifest_path"]).replace("\\", "/").endswith("browser_extension/manifest.json")
 
 
 def test_is_real_google_chrome_executable_accepts_real_chrome_name(tmp_path) -> None:

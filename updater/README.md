@@ -1,34 +1,45 @@
-# GitHub Sync Updater
+# GitHub Updater
 
-Updater externo para Auto He Llegado basado en GitHub API publica.
+Updater externo para Auto He Llegado basado en GitHub.
 
 ## Que hace
 
-- consulta el arbol del repo publico
-- filtra solo archivos permitidos
-- compara SHA256 remoto vs local
-- soporta `--check`, `--dry-run` y `--apply`
-- usa staging, backup y rollback
-- no borra archivos obsoletos en esta version
-- respeta rutas protegidas locales
+- La app consulta `updater/update_config.json`.
+- Descarga un manifiesto `update_latest.json` desde GitHub o el ultimo release del repo.
+- Selecciona el ZIP correcto para Windows o Mac.
+- Verifica SHA256 antes de aplicar.
+- Lanza `apply_update_helper.py` como proceso externo para reemplazar la app cuando esta se cierre.
+- Respeta rutas protegidas locales como `.env`, logs, exports, `local_data` y `updater/updater_config.json`.
 
 ## Uso desde la app
 
 - En Configuracion, usa el boton `Actualizar app`.
-- La app valida que `updater/updater_config.json` exista y tenga `owner`, `repo` y `branch` reales.
-- Si hay launcher visible para tu sistema, la app lo abre y luego se cierra.
-- Si no hay launcher, la app hace fallback al comando Python directo.
-- La app no modifica archivos por si sola: el updater externo hace los cambios.
+- La app valida que existan `updater/updater_config.json`, `updater/update_config.json` y el helper.
+- La app descarga el ZIP desde GitHub y lo guarda en `updates/staging/downloaded`.
+- Luego se cierra y el helper aplica el ZIP, crea backup y reinicia.
 
 ## Configuracion
 
-1. Copia `updater/updater_config.example.json` como `updater/updater_config.json`.
-2. Define:
-   - `owner`
-   - `repo`
-   - `branch`
-3. Ajusta `install_dir` si hace falta o usa `--install-dir`.
-4. No dejes placeholders como `TU_USUARIO` o `TU_REPO`.
+`updater/update_config.json` apunta al manifiesto remoto:
+
+```json
+{
+  "channel": "stable",
+  "latest_url": "https://raw.githubusercontent.com/salemtawil/auto_he_llegado/main/update_latest.json"
+}
+```
+
+El manifiesto remoto debe incluir la revision, los assets por plataforma y SHA256 reales. Usa `updater/update_latest.example.json` como plantilla.
+
+`updater/updater_config.json` sigue existiendo para compatibilidad y debe tener `owner`, `repo` y `branch` reales.
+
+## Publicar una nueva version
+
+1. Genera el instalador y el update ZIP.
+2. Sube el ZIP de Windows y/o Mac a GitHub Releases, o a una ubicacion descargable del repo.
+3. Calcula SHA256 de cada ZIP.
+4. Actualiza `update_latest.json` en GitHub con `revision`, URL y SHA256.
+5. Los usuarios entran a `Configuracion > Actualizar app`.
 
 ## Uso manual en macOS
 
@@ -37,13 +48,7 @@ chmod +x updater/launchers/ActualizarApp.command
 open updater/launchers/ActualizarApp.command
 ```
 
-El launcher ejecuta, en orden:
-
-```bash
-python3 updater/github_sync_updater.py --check --config updater/updater_config.json
-python3 updater/github_sync_updater.py --dry-run --config updater/updater_config.json
-python3 updater/github_sync_updater.py --apply --config updater/updater_config.json
-```
+El launcher antiguo de sincronizacion de archivos sigue disponible para diagnostico, pero el flujo recomendado es el boton `Actualizar app`.
 
 ## Uso manual en Windows
 
@@ -51,13 +56,7 @@ python3 updater/github_sync_updater.py --apply --config updater/updater_config.j
 updater\launchers\ActualizarApp.bat
 ```
 
-El launcher ejecuta, en orden:
-
-```powershell
-python updater\github_sync_updater.py --check --config updater\updater_config.json
-python updater\github_sync_updater.py --dry-run --config updater\updater_config.json
-python updater\github_sync_updater.py --apply --config updater\updater_config.json
-```
+El launcher antiguo de sincronizacion de archivos sigue disponible para diagnostico, pero el flujo recomendado es el boton `Actualizar app`.
 
 ## Comandos directos
 
@@ -71,15 +70,16 @@ python updater/github_sync_updater.py --install-dir "C:\Ruta\De\App"
 
 ## Seguridad
 
-- `--apply` descarga primero a `updates/staging/<timestamp>/`
-- luego respalda archivos reemplazados en `updates/backups/<timestamp>/`
+- la app descarga primero a `updates/staging/downloaded/`
+- el helper extrae/aplica desde el ZIP verificado
+- respalda archivos reemplazados en `updates/backups/<timestamp>/`
 - si falla una copia, hace rollback
 - no toca `.env`, `config/`, `logs/`, `exports/`, `data/`, `local_data/`, `chrome_profiles/`, `.venv/`
 
 ## Importante
 
-- Cierra Auto He Llegado antes de usar `--apply`.
-- La app no se cierra si falta el updater, falta el config, hay procesos activos o falla el lanzamiento externo.
+- La app no se cierra si falta el updater, falta el config, hay procesos activos, falla la descarga o falla el lanzamiento externo.
+- El SHA256 del manifiesto debe ser real. Los placeholders bloquean la actualizacion.
 - Esta version no borra archivos locales obsoletos.
 
 ## Nota SSL en macOS

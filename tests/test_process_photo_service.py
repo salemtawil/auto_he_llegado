@@ -2,6 +2,7 @@ from pathlib import Path
 
 from config.settings import Settings
 from core.enums import PhotoStatus
+from core.exceptions import RepositoryError
 from services.process_photo_service import ProcessPhotoService
 
 
@@ -46,6 +47,7 @@ class StubClientProvider:
         self.download_error = download_error
         self.download_calls = []
         self.remove_calls = []
+        self.reset_calls = 0
 
     def download_binary(self, *, bucket_name, storage_path):
         self.download_calls.append((bucket_name, storage_path))
@@ -55,6 +57,9 @@ class StubClientProvider:
 
     def remove_file(self, *, bucket_name, storage_path):
         self.remove_calls.append((bucket_name, storage_path))
+
+    def reset_client(self) -> None:
+        self.reset_calls += 1
 
 
 class StubTempFileService:
@@ -125,6 +130,68 @@ def test_reserve_photo_marks_reserved_downloads_and_creates_local_copy(tmp_path)
     assert repository.validate_atomic_claim_support_calls == 1
     assert repository.claim_calls == [None]
     assert client_provider.download_calls == [("photo-pool", "available/sample.jpg")]
+
+
+class FlakyValidationRepository(StubPhotosRepository):
+    def __init__(self, validation_outcomes) -> None:
+        super().__init__()
+        self.validation_outcomes = list(validation_outcomes)
+
+    def validate_atomic_claim_support(self):
+        self.validate_atomic_claim_support_calls += 1
+        outcome = self.validation_outcomes.pop(0)
+        if isinstance(outcome, Exception):
+            raise outcome
+        return None
+
+
+def test_validate_atomic_reservation_retries_with_fresh_client_after_transient_error(tmp_path) -> None:
+    repository = FlakyValidationRepository(
+        [
+            RepositoryError("Supabase operation failed: {'message': 'JWT expired', 'code': 'PGRST303'}"),
+            None,
+        ]
+    )
+    client_provider = StubClientProvider()
+    service = ProcessPhotoService(
+        photos_repository=repository,
+        client_provider=client_provider,
+        temp_file_service=StubTempFileService(tmp_path),
+        settings=build_settings(tmp_path),
+    )
+
+    service.validate_atomic_reservation_support()
+
+    assert repository.validate_atomic_claim_support_calls == 2
+    assert client_provider.reset_calls == 1
+
+
+def test_validate_atomic_reservation_keeps_migration_message_for_missing_rpc(tmp_path) -> None:
+    repository = FlakyValidationRepository(
+        [
+            RepositoryError(
+                "Supabase operation failed: {'code': 'PGRST202', "
+                "'message': 'Could not find the function public.claim_available_photo in the schema cache'}"
+            ),
+        ]
+    )
+    client_provider = StubClientProvider()
+    service = ProcessPhotoService(
+        photos_repository=repository,
+        client_provider=client_provider,
+        temp_file_service=StubTempFileService(tmp_path),
+        settings=build_settings(tmp_path),
+    )
+
+    try:
+        service.validate_atomic_reservation_support()
+    except RuntimeError as exc:
+        assert str(exc) == "Falta aplicar la migracion sql/004_functions.sql en Supabase."
+    else:
+        raise AssertionError("Expected missing RPC validation to raise.")
+
+    assert repository.validate_atomic_claim_support_calls == 1
+    assert client_provider.reset_calls == 0
 
 
 def test_reserve_photo_releases_record_if_download_fails_temporarily(tmp_path) -> None:

@@ -95,6 +95,20 @@ class PhotosRepository:
         )
         return self._single_row(rows, f"Photo '{validated_id}' was not found.")
 
+    def update_many(self, photo_ids: Iterable[str], changes: PhotoUpdate) -> list[PhotoRecord]:
+        validated_ids = [validate_uuid(photo_id, "photo_id") for photo_id in photo_ids]
+        if not validated_ids:
+            return []
+        payload = self._serialize_update(changes)
+        if not payload:
+            raise ValidationError("At least one field must be provided to update.")
+        rows = self._client_provider.execute(
+            self._client_provider.client.table(self._table)
+            .update(payload)
+            .in_("id", validated_ids)
+        )
+        return [PhotoRecord.model_validate(row) for row in rows]
+
     def claim_available(self, *, process_id: str | None = None) -> PhotoRecord:
         try:
             rows = self._client_provider.execute(
@@ -104,8 +118,13 @@ class PhotosRepository:
                 )
             )
         except RepositoryError as exc:
+            if self._is_missing_atomic_claim_function_error(exc):
+                raise RepositoryError(
+                    f"{self._MIGRATION_REQUIRED_MESSAGE} "
+                    "Atomic photo claim failed. "
+                    f"Details: {exc}"
+                ) from exc
             raise RepositoryError(
-                f"{self._MIGRATION_REQUIRED_MESSAGE} "
                 "Atomic photo claim failed. "
                 f"Details: {exc}"
             ) from exc
@@ -128,9 +147,26 @@ class PhotosRepository:
                 )
             )
         except RepositoryError as exc:
+            if self._is_missing_atomic_claim_function_error(exc):
+                raise RepositoryError(
+                    f"{self._MIGRATION_REQUIRED_MESSAGE} Details: {exc}"
+                ) from exc
             raise RepositoryError(
-                f"{self._MIGRATION_REQUIRED_MESSAGE} Details: {exc}"
+                f"Atomic photo claim validation failed. Details: {exc}"
             ) from exc
+
+    @staticmethod
+    def _is_missing_atomic_claim_function_error(exc: Exception) -> bool:
+        detail = str(exc).lower()
+        return (
+            "claim_available_photo" in detail
+            and (
+                "pgrst202" in detail
+                or "could not find the function" in detail
+                or "schema cache" in detail
+                or "function public.claim_available_photo" in detail
+            )
+        )
 
     def update_status(
         self,
@@ -156,6 +192,15 @@ class PhotosRepository:
             self._client_provider.client.table(self._table)
             .select("id", count="exact")
             .eq("status", status.value)
+        )
+        return int(getattr(response, "count", 0) or 0)
+
+    def count_active_storage_records(self) -> int:
+        response = self._client_provider.execute_response(
+            self._client_provider.client.table(self._table)
+            .select("id", count="exact")
+            .not_.is_("file_path", "null")
+            .is_("storage_deleted_at", "null")
         )
         return int(getattr(response, "count", 0) or 0)
 
@@ -290,6 +335,17 @@ class PhotosRepository:
             ),
         )
 
+    def mark_storage_cleaned_many(self, photo_ids: Iterable[str], *, reason: str, cleaned_by: str) -> list[PhotoRecord]:
+        return self.update_many(
+            photo_ids,
+            PhotoUpdate(
+                storage_deleted_at=self._utcnow(),
+                cleanup_reason=reason,
+                cleanup_error=None,
+                cleaned_by=cleaned_by,
+            ),
+        )
+
     def mark_cleanup_error(self, photo_id: str, *, error: str) -> PhotoRecord:
         return self.update(
             photo_id,
@@ -307,6 +363,25 @@ class PhotosRepository:
     ) -> PhotoRecord:
         return self.update(
             photo_id,
+            PhotoUpdate(
+                status=PhotoStatus.DISCARDED,
+                reserved_by_process_id=None,
+                storage_deleted_at=self._utcnow(),
+                cleanup_reason=reason,
+                cleanup_error=None,
+                cleaned_by=cleaned_by,
+            ),
+        )
+
+    def mark_stale_reserved_cleaned_many(
+        self,
+        photo_ids: Iterable[str],
+        *,
+        reason: str,
+        cleaned_by: str,
+    ) -> list[PhotoRecord]:
+        return self.update_many(
+            photo_ids,
             PhotoUpdate(
                 status=PhotoStatus.DISCARDED,
                 reserved_by_process_id=None,

@@ -6,6 +6,7 @@ import threading
 import customtkinter as ctk
 
 from services.photo_cleanup_service import PhotoCleanupService
+from services.storage_health_service import StorageHealthService
 from ui.main_app.current_result_panel import CurrentResultPanel
 from ui.main_app.extension_status_panel import ExtensionStatusPanel
 from ui.main_app.photo_review_panel import PhotoReviewPanel
@@ -138,6 +139,7 @@ class AdminUploaderDialog(ctk.CTkToplevel):
         on_refresh_diagnostics=None,
         on_export_debug=None,
         photo_cleanup_service=None,
+        storage_health_service=None,
         **kwargs,
     ) -> None:
         super().__init__(master, fg_color=APP_BG, **kwargs)
@@ -149,6 +151,7 @@ class AdminUploaderDialog(ctk.CTkToplevel):
         self._on_refresh_diagnostics = on_refresh_diagnostics
         self._on_export_debug = on_export_debug
         self._photo_cleanup_service = photo_cleanup_service or PhotoCleanupService()
+        self._storage_health_service = storage_health_service or StorageHealthService()
         self._diagnostics_payloads: dict[str, dict] = {}
         self._payload_visible = False
         self._diagnostics_loading = False
@@ -159,26 +162,71 @@ class AdminUploaderDialog(ctk.CTkToplevel):
         self._cleanup_progress_done = 0
         self._cleanup_last_stop_reason: str | None = None
         self._cleanup_mode = ""
+        self._storage_health_loading = False
 
         container = ctk.CTkFrame(self, fg_color="transparent")
         container.pack(fill="both", expand=True, padx=20, pady=20)
         container.grid_columnconfigure(0, weight=1)
         container.grid_rowconfigure(0, weight=1)
 
+        self._uploader_service = uploader_service
+        self._built_tabs: set[str] = set()
         self.tabs = ctk.CTkTabview(container, corner_radius=20)
         self.tabs.grid(row=0, column=0, sticky="nsew")
         self.tabs.add("Usuarios")
         self.tabs.add("Carga")
         self.tabs.add("Revision fotos")
         self.tabs.add("Limpieza fotos")
-        self.tabs.add("Diagnóstico")
+        self.tabs.add("Diagnostico")
 
-        self._build_user_access_tab(self.tabs.tab("Usuarios"))
-        self._build_upload_tab(self.tabs.tab("Carga"), uploader_service)
-        self._build_photo_review_tab(self.tabs.tab("Revision fotos"))
-        self._build_photo_cleanup_tab(self.tabs.tab("Limpieza fotos"))
-        self._build_diagnostics_tab(self.tabs.tab("Diagnóstico"))
-        self._set_diagnostics_idle_state()
+        for tab_name in ("Usuarios", "Carga", "Revision fotos", "Limpieza fotos", "Diagnostico"):
+            self._build_lazy_tab_placeholder(self.tabs.tab(tab_name), tab_name)
+        self.tabs.configure(command=self._handle_tab_selected)
+        self.after(80, self._handle_tab_selected)
+
+    def _build_lazy_tab_placeholder(self, master, tab_name: str) -> None:
+        master.grid_columnconfigure(0, weight=1)
+        master.grid_rowconfigure(0, weight=1)
+        placeholder = ctk.CTkFrame(
+            master,
+            fg_color=CARD_BG,
+            corner_radius=18,
+            border_width=1,
+            border_color=BORDER,
+        )
+        placeholder.grid(row=0, column=0, padx=8, pady=8, sticky="nsew")
+        placeholder.grid_columnconfigure(0, weight=1)
+        ctk.CTkLabel(
+            placeholder,
+            text=tab_name,
+            font=ctk.CTkFont(size=18, weight="bold"),
+            text_color=TEXT_PRIMARY,
+        ).grid(row=0, column=0, padx=18, pady=(18, 4), sticky="w")
+        ctk.CTkLabel(
+            placeholder,
+            text="Cargando modulo...",
+            text_color=TEXT_MUTED,
+        ).grid(row=1, column=0, padx=18, pady=(0, 18), sticky="w")
+
+    def _handle_tab_selected(self, *_args) -> None:
+        tab_name = self.tabs.get()
+        if tab_name in self._built_tabs:
+            return
+        tab = self.tabs.tab(tab_name)
+        for child in tab.winfo_children():
+            child.destroy()
+        if tab_name == "Usuarios":
+            self._build_user_access_tab(tab)
+        elif tab_name == "Carga":
+            self._build_upload_tab(tab, self._uploader_service)
+        elif tab_name == "Revision fotos":
+            self._build_photo_review_tab(tab)
+        elif tab_name == "Limpieza fotos":
+            self._build_photo_cleanup_tab(tab)
+        else:
+            self._build_diagnostics_tab(tab)
+            self._set_diagnostics_idle_state()
+        self._built_tabs.add(tab_name)
 
     def _build_user_access_tab(self, master) -> None:
         master.grid_columnconfigure(0, weight=1)
@@ -266,293 +314,20 @@ class AdminUploaderDialog(ctk.CTkToplevel):
         panel = PhotoReviewPanel(master)
         panel.grid(row=0, column=0, sticky="nsew")
 
-    def _build_photo_cleanup_tab(self, master) -> None:
-        master.grid_columnconfigure(0, weight=1)
-        master.grid_rowconfigure(4, weight=1)
-
-        header = ctk.CTkFrame(
-            master,
-            fg_color=CARD_BG,
-            corner_radius=18,
-            border_width=1,
-            border_color=BORDER,
-        )
-        header.grid(row=0, column=0, sticky="ew", pady=(0, 14))
-        header.grid_columnconfigure(0, weight=1)
-
-        ctk.CTkLabel(
-            header,
-            text="Limpieza de fotos",
-            font=ctk.CTkFont(size=20, weight="bold"),
-            text_color=TEXT_PRIMARY,
-        ).grid(row=0, column=0, padx=(18, 12), pady=(14, 6), sticky="w")
-
-        ctk.CTkLabel(
-            header,
-            text=(
-                "Borra archivos remotos de Storage para fotos consumidas o reservadas viejas, "
-                "pero conserva el histórico en photos."
-            ),
-            text_color=TEXT_MUTED,
-            justify="left",
-            wraplength=860,
-        ).grid(row=1, column=0, padx=18, pady=(0, 14), sticky="ew")
-
-        actions = ctk.CTkFrame(
-            master,
-            fg_color=CARD_BG,
-            corner_radius=18,
-            border_width=1,
-            border_color=BORDER,
-        )
-        actions.grid(row=1, column=0, sticky="ew", pady=(0, 14))
-        actions.grid_columnconfigure(5, weight=1)
-
-        self.audit_pool_button = ctk.CTkButton(
-            actions,
-            text="Auditar pool",
-            command=self._handle_photo_cleanup_audit,
-            height=36,
-            corner_radius=12,
-            fg_color=NEUTRAL_BUTTON,
-            hover_color=NEUTRAL_BUTTON_HOVER,
-            text_color=TEXT_PRIMARY,
-        )
-        self.audit_pool_button.grid(row=0, column=0, padx=(18, 8), pady=14, sticky="w")
-
-        self.cleanup_consumed_button = ctk.CTkButton(
-            actions,
-            text="Limpiar 100 consumidas",
-            command=self._handle_cleanup_consumed,
-            height=36,
-            corner_radius=12,
-            fg_color=ACCENT,
-            hover_color=ACCENT_HOVER,
-        )
-        self.cleanup_consumed_button.grid(row=0, column=1, padx=8, pady=14, sticky="w")
-
-        self.cleanup_stale_reserved_button = ctk.CTkButton(
-            actions,
-            text="Limpiar 100 reservadas viejas",
-            command=self._handle_cleanup_stale_reserved,
-            height=36,
-            corner_radius=12,
-            fg_color=NEUTRAL_BUTTON,
-            hover_color=NEUTRAL_BUTTON_HOVER,
-            text_color=TEXT_PRIMARY,
-        )
-        self.cleanup_stale_reserved_button.grid(row=0, column=2, padx=8, pady=14, sticky="w")
-
-        self.cleanup_all_consumed_button = ctk.CTkButton(
-            actions,
-            text="Limpiar todas las consumidas",
-            command=self._start_cleanup_all_consumed,
-            height=36,
-            corner_radius=12,
-            fg_color=ACCENT,
-            hover_color=ACCENT_HOVER,
-        )
-        self.cleanup_all_consumed_button.grid(row=0, column=3, padx=8, pady=14, sticky="w")
-
-        self.cleanup_all_stale_reserved_button = ctk.CTkButton(
-            actions,
-            text="Limpiar todas las reservadas viejas",
-            command=self._start_cleanup_all_stale_reserved,
-            height=36,
-            corner_radius=12,
-            fg_color=NEUTRAL_BUTTON,
-            hover_color=NEUTRAL_BUTTON_HOVER,
-            text_color=TEXT_PRIMARY,
-        )
-        self.cleanup_all_stale_reserved_button.grid(row=0, column=4, padx=8, pady=14, sticky="w")
-
-        self.photo_cleanup_status_label = ctk.CTkLabel(
-            actions,
-            text="Sin auditoría ejecutada.",
-            text_color=TEXT_MUTED,
-            justify="right",
-            anchor="e",
-        )
-        self.photo_cleanup_status_label.grid(row=0, column=5, padx=(12, 18), pady=14, sticky="e")
-
-        reconcile = ctk.CTkFrame(
-            master,
-            fg_color=CARD_BG,
-            corner_radius=18,
-            border_width=1,
-            border_color=BORDER,
-        )
-        reconcile.grid(row=2, column=0, sticky="ew", pady=(0, 14))
-        reconcile.grid_columnconfigure(0, weight=1)
-        reconcile.grid_columnconfigure(1, weight=0)
-
-        ctk.CTkLabel(
-            reconcile,
-            text="Reconciliar errores de limpieza",
-            font=ctk.CTkFont(size=16, weight="bold"),
-            text_color=TEXT_PRIMARY,
-        ).grid(row=0, column=0, padx=(16, 12), pady=(12, 4), sticky="w")
-
-        ctk.CTkLabel(
-            reconcile,
-            text="Corrige fotos donde Storage ya fue borrado pero la DB quedo marcada con error de limpieza.",
-            text_color=TEXT_MUTED,
-            justify="left",
-            wraplength=760,
-        ).grid(row=1, column=0, padx=(16, 12), pady=(0, 10), sticky="ew")
-
-        reconcile_actions = ctk.CTkFrame(reconcile, fg_color="transparent")
-        reconcile_actions.grid(row=0, column=1, rowspan=2, padx=(12, 16), pady=(12, 10), sticky="e")
-
-        self.audit_cleanup_errors_button = ctk.CTkButton(
-            reconcile_actions,
-            text="Auditar errores",
-            command=self._handle_reconcile_errors_audit,
-            height=34,
-            corner_radius=12,
-            fg_color=NEUTRAL_BUTTON,
-            hover_color=NEUTRAL_BUTTON_HOVER,
-            text_color=TEXT_PRIMARY,
-        )
-        self.audit_cleanup_errors_button.grid(row=0, column=0, padx=(0, 8), sticky="w")
-
-        self.reconcile_cleanup_errors_button = ctk.CTkButton(
-            reconcile_actions,
-            text="Reconciliar",
-            command=self._handle_reconcile_errors,
-            height=34,
-            corner_radius=12,
-            fg_color=ACCENT,
-            hover_color=ACCENT_HOVER,
-        )
-        self.reconcile_cleanup_errors_button.grid(row=0, column=1, sticky="w")
-
-        self.reconcile_cleanup_status_label = ctk.CTkLabel(
-            reconcile,
-            text="Sin auditoria de reconciliacion.",
-            text_color=TEXT_MUTED,
-            justify="left",
-            anchor="w",
-        )
-        self.reconcile_cleanup_status_label.grid(row=2, column=0, columnspan=2, padx=16, pady=(0, 8), sticky="ew")
-
-        self.reconcile_cleanup_result_box = ctk.CTkTextbox(
-            reconcile,
-            height=120,
-            border_width=1,
-            border_color=BORDER,
-            corner_radius=12,
-        )
-        self.reconcile_cleanup_result_box.grid(row=3, column=0, columnspan=2, padx=16, pady=(0, 14), sticky="ew")
-        self._set_reconcile_cleanup_lines(
-            [
-                "Encontradas: --",
-                "Procesadas: --",
-                "Reconciliadas: --",
-                "Fallidas: --",
-                "Restantes: --",
-                "Stop reason: --",
-                "Ultimo error: --",
-            ]
-        )
-
-        progress = ctk.CTkFrame(
-            master,
-            fg_color=CARD_BG,
-            corner_radius=18,
-            border_width=1,
-            border_color=BORDER,
-        )
-        progress.grid(row=3, column=0, sticky="ew", pady=(0, 14))
-        progress.grid_columnconfigure(0, weight=1)
-        progress.grid_columnconfigure(1, weight=0)
-
-        self.cleanup_progress_label = ctk.CTkLabel(
-            progress,
-            text="Sin limpieza masiva en curso.",
-            text_color=TEXT_PRIMARY,
-            justify="left",
-            anchor="w",
-        )
-        self.cleanup_progress_label.grid(row=0, column=0, padx=16, pady=(12, 6), sticky="ew")
-
-        self.cancel_cleanup_button = ctk.CTkButton(
-            progress,
-            text="Cancelar limpieza",
-            command=self._cancel_cleanup,
-            state="disabled",
-            height=34,
-            corner_radius=12,
-            fg_color=NEUTRAL_BUTTON,
-            hover_color=NEUTRAL_BUTTON_HOVER,
-            text_color=TEXT_PRIMARY,
-        )
-        self.cancel_cleanup_button.grid(row=0, column=1, padx=(12, 16), pady=(12, 6), sticky="e")
-
-        self.cleanup_progress_bar = ctk.CTkProgressBar(progress, height=16, corner_radius=999)
-        self.cleanup_progress_bar.grid(row=1, column=0, columnspan=2, padx=16, pady=6, sticky="ew")
-        self.cleanup_progress_bar.set(0.0)
-
-        self.cleanup_last_batch_label = ctk.CTkLabel(
-            progress,
-            text="Último lote: --",
-            text_color=TEXT_MUTED,
-            justify="left",
-            anchor="w",
-        )
-        self.cleanup_last_batch_label.grid(row=2, column=0, columnspan=2, padx=16, pady=(0, 4), sticky="ew")
-
-        self.cleanup_remaining_label = ctk.CTkLabel(
-            progress,
-            text="Restantes: -- | Velocidad: -- fotos/min",
-            text_color=TEXT_MUTED,
-            justify="left",
-            anchor="w",
-        )
-        self.cleanup_remaining_label.grid(row=3, column=0, columnspan=2, padx=16, pady=(0, 14), sticky="ew")
-
-        summary = ctk.CTkFrame(
-            master,
-            fg_color=CARD_BG,
-            corner_radius=18,
-            border_width=1,
-            border_color=BORDER,
-        )
-        summary.grid(row=4, column=0, sticky="nsew")
-        summary.grid_columnconfigure(0, weight=1)
-        summary.grid_rowconfigure(1, weight=1)
-
-        ctk.CTkLabel(
-            summary,
-            text="Resumen del pool",
-            font=ctk.CTkFont(size=16, weight="bold"),
-            text_color=TEXT_PRIMARY,
-        ).grid(row=0, column=0, padx=16, pady=(12, 6), sticky="w")
-
-        self.photo_cleanup_summary_box = ctk.CTkTextbox(
-            summary,
-            height=220,
-            border_width=1,
-            border_color=BORDER,
-            corner_radius=12,
-        )
-        self.photo_cleanup_summary_box.grid(row=1, column=0, padx=16, pady=(0, 14), sticky="nsew")
-        self._set_photo_cleanup_summary_lines(
-            [
-                "Disponibles: --",
-                "Reservadas: --",
-                "Usadas históricas: --",
-                "Descartadas: --",
-                "Consumidas pendientes de limpiar Storage: --",
-                "Consumidas pendientes limpiables: --",
-                "Reservadas viejas pendientes: --",
-                "Reservadas viejas limpiables: --",
-            ]
-        )
 
     def _build_photo_cleanup_tab(self, master) -> None:
         master.grid_columnconfigure(0, weight=1)
-        master.grid_rowconfigure(4, weight=1)
+        master.grid_rowconfigure(0, weight=1)
+
+        scroll = ctk.CTkScrollableFrame(
+            master,
+            fg_color="transparent",
+            corner_radius=0,
+        )
+        scroll.grid(row=0, column=0, sticky="nsew")
+        scroll.grid_columnconfigure(0, weight=1)
+        master = scroll
+        master.grid_rowconfigure(5, weight=1)
 
         header = ctk.CTkFrame(
             master,
@@ -810,6 +585,62 @@ class AdminUploaderDialog(ctk.CTkToplevel):
             ]
         )
 
+        storage_health = ctk.CTkFrame(
+            master,
+            fg_color=CARD_BG,
+            corner_radius=18,
+            border_width=1,
+            border_color=BORDER,
+        )
+        storage_health.grid(row=3, column=0, sticky="ew", pady=(0, 12))
+        storage_health.grid_columnconfigure(0, weight=1)
+        storage_health.grid_columnconfigure(1, weight=0)
+
+        ctk.CTkLabel(
+            storage_health,
+            text="Almacenamiento Supabase",
+            font=ctk.CTkFont(size=16, weight="bold"),
+            text_color=TEXT_PRIMARY,
+        ).grid(row=0, column=0, padx=(16, 12), pady=(12, 4), sticky="w")
+
+        self.storage_health_button = ctk.CTkButton(
+            storage_health,
+            text="Refrescar almacenamiento",
+            command=self._handle_storage_health_refresh,
+            height=32,
+            corner_radius=12,
+            fg_color=NEUTRAL_BUTTON,
+            hover_color=NEUTRAL_BUTTON_HOVER,
+            text_color=TEXT_PRIMARY,
+        )
+        self.storage_health_button.grid(row=0, column=1, padx=(12, 16), pady=(12, 4), sticky="e")
+
+        self.storage_health_status_label = ctk.CTkLabel(
+            storage_health,
+            text="Sin consulta ejecutada.",
+            text_color=TEXT_MUTED,
+            justify="left",
+            anchor="w",
+        )
+        self.storage_health_status_label.grid(row=1, column=0, columnspan=2, padx=16, pady=(0, 8), sticky="ew")
+
+        self.storage_health_summary_box = ctk.CTkTextbox(
+            storage_health,
+            height=96,
+            border_width=1,
+            border_color=BORDER,
+            corner_radius=12,
+        )
+        self.storage_health_summary_box.grid(row=2, column=0, columnspan=2, padx=16, pady=(0, 12), sticky="ew")
+        self._set_storage_health_lines(
+            [
+                "Buckets: --",
+                "Fotos ocupando Storage: -- | Muestra: -- | Promedio JPG: --",
+                "Uso estimado: -- | Limite configurado: -- | Espacio estimado libre: --",
+                "Capacidad estimada: -- | Fotos restantes estimadas: --",
+            ]
+        )
+
         reconcile = ctk.CTkFrame(
             master,
             fg_color=CARD_BG,
@@ -817,7 +648,7 @@ class AdminUploaderDialog(ctk.CTkToplevel):
             border_width=1,
             border_color=BORDER,
         )
-        reconcile.grid(row=3, column=0, sticky="ew", pady=(0, 12))
+        reconcile.grid(row=4, column=0, sticky="ew", pady=(0, 12))
         reconcile.grid_columnconfigure(0, weight=1)
         reconcile.grid_columnconfigure(1, weight=0)
 
@@ -888,7 +719,7 @@ class AdminUploaderDialog(ctk.CTkToplevel):
             border_width=1,
             border_color=BORDER,
         )
-        progress.grid(row=4, column=0, sticky="ew", pady=(0, 12))
+        progress.grid(row=5, column=0, sticky="ew", pady=(0, 12))
         progress.grid_columnconfigure(0, weight=1)
         progress.grid_columnconfigure(1, weight=0)
 
@@ -1096,6 +927,9 @@ class AdminUploaderDialog(ctk.CTkToplevel):
         self._apply_payload({})
 
     def refresh_diagnostics(self) -> None:
+        if "Diagnostico" not in self._built_tabs:
+            self.tabs.set("Diagnostico")
+            self._handle_tab_selected()
         if self._diagnostics_loading:
             return
         if self._diagnostics_provider is None:
@@ -1141,6 +975,8 @@ class AdminUploaderDialog(ctk.CTkToplevel):
         self._apply_payload({})
 
     def mark_diagnostics_stale(self) -> None:
+        if "Diagnostico" not in self._built_tabs or not hasattr(self, "summary_label"):
+            return
         if self._diagnostics_loading:
             return
         self.summary_label.configure(text="Hay cambios recientes. Presiona Refrescar.")
@@ -1225,6 +1061,22 @@ class AdminUploaderDialog(ctk.CTkToplevel):
             worker=lambda: ("audit", self._photo_cleanup_service.audit()),
         )
 
+    def _handle_storage_health_refresh(self) -> None:
+        if self._storage_health_loading:
+            return
+        self._storage_health_loading = True
+        self.storage_health_button.configure(state="disabled", text="Consultando...")
+        self.storage_health_status_label.configure(text="Consultando almacenamiento...", text_color=TEXT_PRIMARY)
+
+        def background() -> None:
+            try:
+                snapshot = self._storage_health_service.get_snapshot()
+                self.after(0, lambda current=snapshot: self._finish_storage_health_refresh(current))
+            except Exception as exc:
+                self.after(0, lambda error=exc: self._finish_storage_health_error(error))
+
+        threading.Thread(target=background, daemon=True).start()
+
     def _handle_reconcile_errors_audit(self) -> None:
         self._run_reconcile_task(
             busy_text="Auditando errores de limpieza...",
@@ -1289,13 +1141,13 @@ class AdminUploaderDialog(ctk.CTkToplevel):
     def _run_cleanup_batches(self, kind: str):
         if kind == "consumed":
             return self._photo_cleanup_service.cleanup_all_consumed_photos(
-                batch_size=100,
+                batch_size=250,
                 progress_callback=lambda progress: self.after(0, lambda current=progress: self._update_cleanup_progress(current)),
                 cancel_callback=lambda: self._cleanup_cancel_requested,
             )
         return self._photo_cleanup_service.cleanup_all_stale_reserved_photos(
             older_than_hours=2,
-            batch_size=100,
+            batch_size=250,
             progress_callback=lambda progress: self.after(0, lambda current=progress: self._update_cleanup_progress(current)),
             cancel_callback=lambda: self._cleanup_cancel_requested,
         )
@@ -1352,207 +1204,20 @@ class AdminUploaderDialog(ctk.CTkToplevel):
 
         threading.Thread(target=background, daemon=True).start()
 
-    def _finish_photo_cleanup_task(self, result_type: str, payload, *, success_text: str) -> None:
-        self._set_photo_cleanup_busy(False)
-        if result_type == "audit":
-            self._apply_photo_cleanup_audit(payload)
-            self.photo_cleanup_status_label.configure(text=success_text, text_color=SUCCESS)
-            return
-        self._apply_photo_cleanup_result(payload)
-        self.photo_cleanup_status_label.configure(
-            text=(
-                f"{success_text} Eliminadas: {payload.deleted_count}. "
-                f"Errores: {payload.error_count}."
-            ),
-            text_color=WARNING if payload.error_count else SUCCESS,
-        )
-        self._refresh_photo_cleanup_audit_async()
 
-    def _finish_photo_cleanup_task_error(self, exc: Exception) -> None:
-        self._set_photo_cleanup_busy(False)
-        self.photo_cleanup_status_label.configure(
-            text=f"Error en limpieza de fotos: {exc}",
-            text_color=ERROR,
-        )
 
-    def _finish_reconcile_task(self, result_type: str, payload, *, success_text: str) -> None:
-        self._set_photo_cleanup_busy(False)
-        if result_type == "reconcile_audit":
-            self._apply_reconcile_audit(payload)
-            self.reconcile_cleanup_status_label.configure(text=success_text, text_color=SUCCESS)
-            return
-        self._apply_reconcile_result(payload)
-        self.reconcile_cleanup_status_label.configure(
-            text=(
-                f"{success_text} Reconciliadas: {payload.reconciled_count}. "
-                f"Fallidas: {payload.failed_count}. Restantes: {payload.remaining_count}."
-            ),
-            text_color=WARNING if payload.failed_count else SUCCESS,
-        )
-        self._refresh_photo_cleanup_audit_async()
 
-    def _finish_reconcile_task_error(self, exc: Exception) -> None:
-        self._set_photo_cleanup_busy(False)
-        self.reconcile_cleanup_status_label.configure(
-            text=f"Error en reconciliacion: {exc}",
-            text_color=ERROR,
-        )
 
-    def _set_photo_cleanup_busy(self, is_busy: bool, *, busy_text: str | None = None) -> None:
-        single_state = "disabled" if is_busy else "normal"
-        cleanup_all_state = "disabled" if is_busy else "normal"
-        cancel_state = "normal" if self._cleanup_running else "disabled"
-        self.audit_pool_button.configure(state=single_state, text="Auditando..." if busy_text == "Auditando..." else "Auditar pool")
-        self.audit_cleanup_errors_button.configure(
-            state=single_state,
-            text="Auditando..." if busy_text == "Auditando errores de limpieza..." else "Auditar errores",
-        )
-        self.reconcile_cleanup_errors_button.configure(
-            state=single_state,
-            text="Reconciliando..." if busy_text == "Reconciliando errores de limpieza..." else "Reconciliar",
-        )
-        self.cleanup_consumed_button.configure(
-            state=single_state,
-            text="Limpiando..." if busy_text == "Limpiando consumidas..." else "Limpiar 100 consumidas",
-        )
-        self.cleanup_stale_reserved_button.configure(
-            state=single_state,
-            text="Limpiando..." if busy_text == "Limpiando reservadas viejas..." else "Limpiar 100 reservadas viejas",
-        )
-        self.cleanup_all_consumed_button.configure(state=cleanup_all_state)
-        self.cleanup_all_stale_reserved_button.configure(state=cleanup_all_state)
-        self.cancel_cleanup_button.configure(state=cancel_state)
-        if is_busy and busy_text:
-            self.photo_cleanup_status_label.configure(text=busy_text, text_color=TEXT_PRIMARY)
-        elif not self._cleanup_running:
-            self.cancel_cleanup_button.configure(state="disabled")
 
-    def _apply_photo_cleanup_audit(self, audit) -> None:
-        self._set_photo_cleanup_summary_lines(
-            [
-                f"Disponibles: {audit.available_count}",
-                f"Reservadas: {audit.reserved_count}",
-                f"Usadas históricas: {audit.consumed_count}",
-                f"Descartadas: {audit.discarded_count}",
-                f"Consumidas pendientes de limpiar Storage: {audit.consumed_pending_storage_cleanup}",
-                f"Consumidas pendientes limpiables: {audit.consumed_cleanable_pending_storage_cleanup}",
-                f"Reservadas viejas pendientes: {audit.stale_reserved_pending_storage_cleanup}",
-                f"Reservadas viejas limpiables: {audit.stale_reserved_cleanable_pending_storage_cleanup}",
-                f"Archivos limpiados de Storage: {audit.storage_cleaned_count}",
-                f"Errores de limpieza: {audit.cleanup_error_count}",
-                f"Errores reconciliables: {audit.db_error_after_storage_delete_count}",
-            ]
-        )
 
-    def _apply_reconcile_audit(self, found_count: int) -> None:
-        self._set_reconcile_cleanup_lines(
-            [
-                f"Encontradas: {found_count}",
-                "Procesadas: --",
-                "Reconciliadas: --",
-                "Fallidas: --",
-                "Restantes: --",
-                "Stop reason: --",
-                "Ultimo error: --",
-            ]
-        )
 
-    def _apply_photo_cleanup_result(self, result) -> None:
-        lines = [
-            f"Acción: {result.action}",
-            f"Dry-run: {'sí' if result.dry_run else 'no'}",
-            f"Límite: {result.limit}",
-            f"Coincidencias: {result.matched_count}",
-            f"Eliminadas de Storage: {result.deleted_count}",
-            f"Saltadas: {result.skipped_count}",
-            f"Errores: {result.error_count}",
-        ]
-        if result.older_than_hours is not None:
-            lines.append(f"Antigüedad usada: {result.older_than_hours}h")
-        self._set_photo_cleanup_summary_lines(lines)
 
-    def _apply_reconcile_result(self, result) -> None:
-        lines = [
-            f"Encontradas: {result.matched_count}",
-            f"Procesadas: {result.processed_count}",
-            f"Reconciliadas: {result.reconciled_count}",
-            f"Fallidas: {result.failed_count}",
-            f"Restantes: {result.remaining_count if result.remaining_count is not None else '--'}",
-            f"Stop reason: {result.stop_reason or '--'}",
-            f"Ultimo error: {result.last_error or '--'}",
-        ]
-        if result.recent_errors:
-            lines.append("")
-            lines.append("Errores recientes:")
-            lines.extend(result.recent_errors)
-        self._set_reconcile_cleanup_lines(lines)
 
-    def _set_photo_cleanup_summary_lines(self, lines: list[str]) -> None:
-        self.photo_cleanup_summary_box.configure(state="normal")
-        self.photo_cleanup_summary_box.delete("1.0", "end")
-        self.photo_cleanup_summary_box.insert("1.0", "\n".join(lines))
-        self.photo_cleanup_summary_box.configure(state="disabled")
 
-    def _set_reconcile_cleanup_lines(self, lines: list[str]) -> None:
-        self.reconcile_cleanup_result_box.configure(state="normal")
-        self.reconcile_cleanup_result_box.delete("1.0", "end")
-        self.reconcile_cleanup_result_box.insert("1.0", "\n".join(lines))
-        self.reconcile_cleanup_result_box.configure(state="disabled")
 
-    def _update_cleanup_progress(self, progress) -> None:
-        self._cleanup_progress_total = max(int(progress.total_initial), 0)
-        self._cleanup_progress_done = max(int(progress.processed_count), 0)
-        total = self._cleanup_progress_total
-        done = min(self._cleanup_progress_done, total) if total > 0 else 0
-        fraction = 0.0 if total <= 0 else max(0.0, min(done / total, 1.0))
-        mode_label = "consumidas" if progress.kind == "consumed" else "reservadas viejas"
-        self.cleanup_progress_bar.set(fraction)
-        self.cleanup_progress_label.configure(text=f"Limpiando {mode_label}: {done} / {total}")
-        self.cleanup_last_batch_label.configure(
-            text=(
-                f"Último lote: revisadas {progress.last_batch_matched} | "
-                f"limpiadas {progress.last_batch_deleted} | "
-                f"errores {progress.last_batch_errors} | "
-                f"saltadas {progress.last_batch_skipped}"
-            )
-        )
-        self.cleanup_remaining_label.configure(
-            text=(
-                f"Restantes: {progress.pending_current} | "
-                f"Velocidad: {progress.photos_per_minute:.1f} fotos/min"
-            )
-        )
 
-    def _finish_cleanup_batches(self, result) -> None:
-        was_cancelled = self._cleanup_cancel_requested
-        self._cleanup_running = False
-        self._cleanup_cancel_requested = False
-        self._set_photo_cleanup_busy(False)
-        self._apply_photo_cleanup_result(result)
-        if was_cancelled:
-            self.photo_cleanup_status_label.configure(text="Limpieza cancelada por usuario.", text_color=WARNING)
-        else:
-            self.photo_cleanup_status_label.configure(
-                text=(
-                    f"Limpieza masiva completada. Eliminadas: {result.deleted_count}. "
-                    f"Errores: {result.error_count}."
-                ),
-                text_color=WARNING if result.error_count else SUCCESS,
-            )
-        self._refresh_photo_cleanup_audit_async()
 
-    def _finish_cleanup_batches_error(self, exc: Exception) -> None:
-        self._cleanup_running = False
-        self._cleanup_cancel_requested = False
-        self._set_photo_cleanup_busy(False)
-        self.photo_cleanup_status_label.configure(text=f"Error crítico en limpieza masiva: {exc}", text_color=ERROR)
-        self._refresh_photo_cleanup_audit_async()
 
-    def _cancel_cleanup(self) -> None:
-        if not self._cleanup_running:
-            return
-        self._cleanup_cancel_requested = True
-        self.photo_cleanup_status_label.configure(text="Cancelación solicitada. Se detendrá al terminar el lote actual.", text_color=WARNING)
 
     def _refresh_photo_cleanup_audit_async(self) -> None:
         def background() -> None:
@@ -1577,6 +1242,10 @@ class AdminUploaderDialog(ctk.CTkToplevel):
             state=single_state,
             text="Reconciliando..." if busy_text == "Reconciliando errores de limpieza..." else "Reconciliar",
         )
+        self.storage_health_button.configure(
+            state="disabled" if is_busy or self._storage_health_loading else "normal",
+            text="Consultando..." if self._storage_health_loading else "Refrescar almacenamiento",
+        )
         self.cleanup_consumed_button.configure(
             state=single_state,
             text="Procesando..." if busy_text == "Limpiando consumidas..." else "100 consumidas",
@@ -1598,6 +1267,55 @@ class AdminUploaderDialog(ctk.CTkToplevel):
             self.photo_cleanup_status_label.configure(text=busy_text, text_color=TEXT_PRIMARY)
         elif not self._cleanup_running:
             self.cancel_cleanup_button.configure(state="disabled")
+
+    def _finish_storage_health_refresh(self, snapshot) -> None:
+        self._storage_health_loading = False
+        self.storage_health_button.configure(state="normal", text="Refrescar almacenamiento")
+        status_color = SUCCESS
+        if snapshot.status == "Alto":
+            status_color = WARNING
+        elif snapshot.status == "Critico":
+            status_color = ERROR
+        self.storage_health_status_label.configure(
+            text=f"Estado: {snapshot.status}. {snapshot.note}",
+            text_color=status_color,
+        )
+        self._apply_storage_health_snapshot(snapshot)
+
+    def _finish_storage_health_error(self, exc: Exception) -> None:
+        self._storage_health_loading = False
+        self.storage_health_button.configure(state="normal", text="Refrescar almacenamiento")
+        self.storage_health_status_label.configure(
+            text="No se pudo consultar el almacenamiento.",
+            text_color=ERROR,
+        )
+        self._set_storage_health_lines(
+            [
+                "Ultima consulta: error.",
+                f"Detalle tecnico: {exc}",
+            ]
+        )
+
+    def _apply_storage_health_snapshot(self, snapshot) -> None:
+        self._set_storage_health_lines(
+            [
+                f"Buckets: {', '.join(snapshot.bucket_names) if snapshot.bucket_names else '--'}",
+                (
+                    f"Fotos ocupando Storage: {snapshot.active_photo_count} | "
+                    f"Muestra: {snapshot.sampled_file_count} | "
+                    f"Promedio JPG: {self._format_bytes(snapshot.average_file_size_bytes)}"
+                ),
+                (
+                    f"Uso estimado: {self._format_bytes(snapshot.estimated_used_bytes)} | "
+                    f"Limite configurado: {self._format_optional_bytes(snapshot.configured_limit_bytes)} | "
+                    f"Espacio estimado libre: {self._format_optional_bytes(snapshot.estimated_available_bytes)}"
+                ),
+                (
+                    f"Capacidad estimada: {self._format_optional_int(snapshot.estimated_capacity_photos)} fotos | "
+                    f"Fotos restantes estimadas: {self._format_optional_int(snapshot.estimated_remaining_photos)}"
+                ),
+            ]
+        )
 
     def _apply_photo_cleanup_audit(self, audit) -> None:
         reconcile_line = (
@@ -1676,6 +1394,36 @@ class AdminUploaderDialog(ctk.CTkToplevel):
             lines.append("Errores recientes:")
             lines.extend(result.recent_errors)
         self._set_reconcile_cleanup_lines(lines)
+
+    def _set_storage_health_lines(self, lines: list[str]) -> None:
+        self.storage_health_summary_box.configure(state="normal")
+        self.storage_health_summary_box.delete("1.0", "end")
+        self.storage_health_summary_box.insert("1.0", "\n".join(lines))
+        self.storage_health_summary_box.configure(state="disabled")
+
+    @classmethod
+    def _format_optional_bytes(cls, value: int | None) -> str:
+        if value is None:
+            return "--"
+        return cls._format_bytes(value)
+
+    @staticmethod
+    def _format_optional_int(value: int | None) -> str:
+        if value is None:
+            return "--"
+        return f"{int(value):,}".replace(",", ".")
+
+    @staticmethod
+    def _format_bytes(value: int | None) -> str:
+        size = float(value or 0)
+        units = ["B", "KB", "MB", "GB", "TB"]
+        unit_index = 0
+        while size >= 1024 and unit_index < len(units) - 1:
+            size /= 1024
+            unit_index += 1
+        if unit_index == 0:
+            return f"{int(size)} {units[unit_index]}"
+        return f"{size:.1f} {units[unit_index]}"
 
     def _set_photo_cleanup_summary_lines(self, lines: list[str]) -> None:
         self.photo_cleanup_summary_box.configure(state="normal")

@@ -186,7 +186,7 @@ class SettingsDialog(ctk.CTkToplevel):
 
             updater_hint = ctk.CTkLabel(
                 footer,
-                text="Aplica un paquete de actualizacion staged y reinicia la app automaticamente.",
+                text="Busca la ultima version en GitHub, la descarga y reinicia la app automaticamente.",
                 text_color=TEXT_MUTED,
                 font=ctk.CTkFont(size=11),
                 justify="left",
