@@ -114,7 +114,10 @@ class PhotosRepository:
             rows = self._client_provider.execute(
                 self._client_provider.client.rpc(
                     "claim_available_photo",
-                    {"p_process_id": process_id},
+                    {
+                        "p_process_id": process_id,
+                        "p_active_bucket": self._settings.supabase_storage_bucket,
+                    },
                 )
             )
         except RepositoryError as exc:
@@ -143,6 +146,7 @@ class PhotosRepository:
                     {
                         "p_process_id": "__migration_validation__",
                         "p_validate_only": True,
+                        "p_active_bucket": self._settings.supabase_storage_bucket,
                     },
                 )
             )
@@ -401,20 +405,30 @@ class PhotosRepository:
     @classmethod
     def _serialize_create(cls, photo: PhotoCreate) -> dict:
         payload = photo.model_dump(mode="json", by_alias=True, exclude_none=True)
-        return {
+        normalized_payload = {
             field: value
             for field, value in payload.items()
             if field in cls._CREATE_FIELDS
         }
+        cls._normalize_storage_path_payload(normalized_payload)
+        return normalized_payload
 
     @classmethod
     def _serialize_update(cls, changes: PhotoUpdate) -> dict:
         payload = changes.model_dump(mode="json", by_alias=True, exclude_unset=True)
-        return {
+        normalized_payload = {
             field: value
             for field, value in payload.items()
             if field in cls._UPDATE_FIELDS
         }
+        cls._normalize_storage_path_payload(normalized_payload)
+        return normalized_payload
+
+    @staticmethod
+    def _normalize_storage_path_payload(payload: dict) -> None:
+        file_path = payload.get("file_path")
+        if file_path:
+            payload["file_path"] = str(file_path).strip().replace("\\", "/").lstrip("/")
 
     def _count_pending_storage_cleanup(self, status: PhotoStatus, exclude_cleanup_errors: bool = False) -> int:
         query = (

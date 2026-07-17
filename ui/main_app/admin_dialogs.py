@@ -503,6 +503,30 @@ class AdminUploaderDialog(ctk.CTkToplevel):
         )
         self.cleanup_stale_reserved_button.grid(row=3, column=0, padx=12, pady=(0, 12), sticky="ew")
 
+        self.cleanup_orphan_available_button = ctk.CTkButton(
+            batch_card,
+            text="1000 huerfanas",
+            command=self._handle_cleanup_available_orphans,
+            height=32,
+            corner_radius=12,
+            fg_color=NEUTRAL_BUTTON,
+            hover_color=NEUTRAL_BUTTON_HOVER,
+            text_color=TEXT_PRIMARY,
+        )
+        self.cleanup_orphan_available_button.grid(row=4, column=0, padx=12, pady=(0, 12), sticky="ew")
+
+        self.discard_missing_available_button = ctk.CTkButton(
+            batch_card,
+            text="1000 rotas",
+            command=self._handle_discard_missing_available,
+            height=32,
+            corner_radius=12,
+            fg_color=NEUTRAL_BUTTON,
+            hover_color=NEUTRAL_BUTTON_HOVER,
+            text_color=TEXT_PRIMARY,
+        )
+        self.discard_missing_available_button.grid(row=5, column=0, padx=12, pady=(0, 12), sticky="ew")
+
         bulk_card = ctk.CTkFrame(
             action_grid,
             fg_color=CARD_ALT_BG,
@@ -550,6 +574,30 @@ class AdminUploaderDialog(ctk.CTkToplevel):
             text_color=TEXT_PRIMARY,
         )
         self.cleanup_all_stale_reserved_button.grid(row=3, column=0, padx=12, pady=(0, 12), sticky="ew")
+
+        self.cleanup_all_orphan_available_button = ctk.CTkButton(
+            bulk_card,
+            text="Todas las huerfanas",
+            command=self._start_cleanup_all_available_orphans,
+            height=32,
+            corner_radius=12,
+            fg_color=WARNING,
+            hover_color=ACCENT_HOVER,
+            text_color=TEXT_PRIMARY,
+        )
+        self.cleanup_all_orphan_available_button.grid(row=4, column=0, padx=12, pady=(0, 12), sticky="ew")
+
+        self.discard_all_missing_available_button = ctk.CTkButton(
+            bulk_card,
+            text="Todas las rotas",
+            command=self._start_discard_all_missing_available,
+            height=32,
+            corner_radius=12,
+            fg_color=WARNING,
+            hover_color=ACCENT_HOVER,
+            text_color=TEXT_PRIMARY,
+        )
+        self.discard_all_missing_available_button.grid(row=5, column=0, padx=12, pady=(0, 12), sticky="ew")
 
         summary = ctk.CTkFrame(
             master,
@@ -626,7 +674,7 @@ class AdminUploaderDialog(ctk.CTkToplevel):
 
         self.storage_health_summary_box = ctk.CTkTextbox(
             storage_health,
-            height=96,
+            height=136,
             border_width=1,
             border_color=BORDER,
             corner_radius=12,
@@ -1105,11 +1153,31 @@ class AdminUploaderDialog(ctk.CTkToplevel):
             worker=lambda: ("cleanup", self._photo_cleanup_service.cleanup_stale_reserved_photos(limit=100)),
         )
 
+    def _handle_cleanup_available_orphans(self) -> None:
+        self._run_photo_cleanup_task(
+            busy_text="Limpiando huerfanas available...",
+            success_text="Limpieza de huerfanas completada.",
+            worker=lambda: ("cleanup", self._photo_cleanup_service.cleanup_available_orphan_storage(limit=1000)),
+        )
+
+    def _handle_discard_missing_available(self) -> None:
+        self._run_photo_cleanup_task(
+            busy_text="Descartando rotas available...",
+            success_text="Fotos rotas descartadas.",
+            worker=lambda: ("cleanup", self._photo_cleanup_service.discard_missing_available_photos(limit=1000)),
+        )
+
     def _start_cleanup_all_consumed(self) -> None:
         self._start_cleanup_batches(kind="consumed")
 
     def _start_cleanup_all_stale_reserved(self) -> None:
         self._start_cleanup_batches(kind="stale_reserved")
+
+    def _start_cleanup_all_available_orphans(self) -> None:
+        self._start_cleanup_batches(kind="available_orphans")
+
+    def _start_discard_all_missing_available(self) -> None:
+        self._start_cleanup_batches(kind="missing_available")
 
     def _start_cleanup_batches(self, *, kind: str) -> None:
         if self._cleanup_running:
@@ -1119,7 +1187,7 @@ class AdminUploaderDialog(ctk.CTkToplevel):
         self._cleanup_progress_total = 0
         self._cleanup_progress_done = 0
         self._cleanup_mode = kind
-        mode_label = "consumidas" if kind == "consumed" else "reservadas viejas"
+        mode_label = self._cleanup_kind_label(kind)
         self._set_photo_cleanup_busy(True, busy_text=f"Preparando limpieza total de {mode_label}...")
         self.cleanup_progress_bar.set(0.0)
         self.cleanup_progress_label.configure(text=f"Preparando limpieza total de {mode_label}...")
@@ -1142,6 +1210,18 @@ class AdminUploaderDialog(ctk.CTkToplevel):
         if kind == "consumed":
             return self._photo_cleanup_service.cleanup_all_consumed_photos(
                 batch_size=250,
+                progress_callback=lambda progress: self.after(0, lambda current=progress: self._update_cleanup_progress(current)),
+                cancel_callback=lambda: self._cleanup_cancel_requested,
+            )
+        if kind == "available_orphans":
+            return self._photo_cleanup_service.cleanup_all_available_orphan_storage(
+                batch_size=1000,
+                progress_callback=lambda progress: self.after(0, lambda current=progress: self._update_cleanup_progress(current)),
+                cancel_callback=lambda: self._cleanup_cancel_requested,
+            )
+        if kind == "missing_available":
+            return self._photo_cleanup_service.discard_all_missing_available_photos(
+                batch_size=1000,
                 progress_callback=lambda progress: self.after(0, lambda current=progress: self._update_cleanup_progress(current)),
                 cancel_callback=lambda: self._cleanup_cancel_requested,
             )
@@ -1254,6 +1334,14 @@ class AdminUploaderDialog(ctk.CTkToplevel):
             state=single_state,
             text="Procesando..." if busy_text == "Limpiando reservadas viejas..." else "100 reservadas viejas",
         )
+        self.cleanup_orphan_available_button.configure(
+            state=single_state,
+            text="Procesando..." if busy_text == "Limpiando huerfanas available..." else "1000 huerfanas",
+        )
+        self.discard_missing_available_button.configure(
+            state=single_state,
+            text="Procesando..." if busy_text == "Descartando rotas available..." else "1000 rotas",
+        )
         self.cleanup_all_consumed_button.configure(
             state=cleanup_all_state,
             text="En curso..." if busy_text == "Preparando limpieza total de consumidas..." else "Todas las consumidas",
@@ -1261,6 +1349,14 @@ class AdminUploaderDialog(ctk.CTkToplevel):
         self.cleanup_all_stale_reserved_button.configure(
             state=cleanup_all_state,
             text="En curso..." if busy_text == "Preparando limpieza total de reservadas viejas..." else "Todas las reservadas viejas",
+        )
+        self.cleanup_all_orphan_available_button.configure(
+            state=cleanup_all_state,
+            text="En curso..." if busy_text == "Preparando limpieza total de huerfanas available..." else "Todas las huerfanas",
+        )
+        self.discard_all_missing_available_button.configure(
+            state=cleanup_all_state,
+            text="En curso..." if busy_text == "Preparando limpieza total de rotas available..." else "Todas las rotas",
         )
         self.cancel_cleanup_button.configure(state=cancel_state)
         if is_busy and busy_text:
@@ -1297,25 +1393,36 @@ class AdminUploaderDialog(ctk.CTkToplevel):
         )
 
     def _apply_storage_health_snapshot(self, snapshot) -> None:
-        self._set_storage_health_lines(
-            [
-                f"Buckets: {', '.join(snapshot.bucket_names) if snapshot.bucket_names else '--'}",
-                (
-                    f"Fotos ocupando Storage: {snapshot.active_photo_count} | "
-                    f"Muestra: {snapshot.sampled_file_count} | "
-                    f"Promedio JPG: {self._format_bytes(snapshot.average_file_size_bytes)}"
-                ),
-                (
-                    f"Uso estimado: {self._format_bytes(snapshot.estimated_used_bytes)} | "
-                    f"Limite configurado: {self._format_optional_bytes(snapshot.configured_limit_bytes)} | "
-                    f"Espacio estimado libre: {self._format_optional_bytes(snapshot.estimated_available_bytes)}"
-                ),
-                (
-                    f"Capacidad estimada: {self._format_optional_int(snapshot.estimated_capacity_photos)} fotos | "
-                    f"Fotos restantes estimadas: {self._format_optional_int(snapshot.estimated_remaining_photos)}"
-                ),
-            ]
-        )
+        usage_label = "Uso real Storage" if snapshot.folder_usage else "Uso estimado"
+        sample_label = "Objetos medidos" if snapshot.folder_usage else "Muestra"
+        lines = [
+            f"Buckets configurados: {', '.join(snapshot.bucket_names) if snapshot.bucket_names else '--'}",
+            (
+                f"Fotos activas DB: {snapshot.active_photo_count} | "
+                f"{sample_label}: {snapshot.sampled_file_count} | "
+                f"Promedio JPG available: {self._format_bytes(snapshot.average_file_size_bytes)}"
+            ),
+            (
+                f"{usage_label}: {self._format_bytes(snapshot.estimated_used_bytes)} | "
+                f"Limite configurado: {self._format_optional_bytes(snapshot.configured_limit_bytes)} | "
+                f"Libre estimado: {self._format_optional_bytes(snapshot.estimated_available_bytes)}"
+            ),
+            (
+                f"Capacidad estimada: {self._format_optional_int(snapshot.estimated_capacity_photos)} fotos | "
+                f"Fotos restantes estimadas: {self._format_optional_int(snapshot.estimated_remaining_photos)}"
+            ),
+        ]
+        if snapshot.folder_usage:
+            lines.append("")
+            lines.append("Desglose real por bucket/carpeta:")
+            for item in snapshot.folder_usage[:8]:
+                lines.append(
+                    f"- {item.bucket_name}/{item.top_folder}: "
+                    f"{item.object_count} objetos | {self._format_bytes(item.total_bytes)}"
+                )
+            if len(snapshot.folder_usage) > 8:
+                lines.append(f"- ... {len(snapshot.folder_usage) - 8} carpetas mas")
+        self._set_storage_health_lines(lines)
 
     def _apply_photo_cleanup_audit(self, audit) -> None:
         reconcile_line = (
@@ -1374,7 +1481,10 @@ class AdminUploaderDialog(ctk.CTkToplevel):
             lines.append(f"Antiguedad usada: {result.older_than_hours}h")
         if result.items:
             last_item = result.items[-1]
-            lines.append(f"Ultimo item: {last_item.get('photo_id', '--')} | {last_item.get('result', '--')}")
+            item_label = last_item.get("photo_id") or last_item.get("file_path") or "--"
+            if last_item.get("bucket_name"):
+                item_label = f"{last_item.get('bucket_name')}/{item_label}"
+            lines.append(f"Ultimo item: {item_label} | {last_item.get('result', '--')}")
             if last_item.get("message"):
                 lines.append(f"Detalle: {last_item.get('message')}")
         self._set_photo_cleanup_detail_lines(lines)
@@ -1455,6 +1565,16 @@ class AdminUploaderDialog(ctk.CTkToplevel):
         }
         return mapping.get(stop_reason, str(stop_reason))
 
+    @staticmethod
+    def _cleanup_kind_label(kind: str) -> str:
+        mapping = {
+            "consumed": "consumidas",
+            "stale_reserved": "reservadas viejas",
+            "available_orphans": "huerfanas available",
+            "missing_available": "rotas available",
+        }
+        return mapping.get(kind, str(kind))
+
     def _finish_photo_cleanup_task(self, result_type: str, payload, *, success_text: str) -> None:
         self._set_photo_cleanup_busy(False)
         if result_type == "audit":
@@ -1518,7 +1638,7 @@ class AdminUploaderDialog(ctk.CTkToplevel):
         total = self._cleanup_progress_total
         done = min(self._cleanup_progress_done, total) if total > 0 else 0
         fraction = 0.0 if total <= 0 else max(0.0, min(done / total, 1.0))
-        mode_label = "consumidas" if progress.kind == "consumed" else "reservadas viejas"
+        mode_label = self._cleanup_kind_label(progress.kind)
         self.cleanup_progress_bar.set(fraction)
         self.cleanup_progress_label.configure(text=f"Estado actual: limpiando {mode_label} ({done} / {total})")
         self.cleanup_last_batch_label.configure(

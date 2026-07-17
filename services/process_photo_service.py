@@ -100,7 +100,10 @@ class ProcessPhotoService:
                 raise RuntimeError("La reserva atomica devolvio una foto invalida.")
 
             try:
-                content, storage_bucket = self._download_reserved_photo(reserved_photo.storage_path)
+                content, storage_bucket = self._download_reserved_photo(
+                    reserved_photo.storage_path,
+                    preferred_bucket=getattr(reserved_photo, "storage_bucket", None),
+                )
                 local_path = self._temp_file_service.create_photo_copy(
                     content=content,
                     original_filename=reserved_photo.original_filename,
@@ -176,10 +179,10 @@ class ProcessPhotoService:
             ),
         )
 
-    def _download_reserved_photo(self, storage_path: str) -> tuple[bytes, str]:
+    def _download_reserved_photo(self, storage_path: str, *, preferred_bucket: str | None = None) -> tuple[bytes, str]:
         normalized_path = self._normalize_storage_path(storage_path)
         last_missing_error: Exception | None = None
-        for bucket_name in self._download_bucket_names():
+        for bucket_name in self._download_bucket_names(preferred_bucket=preferred_bucket):
             try:
                 content = self._client_provider.download_binary(
                     bucket_name=bucket_name,
@@ -195,8 +198,8 @@ class ProcessPhotoService:
             raise last_missing_error
         raise RuntimeError(f"No hay bucket configurado para descargar {normalized_path}.")
 
-    def _download_bucket_names(self) -> tuple[str, ...]:
-        bucket_names = [self._settings.supabase_storage_bucket]
+    def _download_bucket_names(self, *, preferred_bucket: str | None = None) -> tuple[str, ...]:
+        bucket_names = [preferred_bucket, self._settings.supabase_storage_bucket]
         bucket_names.extend(self._settings.supabase_legacy_storage_buckets)
         deduped = []
         for bucket_name in bucket_names:
@@ -232,6 +235,10 @@ class ProcessPhotoService:
     @staticmethod
     def _is_storage_missing_error(exc: Exception) -> bool:
         normalized = str(exc or "").strip().lower()
+        if "failed to download file from supabase storage" in normalized and (
+            "404" in normalized or "not_found" in normalized or "not found" in normalized
+        ):
+            return True
         return any(
             token in normalized
             for token in (

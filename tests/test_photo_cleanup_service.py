@@ -92,6 +92,30 @@ class StubRpcClientProvider:
         return SimpleNamespace(data=[self.row])
 
 
+class StubOrphanClientProvider(StubClientProvider):
+    def __init__(self, rows: list[dict], *, remove_error: Exception | None = None) -> None:
+        super().__init__(remove_error=remove_error)
+        self.client = StubRpcClient()
+        self.rows = rows
+
+    def execute_response_factory(self, operation_factory):
+        operation_factory()
+        return SimpleNamespace(data=self.rows)
+
+
+class StubSequenceClientProvider(StubClientProvider):
+    def __init__(self, responses: list[list[dict]], *, remove_error: Exception | None = None) -> None:
+        super().__init__(remove_error=remove_error)
+        self.client = StubRpcClient()
+        self.responses = list(responses)
+
+    def execute_response_factory(self, operation_factory):
+        operation_factory()
+        if not self.responses:
+            return SimpleNamespace(data=[])
+        return SimpleNamespace(data=self.responses.pop(0))
+
+
 class StubPhotosRepository:
     def __init__(
         self,
@@ -302,6 +326,201 @@ def test_cleanup_consumed_photos_uses_bulk_storage_and_bulk_db(tmp_path) -> None
         )
     ]
     assert repository.mark_storage_cleaned_calls == []
+
+
+def test_cleanup_available_orphan_storage_removes_paths_by_bucket(tmp_path) -> None:
+    client_provider = StubOrphanClientProvider(
+        [
+            {
+                "bucket_name": "photo-pool",
+                "storage_path": "available/orphan-1.jpg",
+                "total_bytes": 100,
+            },
+            {
+                "bucket_name": "photo-pool",
+                "storage_path": "available/orphan-2.jpg",
+                "total_bytes": 200,
+            },
+            {
+                "bucket_name": "photos",
+                "storage_path": "available/old-orphan.jpg",
+                "total_bytes": 300,
+            },
+        ]
+    )
+    service = PhotoCleanupService(
+        photos_repository=StubPhotosRepository(),
+        client_provider=client_provider,
+        settings=build_settings(tmp_path),
+    )
+
+    result = service.cleanup_available_orphan_storage(limit=1000)
+
+    assert client_provider.client.calls == [
+        ("available_storage_orphan_paths", {"p_limit": 1000})
+    ]
+    assert result.action == "cleanup_available_orphan_storage"
+    assert result.matched_count == 3
+    assert result.deleted_count == 3
+    assert result.error_count == 0
+    assert client_provider.remove_files_calls == [
+        ("photo-pool", ("available/orphan-1.jpg", "available/orphan-2.jpg")),
+        ("photos", ("available/old-orphan.jpg",)),
+    ]
+    assert [item["result"] for item in result.items] == ["cleaned", "cleaned", "cleaned"]
+
+
+def test_cleanup_all_available_orphan_storage_runs_batches_with_progress(tmp_path) -> None:
+    client_provider = StubSequenceClientProvider(
+        [
+            [{"bucket_name": "photo-pool", "object_count": 3, "total_bytes": 300}],
+            [
+                {
+                    "bucket_name": "photo-pool",
+                    "storage_path": "available/orphan-1.jpg",
+                    "total_bytes": 100,
+                },
+                {
+                    "bucket_name": "photo-pool",
+                    "storage_path": "available/orphan-2.jpg",
+                    "total_bytes": 100,
+                },
+            ],
+            [
+                {
+                    "bucket_name": "photo-pool",
+                    "storage_path": "available/orphan-3.jpg",
+                    "total_bytes": 100,
+                },
+            ],
+        ]
+    )
+    progress_events = []
+    service = PhotoCleanupService(
+        photos_repository=StubPhotosRepository(),
+        client_provider=client_provider,
+        settings=build_settings(tmp_path),
+    )
+
+    result = service.cleanup_all_available_orphan_storage(
+        batch_size=2,
+        progress_callback=progress_events.append,
+    )
+
+    assert result.action == "cleanup_all_available_orphan_storage"
+    assert result.matched_count == 3
+    assert result.deleted_count == 3
+    assert result.error_count == 0
+    assert client_provider.client.calls == [
+        ("available_storage_orphan_audit", {}),
+        ("available_storage_orphan_paths", {"p_limit": 2}),
+        ("available_storage_orphan_paths", {"p_limit": 2}),
+    ]
+    assert client_provider.remove_files_calls == [
+        ("photo-pool", ("available/orphan-1.jpg", "available/orphan-2.jpg")),
+        ("photo-pool", ("available/orphan-3.jpg",)),
+    ]
+    assert progress_events[-1].kind == "available_orphans"
+    assert progress_events[-1].is_complete is True
+    assert progress_events[-1].pending_current == 0
+
+
+def test_discard_missing_available_photos_marks_db_rows_without_storage(tmp_path) -> None:
+    client_provider = StubSequenceClientProvider(
+        [
+            [
+                {
+                    "photo_id": "550e8400-e29b-41d4-a716-446655440000",
+                    "storage_bucket": "photo-pool",
+                    "file_path": "available/missing.jpg",
+                }
+            ]
+        ]
+    )
+    service = PhotoCleanupService(
+        photos_repository=StubPhotosRepository(),
+        client_provider=client_provider,
+        settings=build_settings(tmp_path),
+    )
+
+    result = service.discard_missing_available_photos(limit=1000)
+
+    assert result.action == "discard_missing_available_photos"
+    assert result.matched_count == 1
+    assert result.deleted_count == 1
+    assert result.items[0]["result"] == "discarded"
+    assert client_provider.client.calls == [
+        (
+            "discard_missing_available_photos",
+            {
+                "p_active_bucket": "photo-pool",
+                "p_limit": 1000,
+                "p_reason": "missing_storage_integrity_cleanup",
+                "p_cleaned_by": "admin_cleanup",
+            },
+        )
+    ]
+    assert client_provider.remove_files_calls == []
+
+
+def test_discard_all_missing_available_photos_runs_batches_with_progress(tmp_path) -> None:
+    client_provider = StubSequenceClientProvider(
+        [
+            [{"missing_count": 2}],
+            [
+                {
+                    "photo_id": "550e8400-e29b-41d4-a716-446655440000",
+                    "storage_bucket": "photo-pool",
+                    "file_path": "available/missing-1.jpg",
+                }
+            ],
+            [
+                {
+                    "photo_id": "550e8400-e29b-41d4-a716-446655440001",
+                    "storage_bucket": "photo-pool",
+                    "file_path": "available/missing-2.jpg",
+                }
+            ],
+        ]
+    )
+    progress_events = []
+    service = PhotoCleanupService(
+        photos_repository=StubPhotosRepository(),
+        client_provider=client_provider,
+        settings=build_settings(tmp_path),
+    )
+
+    result = service.discard_all_missing_available_photos(
+        batch_size=1,
+        progress_callback=progress_events.append,
+    )
+
+    assert result.action == "discard_all_missing_available_photos"
+    assert result.matched_count == 2
+    assert result.deleted_count == 2
+    assert client_provider.client.calls == [
+        ("missing_available_photo_audit", {"p_active_bucket": "photo-pool"}),
+        (
+            "discard_missing_available_photos",
+            {
+                "p_active_bucket": "photo-pool",
+                "p_limit": 1,
+                "p_reason": "missing_storage_integrity_cleanup",
+                "p_cleaned_by": "admin_cleanup",
+            },
+        ),
+        (
+            "discard_missing_available_photos",
+            {
+                "p_active_bucket": "photo-pool",
+                "p_limit": 1,
+                "p_reason": "missing_storage_integrity_cleanup",
+                "p_cleaned_by": "admin_cleanup",
+            },
+        ),
+    ]
+    assert progress_events[-1].kind == "missing_available"
+    assert progress_events[-1].is_complete is True
 
 
 def test_reconcile_db_error_after_storage_delete_marks_consumed_photo_as_cleaned(tmp_path) -> None:

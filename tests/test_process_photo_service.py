@@ -13,10 +13,12 @@ class StubPhotoRecord:
         photo_id: str,
         original_filename: str = "sample.jpg",
         storage_path: str = "available/sample.jpg",
+        storage_bucket: str | None = None,
     ) -> None:
         self.id = photo_id
         self.original_filename = original_filename
         self.storage_path = storage_path
+        self.storage_bucket = storage_bucket
         self.reserved_by_process_id = None
 
 
@@ -268,6 +270,41 @@ def test_reserve_photo_discards_missing_storage_and_tries_next_photo(tmp_path) -
     assert repository.update_calls[0][1].cleanup_reason == "missing_storage_on_reservation"
 
 
+def test_reserve_photo_discards_supabase_download_not_found_message_and_tries_next_photo(tmp_path) -> None:
+    missing = StubPhotoRecord(
+        photo_id="550e8400-e29b-41d4-a716-446655440000",
+        storage_path="available/622c3b68-b365-4b87-8876-406816009a37.jpg",
+    )
+    usable = StubPhotoRecord(
+        photo_id="550e8400-e29b-41d4-a716-446655440001",
+        storage_path="available/usable.jpg",
+    )
+    repository = StubPhotosRepository(records=[missing, usable])
+    client_provider = SequencedClientProvider(
+        [
+            RuntimeError(
+                "Failed to download file from Supabase Storage "
+                "(available/622c3b68-b365-4b87-8876-406816009a37.jpg): "
+                "{'statusCode': 404, 'error': not_found, 'message': Object not found}"
+            ),
+            b"jpg-data",
+        ]
+    )
+    service = ProcessPhotoService(
+        photos_repository=repository,
+        client_provider=client_provider,
+        temp_file_service=StubTempFileService(tmp_path),
+        settings=build_settings(tmp_path),
+    )
+
+    reserved = service.reserve_photo(process_id="process-1")
+
+    assert reserved.photo_id == "550e8400-e29b-41d4-a716-446655440001"
+    assert repository.claim_calls == ["process-1", "process-1"]
+    assert repository.update_calls[0][0] == "550e8400-e29b-41d4-a716-446655440000"
+    assert repository.update_calls[0][1].status == PhotoStatus.DISCARDED
+
+
 class BucketFallbackClientProvider:
     def __init__(self) -> None:
         self.download_calls = []
@@ -277,6 +314,19 @@ class BucketFallbackClientProvider:
         self.download_calls.append((bucket_name, storage_path))
         if bucket_name == "photos":
             raise RuntimeError("{'statusCode': 404, 'error': not_found, 'message': Object not found}")
+        return b"jpg-data"
+
+    def remove_file(self, *, bucket_name, storage_path):
+        self.remove_calls.append((bucket_name, storage_path))
+
+
+class PreferredBucketClientProvider:
+    def __init__(self) -> None:
+        self.download_calls = []
+        self.remove_calls = []
+
+    def download_binary(self, *, bucket_name, storage_path):
+        self.download_calls.append((bucket_name, storage_path))
         return b"jpg-data"
 
     def remove_file(self, *, bucket_name, storage_path):
@@ -305,6 +355,33 @@ def test_reserve_photo_downloads_from_legacy_bucket_when_current_bucket_misses(t
         ("photo-pool", "available/sample.jpg"),
     ]
     assert repository.update_calls == []
+
+
+def test_reserve_photo_uses_record_storage_bucket_before_current_bucket(tmp_path) -> None:
+    repository = StubPhotosRepository(
+        records=[
+            StubPhotoRecord(
+                photo_id="550e8400-e29b-41d4-a716-446655440000",
+                storage_bucket="photos",
+            )
+        ]
+    )
+    client_provider = PreferredBucketClientProvider()
+    service = ProcessPhotoService(
+        photos_repository=repository,
+        client_provider=client_provider,
+        temp_file_service=StubTempFileService(tmp_path),
+        settings=build_settings(
+            tmp_path,
+            storage_bucket="photo-pool",
+            legacy_storage_buckets=("photos",),
+        ),
+    )
+
+    reserved = service.reserve_photo()
+
+    assert reserved.photo_id == "550e8400-e29b-41d4-a716-446655440000"
+    assert client_provider.download_calls == [("photos", "available/sample.jpg")]
 
 
 def test_consumed_legacy_bucket_photo_is_removed_from_bucket_it_came_from(tmp_path) -> None:

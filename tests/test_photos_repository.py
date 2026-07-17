@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from datetime import datetime
-from pathlib import Path
 from types import SimpleNamespace
 
 from core.enums import PhotoStatus
@@ -101,12 +100,12 @@ def test_create_only_sends_real_photos_columns() -> None:
     assert sink["payload"] == {
         "id": "550e8400-e29b-41d4-a716-446655440000",
         "original_name": "example.jpg",
-        "file_path": str(Path("available/example.jpg")),
+        "file_path": "available/example.jpg",
         "storage_bucket": "photos",
         "status": "available",
     }
     assert record.original_filename == "example.jpg"
-    assert record.storage_path == str(Path("available/example.jpg"))
+    assert record.storage_path == "available/example.jpg"
 
 
 def test_bulk_create_only_sends_confirmed_photos_columns() -> None:
@@ -160,14 +159,14 @@ def test_bulk_create_only_sends_confirmed_photos_columns() -> None:
         {
             "id": "550e8400-e29b-41d4-a716-446655440000",
             "original_name": "one.jpg",
-            "file_path": str(Path("available/one.jpg")),
+            "file_path": "available/one.jpg",
             "storage_bucket": "photos",
             "status": "available",
         },
         {
             "id": "550e8400-e29b-41d4-a716-446655440001",
             "original_name": "two.jpg",
-            "file_path": str(Path("available/two.jpg")),
+            "file_path": "available/two.jpg",
             "storage_bucket": "photos",
             "status": "available",
         },
@@ -176,6 +175,61 @@ def test_bulk_create_only_sends_confirmed_photos_columns() -> None:
         "550e8400-e29b-41d4-a716-446655440000",
         "550e8400-e29b-41d4-a716-446655440001",
     ]
+
+
+def test_create_normalizes_storage_path_before_insert() -> None:
+    sink: dict = {}
+    response_data = [
+        {
+            "id": "550e8400-e29b-41d4-a716-446655440000",
+            "original_name": "example.jpg",
+            "file_path": "available/example.jpg",
+            "storage_bucket": "photo-pool",
+            "status": "available",
+            "created_at": "2026-04-13T00:00:00",
+        }
+    ]
+    repository = PhotosRepository(
+        client_provider=FakeClientProvider(sink, response_data),
+        settings=FakeSettings(),
+    )
+
+    repository.create(
+        PhotoCreate(
+            id="550e8400-e29b-41d4-a716-446655440000",
+            original_filename="example.jpg",
+            storage_path=r"available\example.jpg",
+            storage_bucket="photo-pool",
+            status=PhotoStatus.AVAILABLE,
+        )
+    )
+
+    assert sink["payload"]["file_path"] == "available/example.jpg"
+
+
+def test_update_normalizes_storage_path_before_update() -> None:
+    sink: dict = {}
+    response_data = [
+        {
+            "id": "550e8400-e29b-41d4-a716-446655440000",
+            "original_name": "example.jpg",
+            "file_path": "available/example.jpg",
+            "storage_bucket": "photo-pool",
+            "status": "available",
+            "created_at": "2026-04-13T00:00:00",
+        }
+    ]
+    repository = PhotosRepository(
+        client_provider=FakeClientProvider(sink, response_data),
+        settings=FakeSettings(),
+    )
+
+    repository.update(
+        "550e8400-e29b-41d4-a716-446655440000",
+        PhotoUpdate(storage_path=r"available\example.jpg"),
+    )
+
+    assert sink["payload"]["file_path"] == "available/example.jpg"
 
 
 def test_update_sends_confirmed_cleanup_columns() -> None:

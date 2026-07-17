@@ -145,6 +145,13 @@ class PhotoCleanupBatchProgress(DomainModel):
     photos_per_minute: float = 0.0
 
 
+class StorageFolderUsage(DomainModel):
+    bucket_name: str
+    top_folder: str
+    object_count: int = 0
+    total_bytes: int = 0
+
+
 class StorageHealthSnapshot(DomainModel):
     bucket_names: list[str] = Field(default_factory=list)
     active_photo_count: int = 0
@@ -157,6 +164,7 @@ class StorageHealthSnapshot(DomainModel):
     estimated_remaining_photos: int | None = None
     status: str = "unknown"
     note: str = ""
+    folder_usage: list[StorageFolderUsage] = Field(default_factory=list)
 
 
 class ProcessLogCreate(DomainModel):

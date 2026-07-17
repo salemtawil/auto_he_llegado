@@ -13,6 +13,7 @@ class PhotoCleanupService:
     _CLEANED_BY = "admin_cleanup"
     _CONSUMED_REASON = "consumed_cleanup"
     _STALE_RESERVED_REASON = "stale_reserved_cleanup"
+    _MISSING_AVAILABLE_REASON = "missing_storage_integrity_cleanup"
     _DB_ERROR_AFTER_STORAGE_DELETE_PREFIX = "Storage borrado, pero fallo update DB:"
     _RECENT_ERROR_LIMIT = 5
 
@@ -151,6 +152,113 @@ class PhotoCleanupService:
             on_db_error=lambda record, error: self._mark_db_error(record, error),
         )
 
+    def cleanup_available_orphan_storage(
+        self,
+        *,
+        limit: int = 1000,
+        dry_run: bool = False,
+    ) -> PhotoCleanupResult:
+        normalized_limit = max(1, min(int(limit), 1000))
+        rows = self._list_available_orphan_storage_paths(normalized_limit)
+        result = PhotoCleanupResult(
+            action="cleanup_available_orphan_storage",
+            limit=normalized_limit,
+            dry_run=dry_run,
+            matched_count=len(rows),
+        )
+        if not rows:
+            result.stop_reason = "nothing_pending"
+            return result
+
+        paths_by_bucket: dict[str, list[dict]] = {}
+        for row in rows:
+            bucket_name = str(row.get("bucket_name") or "").strip()
+            storage_path = self._normalize_storage_path(str(row.get("storage_path") or ""))
+            item = {
+                "bucket_name": bucket_name,
+                "file_path": storage_path,
+                "bytes": int(row.get("total_bytes") or 0),
+            }
+            if not bucket_name or not storage_path:
+                result.skipped_count += 1
+                item["result"] = "skipped"
+                item["message"] = "Huerfana sin bucket o ruta utilizable."
+                result.items.append(item)
+                continue
+            if dry_run:
+                result.skipped_count += 1
+                item["result"] = "dry_run"
+                item["message"] = "Dry-run: no se borro Storage."
+                result.items.append(item)
+                continue
+            paths_by_bucket.setdefault(bucket_name, []).append(item)
+
+        for bucket_name, items in paths_by_bucket.items():
+            storage_paths = [str(item["file_path"]) for item in items]
+            try:
+                self._client_provider.remove_files(
+                    bucket_name=bucket_name,
+                    storage_paths=storage_paths,
+                )
+            except Exception:
+                self._cleanup_orphan_storage_one_by_one(bucket_name, items, result)
+                continue
+            for item in items:
+                result.deleted_count += 1
+                item["result"] = "cleaned"
+                item["message"] = "Archivo huerfano eliminado de Storage."
+                result.items.append(item)
+
+        result.remaining_count = None
+        result.stop_reason = "limit_reached" if result.matched_count >= normalized_limit else "completed"
+        return result
+
+    def _list_available_orphan_storage_paths(self, limit: int) -> list[dict]:
+        try:
+            response = self._client_provider.execute_response_factory(
+                lambda: self._client_provider.client.rpc(
+                    "available_storage_orphan_paths",
+                    {"p_limit": limit},
+                )
+            )
+        except Exception as exc:
+            raise RuntimeError(
+                "Falta aplicar sql/011_storage_usage_audit.sql en Supabase para limpiar huerfanas."
+            ) from exc
+        return [dict(row) for row in list(getattr(response, "data", []) or []) if isinstance(row, dict)]
+
+    def _cleanup_orphan_storage_one_by_one(
+        self,
+        bucket_name: str,
+        items: list[dict],
+        result: PhotoCleanupResult,
+    ) -> None:
+        for item in items:
+            storage_path = str(item.get("file_path") or "")
+            try:
+                self._client_provider.remove_file(
+                    bucket_name=bucket_name,
+                    storage_path=storage_path,
+                )
+            except Exception as exc:
+                if self._is_storage_missing_error(str(exc)):
+                    result.deleted_count += 1
+                    item["result"] = "cleaned"
+                    item["message"] = "Storage ya no existia; se considera limpio."
+                    result.items.append(item)
+                    continue
+                result.error_count += 1
+                message = str(exc)
+                self._append_reconcile_error(result, message)
+                item["result"] = "storage_error"
+                item["message"] = message
+                result.items.append(item)
+                continue
+            result.deleted_count += 1
+            item["result"] = "cleaned"
+            item["message"] = "Archivo huerfano eliminado de Storage."
+            result.items.append(item)
+
     def cleanup_all_consumed_photos(
         self,
         *,
@@ -184,6 +292,124 @@ class PhotoCleanupService:
             cancel_callback=cancel_callback,
             max_consecutive_stalled_batches=max_consecutive_stalled_batches,
         )
+
+    def cleanup_all_available_orphan_storage(
+        self,
+        *,
+        batch_size: int = 1000,
+        progress_callback=None,
+        cancel_callback=None,
+        max_consecutive_stalled_batches: int = 3,
+    ) -> PhotoCleanupResult:
+        return self._cleanup_in_batches(
+            kind="available_orphans",
+            batch_size=min(max(int(batch_size), 1), 1000),
+            progress_callback=progress_callback,
+            cancel_callback=cancel_callback,
+            max_consecutive_stalled_batches=max_consecutive_stalled_batches,
+        )
+
+    def discard_all_missing_available_photos(
+        self,
+        *,
+        batch_size: int = 1000,
+        progress_callback=None,
+        cancel_callback=None,
+        max_consecutive_stalled_batches: int = 3,
+    ) -> PhotoCleanupResult:
+        return self._cleanup_in_batches(
+            kind="missing_available",
+            batch_size=min(max(int(batch_size), 1), 1000),
+            progress_callback=progress_callback,
+            cancel_callback=cancel_callback,
+            max_consecutive_stalled_batches=max_consecutive_stalled_batches,
+        )
+
+    def count_available_orphan_storage(self) -> int:
+        try:
+            response = self._client_provider.execute_response_factory(
+                lambda: self._client_provider.client.rpc("available_storage_orphan_audit", {})
+            )
+        except Exception as exc:
+            raise RuntimeError(
+                "Falta aplicar sql/011_storage_usage_audit.sql en Supabase para auditar huerfanas."
+            ) from exc
+        rows = list(getattr(response, "data", []) or [])
+        return sum(int(row.get("object_count") or 0) for row in rows if isinstance(row, dict))
+
+    def count_missing_available_photos(self) -> int:
+        try:
+            response = self._client_provider.execute_response_factory(
+                lambda: self._client_provider.client.rpc(
+                    "missing_available_photo_audit",
+                    {"p_active_bucket": self._settings.supabase_storage_bucket},
+                )
+            )
+        except Exception as exc:
+            raise RuntimeError(
+                "Falta aplicar sql/013_photo_pool_integrity_cleanup.sql en Supabase para auditar fotos rotas."
+            ) from exc
+        rows = list(getattr(response, "data", []) or [])
+        return sum(int(row.get("missing_count") or 0) for row in rows if isinstance(row, dict))
+
+    def discard_missing_available_photos(
+        self,
+        *,
+        limit: int = 1000,
+        dry_run: bool = False,
+    ) -> PhotoCleanupResult:
+        normalized_limit = max(1, min(int(limit), 1000))
+        if dry_run:
+            matched_count = min(self.count_missing_available_photos(), normalized_limit)
+            return PhotoCleanupResult(
+                action="discard_missing_available_photos",
+                limit=normalized_limit,
+                dry_run=True,
+                matched_count=matched_count,
+                skipped_count=matched_count,
+                stop_reason="dry_run",
+            )
+        rows = self._discard_missing_available_rows(normalized_limit)
+        result = PhotoCleanupResult(
+            action="discard_missing_available_photos",
+            limit=normalized_limit,
+            matched_count=len(rows),
+            deleted_count=len(rows),
+            processed_count=len(rows),
+            stop_reason="limit_reached" if len(rows) >= normalized_limit else "completed",
+        )
+        for row in rows:
+            result.items.append(
+                {
+                    "photo_id": row.get("photo_id"),
+                    "bucket_name": row.get("storage_bucket"),
+                    "file_path": row.get("file_path"),
+                    "result": "discarded",
+                    "message": "Fila available rota descartada; el archivo no existia en Storage.",
+                }
+            )
+        if not rows:
+            result.stop_reason = "nothing_pending"
+        return result
+
+    def _discard_missing_available_rows(self, limit: int) -> list[dict]:
+        try:
+            response = self._client_provider.execute_response_factory(
+                lambda: self._client_provider.client.rpc(
+                    "discard_missing_available_photos",
+                    {
+                        "p_active_bucket": self._settings.supabase_storage_bucket,
+                        "p_limit": limit,
+                        "p_reason": self._MISSING_AVAILABLE_REASON,
+                        "p_cleaned_by": self._CLEANED_BY,
+                    },
+                )
+            )
+        except Exception as exc:
+            raise RuntimeError(
+                "Falta aplicar sql/013_photo_pool_integrity_cleanup.sql en Supabase para descartar fotos rotas."
+            ) from exc
+        return [dict(row) for row in list(getattr(response, "data", []) or []) if isinstance(row, dict)]
 
     def reconcile_db_error_after_storage_delete(
         self,
@@ -390,8 +616,15 @@ class PhotoCleanupService:
     ) -> PhotoCleanupResult:
         normalized_batch_size = max(int(batch_size), 1)
         total_initial = self._pending_cleanable_count_for_kind(kind, older_than_hours=older_than_hours)
+        action = (
+            "cleanup_all_available_orphan_storage"
+            if kind == "available_orphans"
+            else "discard_all_missing_available_photos"
+            if kind == "missing_available"
+            else f"cleanup_all_{kind}_photos"
+        )
         result = PhotoCleanupResult(
-            action=f"cleanup_all_{kind}_photos",
+            action=action,
             older_than_hours=older_than_hours if kind == "stale_reserved" else None,
             limit=normalized_batch_size,
             dry_run=False,
@@ -493,6 +726,16 @@ class PhotoCleanupService:
                 dry_run=False,
                 exclude_cleanup_errors=True,
             )
+        if kind == "available_orphans":
+            return self.cleanup_available_orphan_storage(
+                limit=batch_size,
+                dry_run=False,
+            )
+        if kind == "missing_available":
+            return self.discard_missing_available_photos(
+                limit=batch_size,
+                dry_run=False,
+            )
         return self.cleanup_stale_reserved_photos(
             older_than_hours=older_than_hours,
             limit=batch_size,
@@ -508,6 +751,10 @@ class PhotoCleanupService:
     def _pending_cleanable_count_for_kind(self, kind: str, *, older_than_hours: int) -> int:
         if kind == "consumed":
             return self._photos_repository.count_consumed_cleanable_pending_cleanup()
+        if kind == "available_orphans":
+            return self.count_available_orphan_storage()
+        if kind == "missing_available":
+            return self.count_missing_available_photos()
         return self._photos_repository.count_stale_reserved_cleanable_pending_cleanup(
             older_than_hours=older_than_hours
         )

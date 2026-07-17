@@ -51,6 +51,22 @@ class StubClientProvider:
         return self.files
 
 
+class StubRpcClientProvider(StubClientProvider):
+    def __init__(self, files: list[dict], rpc_rows: list[dict]) -> None:
+        super().__init__(files)
+        self.rpc_rows = rpc_rows
+        self.rpc_calls: list[str] = []
+        self.client = self
+
+    def rpc(self, name: str):
+        self.rpc_calls.append(name)
+        return name
+
+    def execute(self, operation):
+        assert operation == "storage_usage_by_prefix"
+        return self.rpc_rows
+
+
 def test_storage_health_estimates_usage_and_capacity_from_storage_sample(tmp_path) -> None:
     service = StorageHealthService(
         photos_repository=StubPhotosRepository(active_count=100),
@@ -74,6 +90,40 @@ def test_storage_health_estimates_usage_and_capacity_from_storage_sample(tmp_pat
     assert snapshot.estimated_capacity_photos == 104
     assert snapshot.estimated_remaining_photos == 4
     assert snapshot.status == "Critico"
+
+
+def test_storage_health_uses_exact_storage_usage_rpc_when_available(tmp_path) -> None:
+    client_provider = StubRpcClientProvider(
+        [{"name": "one.jpg", "metadata": {"size": 100_000}}],
+        [
+            {
+                "bucket_name": "photo-pool",
+                "top_folder": "candidates",
+                "object_count": 400,
+                "total_bytes": 1_200_000_000,
+            },
+            {
+                "bucket_name": "photo-pool",
+                "top_folder": "available",
+                "object_count": 100,
+                "total_bytes": 400_000_000,
+            },
+        ],
+    )
+    service = StorageHealthService(
+        photos_repository=StubPhotosRepository(active_count=100),
+        client_provider=client_provider,
+        settings=build_settings(tmp_path, storage_limit_mb=1024),
+    )
+
+    snapshot = service.get_snapshot()
+
+    assert client_provider.rpc_calls == ["storage_usage_by_prefix"]
+    assert snapshot.sampled_file_count == 500
+    assert snapshot.estimated_used_bytes == 1_600_000_000
+    assert snapshot.estimated_available_bytes == 0
+    assert snapshot.status == "Critico"
+    assert [item.top_folder for item in snapshot.folder_usage] == ["candidates", "available"]
 
 
 def test_storage_health_does_not_invent_capacity_without_limit_or_file_sizes(tmp_path) -> None:

@@ -69,7 +69,8 @@ def sanitize_phone_number(value: str) -> str:
 
 
 def validate_image_path(path_value: str | Path, field_name: str = "file_path") -> str:
-    path = Path(path_value)
-    if not path.suffix:
+    normalized = str(path_value).strip().replace("\\", "/").lstrip("/")
+    suffix = Path(normalized).suffix
+    if not suffix:
         raise ValidationError(f"'{field_name}' must include a file extension.")
-    return str(path)
+    return normalized
