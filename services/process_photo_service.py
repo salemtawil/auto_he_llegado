@@ -43,7 +43,9 @@ class ProcessPhotoService:
             self._photos_repository.validate_atomic_claim_support()
         except RepositoryError as exc:
             if self._is_missing_atomic_claim_function_error(exc):
-                raise RuntimeError("Falta aplicar la migracion sql/004_functions.sql en Supabase.") from exc
+                raise RuntimeError(
+                    "Falta aplicar la migracion sql/016_repair_strict_photo_claim_rpc.sql en Supabase."
+                ) from exc
             retry_error = self._retry_atomic_reservation_validation_with_fresh_client()
             if retry_error is None:
                 self._atomic_claim_support_validated = True
@@ -71,6 +73,7 @@ class ProcessPhotoService:
         detail = str(exc).lower()
         return (
             "falta aplicar la migracion sql/004_functions.sql" in detail
+            or "falta aplicar la migracion sql/016_repair_strict_photo_claim_rpc.sql" in detail
             or (
                 "claim_available_photo" in detail
                 and (

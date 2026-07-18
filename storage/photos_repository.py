@@ -26,7 +26,9 @@ class PhotosRepository:
         "cleanup_error",
         "cleaned_by",
     }
-    _MIGRATION_REQUIRED_MESSAGE = "Falta aplicar la migración sql/004_functions.sql en Supabase."
+    _MIGRATION_REQUIRED_MESSAGE = (
+        "Falta aplicar la migración sql/016_repair_strict_photo_claim_rpc.sql en Supabase."
+    )
 
     def __init__(
         self,

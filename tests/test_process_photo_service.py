@@ -188,7 +188,10 @@ def test_validate_atomic_reservation_keeps_migration_message_for_missing_rpc(tmp
     try:
         service.validate_atomic_reservation_support()
     except RuntimeError as exc:
-        assert str(exc) == "Falta aplicar la migracion sql/004_functions.sql en Supabase."
+        assert (
+            str(exc)
+            == "Falta aplicar la migracion sql/016_repair_strict_photo_claim_rpc.sql en Supabase."
+        )
     else:
         raise AssertionError("Expected missing RPC validation to raise.")
 
