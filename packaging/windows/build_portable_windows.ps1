@@ -9,7 +9,6 @@ $PortableRoot = Join-Path $DistRoot "AutoHeLlegado"
 $ReleasesRoot = Join-Path $ProjectRoot "releases"
 $Timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
 $ZipPath = Join-Path $ReleasesRoot "AutoHeLlegado_Windows_Portable_$Timestamp.zip"
-$MsPlaywrightSource = Join-Path $env:USERPROFILE "AppData\Local\ms-playwright"
 
 function Get-PythonExe {
     $venvPython = Join-Path $ProjectRoot ".venv\Scripts\python.exe"
@@ -141,10 +140,6 @@ try {
         Invoke-Python -Arguments @("-m", "PyInstaller", "--version")
     }
 
-    Invoke-Step -Label "Verificando cache local de ms-playwright" -Script {
-        Assert-PathExists -PathValue $MsPlaywrightSource -Message "No se encontro ms-playwright en $MsPlaywrightSource. BrowserManager lo requiere para el portable."
-    }
-
     Invoke-Step -Label "Generando build portable con PyInstaller" -Script {
         Invoke-Python -Arguments @(
             "-m", "PyInstaller",
@@ -184,12 +179,6 @@ try {
         if (Test-Path $envExampleInternal) {
             Copy-Item -Path $envExampleInternal -Destination (Join-Path $PortableRoot ".env.example") -Force
         }
-    }
-
-    Invoke-Step -Label "Copiando ms-playwright" -Script {
-        $target = Join-Path $PortableRoot "ms-playwright"
-        Remove-PathIfExists -PathValue $target
-        Copy-Item -Path $MsPlaywrightSource -Destination $target -Recurse -Force
     }
 
     Invoke-Step -Label "Preparando archivos publicos del updater" -Script {

@@ -106,7 +106,7 @@ class InspectorService:
                         target_url = SITE_URLS.get(site_key, SITE_URLS["compinche"])
                         if browser is None:
                             playwright = sync_playwright().start()
-                            browser = playwright.chromium.launch(headless=False)
+                            browser = playwright.chromium.launch(channel="chrome", headless=False)
                             context = browser.new_context()
                             context.add_init_script(_INIT_SCRIPT)
                             page = context.new_page()

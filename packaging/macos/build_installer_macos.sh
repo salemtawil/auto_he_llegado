@@ -117,7 +117,6 @@ payload["protected_paths"] = sorted(
         "logs/",
         "exports/",
         "updates/",
-        "ms-playwright/",
     }
 )
 target.write_text(json.dumps(payload, indent=2, ensure_ascii=True) + "\n", encoding="utf-8")
@@ -162,7 +161,6 @@ copy_dir() {
 copy_dir "browser_extension"
 copy_dir "sql"
 copy_dir "updater"
-copy_dir "ms-playwright"
 
 if [ -f "$PAYLOAD_ROOT/.env.example" ]; then
   /bin/cp "$PAYLOAD_ROOT/.env.example" "$SUPPORT_DIR/.env.example"
@@ -189,6 +187,7 @@ fi
 
 /usr/sbin/chown -R "$CONSOLE_USER":staff "$SUPPORT_DIR"
 /bin/chmod +x "$SUPPORT_DIR/updater/launchers/ActualizarApp.command" 2>/dev/null || true
+/bin/rm -rf "$SUPPORT_DIR/ms-playwright"
 /usr/bin/xattr -dr com.apple.quarantine "/Applications/AutoHeLlegado.app" 2>/dev/null || true
 /bin/rm -rf "$PAYLOAD_ROOT"
 
@@ -235,10 +234,6 @@ run_step "Compilando archivos Python clave" "$PYTHON" -m py_compile \
   automation/browser_manager.py
 
 run_step "Verificando PyInstaller" "$PYTHON" -m PyInstaller --version
-run_step "Instalando Chromium de Playwright si falta" "$PYTHON" -m playwright install chromium
-
-PLAYWRIGHT_CACHE="${PLAYWRIGHT_BROWSERS_PATH:-$HOME/Library/Caches/ms-playwright}"
-assert_path_exists "$PLAYWRIGHT_CACHE" "No se encontro la cache de Playwright en $PLAYWRIGHT_CACHE."
 
 run_step "Limpiando salidas anteriores" rm -rf "$BUILD_ROOT" "$APP_OUTPUT"
 mkdir -p "$DIST_ROOT" "$RELEASES_ROOT"
@@ -263,7 +258,6 @@ cp -R "$APP_OUTPUT" "$PAYLOAD_ROOT/AutoHeLlegado.app"
 copy_tree "$PROJECT_ROOT/browser_extension" "$PAYLOAD_ROOT/browser_extension"
 copy_tree "$PROJECT_ROOT/sql" "$PAYLOAD_ROOT/sql"
 copy_tree "$PROJECT_ROOT/updater" "$PAYLOAD_ROOT/updater"
-copy_tree "$PLAYWRIGHT_CACHE" "$PAYLOAD_ROOT/ms-playwright"
 
 if [ -f "$PROJECT_ROOT/.env.example" ]; then
   cp "$PROJECT_ROOT/.env.example" "$PAYLOAD_ROOT/.env.example"
@@ -297,7 +291,6 @@ assert_path_exists "$PAYLOAD_ROOT/browser_extension/manifest.json" "Falta browse
 assert_path_exists "$PAYLOAD_ROOT/updater/github_sync_updater.py" "Falta updater/github_sync_updater.py."
 assert_path_exists "$PAYLOAD_ROOT/updater/apply_update_helper.py" "Falta updater/apply_update_helper.py."
 assert_path_exists "$PAYLOAD_ROOT/updater/release_update_client.py" "Falta updater/release_update_client.py."
-assert_path_exists "$PAYLOAD_ROOT/ms-playwright" "Falta ms-playwright."
 
 run_step "Generando update zip para GitHub" bash -c '
   set -euo pipefail

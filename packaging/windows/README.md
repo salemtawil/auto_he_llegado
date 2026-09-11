@@ -23,14 +23,7 @@ Salida esperada:
 - Python disponible o `.venv\Scripts\python.exe`
 - Dependencias del proyecto instaladas
 - PyInstaller instalado en el entorno activo
-- Cache local de Playwright en:
-  - `%USERPROFILE%\AppData\Local\ms-playwright`
-
-Si falta la cache de Playwright, instala al menos Chromium antes del build:
-
-```powershell
-.\.venv\Scripts\python.exe -m playwright install chromium
-```
+- Google Chrome instalado en la PC que ejecutara la app
 
 ## Comando de build
 
@@ -73,7 +66,6 @@ Despues del build valida:
 - `updater/README.md`
 - `sql/`
 - `.env.example`
-- `ms-playwright/`
 - carpetas vacias:
   - `logs/`
   - `exports/`
@@ -101,6 +93,7 @@ Despues del build valida:
 - `updates/` reales
 - `backups/` reales
 - `.git/`
+- Chromium o cualquier navegador embebido
 
 ## Entrega al usuario final
 

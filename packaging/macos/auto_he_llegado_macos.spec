@@ -10,6 +10,7 @@ from PyInstaller.utils.hooks import collect_all
 
 PROJECT_ROOT = Path.cwd()
 TARGET_ARCH = os.environ.get("MACOS_TARGET_ARCH") or None
+APP_VERSION = os.environ.get("AUTO_HE_LLEGADO_VERSION", "1.0.0")
 
 
 datas: list[tuple[str, str]] = []
@@ -82,8 +83,8 @@ app = BUNDLE(
     info_plist={
         "CFBundleName": "Auto He Llegado",
         "CFBundleDisplayName": "Auto He Llegado",
-        "CFBundleShortVersionString": "1.0.0",
-        "CFBundleVersion": "1.0.0",
+        "CFBundleShortVersionString": APP_VERSION,
+        "CFBundleVersion": APP_VERSION,
         "NSHighResolutionCapable": True,
     },
 )

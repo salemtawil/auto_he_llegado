@@ -16,8 +16,7 @@ Salida esperada:
 - Dependencias del proyecto instaladas
 - PyInstaller instalado en el entorno activo
 - Inno Setup 6 instalado con `iscc.exe` en `PATH` o en su ruta por defecto
-- Cache local de Playwright en:
-  - `%USERPROFILE%\AppData\Local\ms-playwright`
+- Google Chrome instalado en la PC que ejecutara la app
 - `.env` real en la raíz del proyecto
 
 Si falta `.env`, el build falla con este mensaje:
@@ -47,7 +46,6 @@ Incluye:
 - `_internal/`
 - `updater/`
 - `browser_extension/`
-- `ms-playwright/`
 - `.env`
 - `.env.example`
 

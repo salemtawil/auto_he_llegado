@@ -11,7 +11,6 @@ $ReleasesRoot = Join-Path $ProjectRoot "releases"
 $Timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
 $SetupPath = Join-Path $ReleasesRoot "AutoHeLlegado_Setup_$Timestamp.exe"
 $UpdateZipPath = Join-Path $ReleasesRoot "AutoHeLlegado_Update_$Timestamp.zip"
-$MsPlaywrightSource = Join-Path $env:USERPROFILE "AppData\Local\ms-playwright"
 $EnvPath = Join-Path $ProjectRoot ".env"
 $EnvExamplePath = Join-Path $ProjectRoot ".env.example"
 $UpdaterConfigPath = Join-Path $ProjectRoot "updater\updater_config.json"
@@ -173,10 +172,6 @@ function Initialize-InstallerRuntimeDirectories {
     }
 }
 
-function Copy-MsPlaywrightForInstaller {
-    Copy-DirectoryContents -SourcePath $MsPlaywrightSource -TargetPath (Join-Path $DistAppRoot "ms-playwright")
-}
-
 function New-UpdatePackageZip {
     param(
         [Parameter(Mandatory = $true)][string]$DestinationZipPath,
@@ -261,10 +256,6 @@ try {
         $null = Get-InnoSetupExe
     }
 
-    Invoke-Step -Label "Verificando cache local de ms-playwright" -Script {
-        Assert-PathExists -PathValue $MsPlaywrightSource -Message "No se encontro ms-playwright en $MsPlaywrightSource. BrowserManager lo requiere para el instalador."
-    }
-
     Invoke-Step -Label "Generando build base con PyInstaller" -Script {
         Invoke-Python -Arguments @(
             "-m", "PyInstaller",
@@ -279,7 +270,6 @@ try {
     Invoke-Step -Label "Preparando layout instalable" -Script {
         Copy-UpdaterFilesForInstaller
         Copy-DirectoryContents -SourcePath (Join-Path $ProjectRoot "browser_extension") -TargetPath (Join-Path $DistAppRoot "browser_extension")
-        Copy-MsPlaywrightForInstaller
         Copy-Item -Path $EnvPath -Destination (Join-Path $DistAppRoot ".env") -Force
         Copy-Item -Path $EnvExamplePath -Destination (Join-Path $DistAppRoot ".env.example") -Force
         Initialize-InstallerRuntimeDirectories
@@ -309,7 +299,6 @@ try {
         Assert-PathExists -PathValue (Join-Path $DistAppRoot "_internal") -Message "Falta dist\AutoHeLlegado\_internal\"
         Assert-PathExists -PathValue (Join-Path $DistAppRoot "updater") -Message "Falta dist\AutoHeLlegado\updater\"
         Assert-PathExists -PathValue (Join-Path $DistAppRoot "browser_extension") -Message "Falta dist\AutoHeLlegado\browser_extension\"
-        Assert-PathExists -PathValue (Join-Path $DistAppRoot "ms-playwright") -Message "Falta dist\AutoHeLlegado\ms-playwright\"
         Assert-PathExists -PathValue (Join-Path $DistAppRoot ".env") -Message "Falta dist\AutoHeLlegado\.env"
         Assert-PathExists -PathValue (Join-Path $DistAppRoot ".env.example") -Message "Falta dist\AutoHeLlegado\.env.example"
         Assert-PathExists -PathValue $SetupPath -Message "No se genero releases\AutoHeLlegado_Setup_$Timestamp.exe"

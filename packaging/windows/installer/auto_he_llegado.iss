@@ -50,7 +50,6 @@ Source: "{#DistAppDir}\_internal\*"; DestDir: "{app}\_internal"; Flags: ignoreve
 Source: "{#DistAppDir}\updater\*"; DestDir: "{app}\updater"; Excludes: "updater_config.json"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "{#DistAppDir}\updater\updater_config.json"; DestDir: "{app}\updater"; Flags: ignoreversion
 Source: "{#DistAppDir}\browser_extension\*"; DestDir: "{app}\browser_extension"; Flags: ignoreversion recursesubdirs createallsubdirs
-Source: "{#DistAppDir}\ms-playwright\*"; DestDir: "{app}\ms-playwright"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "{#DistAppDir}\.env"; DestDir: "{app}"; DestName: ".env"; Flags: ignoreversion onlyifdoesntexist uninsneveruninstall
 Source: "{#DistAppDir}\.env.example"; DestDir: "{app}"; Flags: ignoreversion
 
@@ -70,6 +69,9 @@ Name: "{app}\local_data\results\screenshots"; Flags: uninsneveruninstall
 Name: "{app}\local_data\failed_uploads"; Flags: uninsneveruninstall
 Name: "{app}\local_data\temp_photos"; Flags: uninsneveruninstall
 Name: "{app}\chrome_profiles"; Flags: uninsneveruninstall
+
+[InstallDelete]
+Type: filesandordirs; Name: "{app}\ms-playwright"
 
 [Icons]
 Name: "{autoprograms}\{#MyAppName}"; Filename: "{app}\AutoHeLlegado.exe"

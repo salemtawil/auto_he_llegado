@@ -1415,7 +1415,7 @@ class MainAppWindow(ctk.CTk):
         if self._is_closing:
             return
         self._latest_debug_slot_id = slot_id
-        self._set_slot_status(slot_id, "Abriendo Chromium con la extension y navegando a chrome://extensions...")
+        self._set_slot_status(slot_id, "Abriendo Google Chrome con la extension y navegando a chrome://extensions...")
         thread = threading.Thread(target=self._open_extension_test_browser_worker, args=(slot_id,), daemon=True)
         thread.start()
 
@@ -1428,7 +1428,7 @@ class MainAppWindow(ctk.CTk):
         engine_label = self._flow_engine_label(self._current_config.flow_engine)
         self._set_slot_status(
             slot_id,
-            f"Abriendo Chromium manualmente. Motor: {engine_label}. Destino: {target_url}",
+            f"Abriendo Google Chrome manualmente. Motor: {engine_label}. Destino: {target_url}",
         )
         thread = threading.Thread(
             target=self._open_manual_browser_worker,

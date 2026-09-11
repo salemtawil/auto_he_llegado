@@ -273,6 +273,31 @@ def test_browser_manager_rejects_playwright_bundled_chromium_executable(tmp_path
         raise AssertionError("Expected Playwright chromium executable to raise.")
 
 
+def test_extension_smoke_test_uses_only_google_chrome(tmp_path, monkeypatch) -> None:
+    extension_dir = tmp_path / "browser_extension"
+    extension_dir.mkdir()
+    (extension_dir / "manifest.json").write_text("{}", encoding="utf-8")
+    (extension_dir / "service_worker.js").write_text("", encoding="utf-8")
+    (extension_dir / "content.js").write_text("", encoding="utf-8")
+    manager = BrowserManager(settings=build_settings(tmp_path))
+    channels: list[str] = []
+
+    monkeypatch.setattr(manager, "_get_required_extension_dir", lambda: extension_dir)
+    monkeypatch.setattr(manager, "_build_extension_smoke_test_args", lambda _path: [])
+
+    def fake_launch(*, channel, extension_dir, launch_args):
+        channels.append(channel)
+        return {"service_workers": []}
+
+    monkeypatch.setattr(manager, "_run_extension_smoke_launch", fake_launch)
+
+    result = manager.open_chrome_extension_smoke_test()
+
+    assert channels == ["chrome"]
+    assert "chromium" not in result
+    assert result["chrome_service_worker"] == []
+
+
 def test_begin_new_run_initializes_extension_config_snapshot() -> None:
     run_id = BrowserManager.begin_new_run(flow_engine="extension")
 

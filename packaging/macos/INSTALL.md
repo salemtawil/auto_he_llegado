@@ -27,6 +27,10 @@ open "$HOME/Library/Application Support/AutoHeLlegado"
 
 Si `.env` ya existe, solo verifica sus valores. Si no existe, el instalador lo crea desde `.env.example`.
 
+## Requisito de navegador
+
+La app usa Google Chrome y no instala Chromium. Antes de abrirla, instala Google Chrome en `/Applications`.
+
 ## Abrir por primera vez
 
 Abre:
@@ -40,6 +44,13 @@ Si macOS bloquea la app porque no esta notarizada, ejecuta:
 ```bash
 xattr -dr com.apple.quarantine "/Applications/AutoHeLlegado.app"
 open "/Applications/AutoHeLlegado.app"
+```
+
+Si macOS bloquea el propio instalador, ejecuta primero:
+
+```bash
+xattr -dr com.apple.quarantine "/ruta/al/AutoHeLlegado_Mac.pkg"
+open "/ruta/al/AutoHeLlegado_Mac.pkg"
 ```
 
 ## Actualizar

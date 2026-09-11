@@ -1,0 +1,98 @@
+name: Build macOS PKG
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Version del instalador
+        required: false
+        default: ""
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/build-macos-pkg.yml"
+      - "app_main.py"
+      - "automation/**"
+      - "browser_extension/**"
+      - "config/**"
+      - "core/**"
+      - "debug_tools/**"
+      - "packaging/macos/**"
+      - "requirements.txt"
+      - "services/**"
+      - "storage/**"
+      - "ui/**"
+      - "updater/**"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: ${{ matrix.label }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: Apple Silicon
+            runner: macos-15
+            arch: arm64
+          - label: Intel
+            runner: macos-15-intel
+            arch: x86_64
+
+    steps:
+      - name: Descargar codigo
+        uses: actions/checkout@v6
+
+      - name: Preparar Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Definir version
+        shell: bash
+        run: |
+          version="${{ inputs.version }}"
+          if [[ -z "$version" ]]; then
+            version="1.0.${GITHUB_RUN_NUMBER}"
+          fi
+          echo "AUTO_HE_LLEGADO_VERSION=$version" >> "$GITHUB_ENV"
+
+      - name: Preparar configuracion privada opcional
+        env:
+          MACOS_ENV_FILE_B64: ${{ secrets.MACOS_ENV_FILE_B64 }}
+        shell: bash
+        run: |
+          if [[ -n "$MACOS_ENV_FILE_B64" ]]; then
+            printf '%s' "$MACOS_ENV_FILE_B64" | base64 --decode > .env
+          fi
+
+      - name: Construir instalador
+        env:
+          AUTO_VENV: "0"
+          MACOS_TARGET_ARCH: ${{ matrix.arch }}
+        shell: bash
+        run: bash packaging/macos/build_installer_macos.sh
+
+      - name: Verificar que no se incluyo Chromium
+        shell: bash
+        run: |
+          if find build/installer_macos/pkg_root -type d -iname 'ms-playwright' | grep -q .; then
+            echo "El paquete contiene Chromium y no debe publicarse." >&2
+            exit 1
+          fi
+
+      - name: Publicar instalador
+        uses: actions/upload-artifact@v4
+        with:
+          name: AutoHeLlegado-macOS-${{ matrix.arch }}
+          path: |
+            releases/*_${{ matrix.arch }}_Installer_*.pkg
+            releases/*_${{ matrix.arch }}_Update_*.zip
+          if-no-files-found: error
+          retention-days: 30

@@ -7,6 +7,7 @@ Generar un instalador `.pkg` para macOS:
 - Instala `AutoHeLlegado.app` en `/Applications`.
 - Guarda configuracion, logs, updater, extension y Playwright en `~/Library/Application Support/AutoHeLlegado`.
 - Conserva `.env` existente cuando se instala una version nueva.
+- Usa exclusivamente Google Chrome instalado en la Mac; no descarga ni incluye Chromium.
 
 Comando:
 
@@ -43,6 +44,7 @@ La carpeta completa es el producto final. No se debe mover solo el `.app`, porqu
 
 - macOS.
 - Python 3.11 o 3.12. No uses Python 3.13/3.14 para empaquetar, porque puede generar conflictos binarios con `cryptography`/OpenSSL.
+- Google Chrome instalado en la Mac que ejecutara la app.
 - Para un paquete compatible con Intel y Apple Silicon en un solo zip, usa Python universal2 de python.org.
 - El script crea `.venv` e instala dependencias automaticamente, salvo que uses `SKIP_DEP_INSTALL=1`.
 
@@ -53,7 +55,6 @@ python3 -m venv .venv
 . .venv/bin/activate
 python -m pip install --upgrade pip
 python -m pip install -r requirements.txt -c packaging/macos/constraints-macos.txt pyinstaller
-python -m playwright install chromium
 ```
 
 ## Comando de build portable
@@ -90,8 +91,6 @@ SKIP_TESTS=1 packaging/macos/build_portable_macos.sh
 - Compila archivos Python clave.
 - Ejecuta `pytest` salvo que uses `SKIP_TESTS=1`.
 - Verifica PyInstaller.
-- Instala Chromium de Playwright si hace falta.
-- Copia `ms-playwright` desde `~/Library/Caches/ms-playwright`.
 - Genera `AutoHeLlegado.app`.
 - Copia recursos externos al lado del `.app`.
 - Firma localmente el `.app` con ad-hoc `codesign`.
@@ -105,7 +104,6 @@ SKIP_TESTS=1 packaging/macos/build_portable_macos.sh
 - `browser_extension/`
 - `sql/`
 - `updater/`
-- `ms-playwright/`
 - `logs/`
 - `exports/`
 - `updates/`
@@ -116,7 +114,19 @@ SKIP_TESTS=1 packaging/macos/build_portable_macos.sh
 - `.venv/`.
 - `tests/`.
 - `chrome_profiles/`.
+- Chromium o cualquier navegador embebido.
 - datos reales de `local_data/`, `logs/`, `exports/` o `updates/`.
+
+## Build automatico en GitHub
+
+El workflow `Build macOS PKG` genera dos instaladores:
+
+- `arm64` para Macs Apple Silicon (M1, M2, M3 y posteriores).
+- `x86_64` para Macs Intel.
+
+Puede ejecutarse manualmente desde la pestana Actions. En cada push a `main` que cambie la app o el empaquetado tambien se construyen ambos paquetes.
+
+Para incluir la configuracion real sin subir `.env` al repositorio, crea el secreto de GitHub `MACOS_ENV_FILE_B64` con el contenido de `.env` codificado en base64. Si el secreto no existe, el instalador incluye `.env.example` como configuracion inicial.
 
 ## Entrega
 

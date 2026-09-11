@@ -3,7 +3,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from copy import deepcopy
 import json
-import os
 from pathlib import Path
 import shutil
 import subprocess
@@ -773,7 +772,6 @@ class BrowserManager:
         extension_overlay: bool = True,
     ) -> BrowserSession:
         run_id = self.current_run_id()
-        self._configure_playwright_runtime()
         try:
             from playwright.sync_api import sync_playwright
         except ImportError as exc:
@@ -1084,7 +1082,6 @@ class BrowserManager:
         )
 
     def prepare_chrome_extension_profile(self) -> BrowserSession:
-        self._configure_playwright_runtime()
         try:
             from playwright.sync_api import sync_playwright
         except ImportError as exc:
@@ -1176,13 +1173,12 @@ class BrowserManager:
         return session
 
     def open_chrome_extension_smoke_test(self) -> dict:
-        self._configure_playwright_runtime()
         try:
             from playwright.sync_api import sync_playwright
         except ImportError as exc:
             raise RuntimeError(
                 "Playwright no esta instalado. Ejecuta 'pip install -r requirements.txt' "
-                "y asegÃºrate de tener Google Chrome instalado."
+                "y asegurate de tener Google Chrome instalado."
             ) from exc
 
         extension_dir = self._get_required_extension_dir()
@@ -1200,16 +1196,13 @@ class BrowserManager:
             "content_js_path": str(content_script_path),
             "content_js_exists": content_script_path.exists(),
             "chrome": {},
-            "chromium": {},
         }
-        for channel in ("chrome", "chromium"):
-            payload[channel] = self._run_extension_smoke_launch(
-                channel=channel,
-                extension_dir=extension_dir,
-                launch_args=launch_args,
-            )
+        payload["chrome"] = self._run_extension_smoke_launch(
+            channel="chrome",
+            extension_dir=extension_dir,
+            launch_args=launch_args,
+        )
         payload["chrome_service_worker"] = payload["chrome"].get("service_workers")
-        payload["chromium_service_worker"] = payload["chromium"].get("service_workers")
         return payload
 
     @classmethod
@@ -1283,13 +1276,6 @@ class BrowserManager:
         # TODO(parallelism): this returns shared latest debug state, not per execution. Do not use for real parallelism.
         with cls._sessions_lock:
             return deepcopy(cls._latest_extension_debug)
-
-    def _configure_playwright_runtime(self) -> None:
-        if os.getenv("PLAYWRIGHT_BROWSERS_PATH"):
-            return
-        bundled_browsers = PROJECT_ROOT / "ms-playwright"
-        if bundled_browsers.exists():
-            os.environ["PLAYWRIGHT_BROWSERS_PATH"] = str(bundled_browsers)
 
     def _use_installed_chrome_profile_extension(self) -> bool:
         return bool(self._settings.use_chrome_profile_extension)

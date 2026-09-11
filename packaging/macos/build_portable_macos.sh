@@ -145,11 +145,6 @@ run_step "Compilando archivos Python clave" "$PYTHON" -m py_compile \
 
 run_step "Verificando PyInstaller" "$PYTHON" -m PyInstaller --version
 
-run_step "Instalando Chromium de Playwright si falta" "$PYTHON" -m playwright install chromium
-
-PLAYWRIGHT_CACHE="${PLAYWRIGHT_BROWSERS_PATH:-$HOME/Library/Caches/ms-playwright}"
-assert_path_exists "$PLAYWRIGHT_CACHE" "No se encontro la cache de Playwright en $PLAYWRIGHT_CACHE."
-
 run_step "Limpiando salidas anteriores" rm -rf "$BUILD_ROOT" "$APP_OUTPUT" "$PORTABLE_ROOT"
 mkdir -p "$DIST_ROOT" "$RELEASES_ROOT"
 
@@ -173,7 +168,6 @@ cp -R "$APP_OUTPUT" "$PORTABLE_ROOT/AutoHeLlegado.app"
 copy_tree "$PROJECT_ROOT/browser_extension" "$PORTABLE_ROOT/browser_extension"
 copy_tree "$PROJECT_ROOT/sql" "$PORTABLE_ROOT/sql"
 copy_tree "$PROJECT_ROOT/updater" "$PORTABLE_ROOT/updater"
-copy_tree "$PLAYWRIGHT_CACHE" "$PORTABLE_ROOT/ms-playwright"
 
 if [ -f "$PROJECT_ROOT/.env.example" ]; then
   cp "$PROJECT_ROOT/.env.example" "$PORTABLE_ROOT/.env.example"
@@ -219,7 +213,6 @@ assert_path_exists "$PORTABLE_ROOT/updater/github_sync_updater.py" "Falta update
 assert_path_exists "$PORTABLE_ROOT/updater/apply_update_helper.py" "Falta updater/apply_update_helper.py."
 assert_path_exists "$PORTABLE_ROOT/updater/release_update_client.py" "Falta updater/release_update_client.py."
 assert_path_exists "$PORTABLE_ROOT/updater/launchers/ActualizarApp.command" "Falta ActualizarApp.command."
-assert_path_exists "$PORTABLE_ROOT/ms-playwright" "Falta ms-playwright."
 
 echo
 echo "==> Generando zip final"

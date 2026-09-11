@@ -22,7 +22,6 @@ def main() -> int:
     _clean_outputs()
     _run_pyinstaller()
     _assemble_release_folder()
-    _stage_playwright_browsers()
     _prepare_runtime_files()
     archive_path = _create_archive()
     print(f"Release listo en: {WINDOWS_RELEASE_DIR}")
@@ -74,19 +73,6 @@ def _assemble_release_folder() -> None:
     if not built_dir.exists():
         raise RuntimeError(f"No se encontro la salida de PyInstaller: {built_dir}")
     shutil.copytree(built_dir, WINDOWS_RELEASE_DIR)
-
-
-def _stage_playwright_browsers() -> None:
-    source_cache = Path.home() / "AppData" / "Local" / "ms-playwright"
-    target_dir = WINDOWS_RELEASE_DIR / "ms-playwright"
-    if target_dir.exists():
-        shutil.rmtree(target_dir)
-    if not source_cache.exists() or not any(source_cache.iterdir()):
-        raise SystemExit(
-            "No se encontro la cache local de Playwright en AppData\\Local\\ms-playwright.\n"
-            "Ejecuta antes: .\\.venv\\Scripts\\python.exe -m playwright install chromium"
-        )
-    shutil.copytree(source_cache, target_dir)
 
 
 def _prepare_runtime_files() -> None:
@@ -149,7 +135,6 @@ def _write_run_scripts() -> None:
             @echo off
             setlocal
             cd /d "%~dp0"
-            set "PLAYWRIGHT_BROWSERS_PATH=%~dp0ms-playwright"
             start "" "%~dp0{binary_name}"
             """
         )
@@ -174,7 +159,6 @@ def _write_readme() -> None:
         - run_main.bat / run_uploader.bat / run_debug.bat: lanzadores
         - .env.example: plantilla de configuracion
         - .env: configuracion activa usada por la app
-        - ms-playwright/: Chromium portable para Playwright
 
         Que hacer con .env
         - Si necesitas cambiar configuracion, edita .env.
@@ -188,6 +172,7 @@ def _write_readme() -> None:
 
         Requisitos en la PC de prueba
         - No hace falta instalar Python.
+        - Google Chrome debe estar instalado.
         - Si hace falta acceso real a los sitios y a Supabase, la PC debe tener internet.
 
         Donde revisar errores basicos
@@ -196,7 +181,6 @@ def _write_readme() -> None:
         - local_data/results
 
         Notas
-        - No borres la carpeta ms-playwright.
         - La app guarda datos locales dentro de local_data.
         """
     )

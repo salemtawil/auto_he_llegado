@@ -318,11 +318,8 @@ class ExtensionStatusPanel(ctk.CTkFrame):
         overlay_label = "sí" if overlay_present or iframe_overlay_present else "no"
         browser_channel = str(debug.get("browser_channel") or "N/A").strip() or "N/A"
         using_real_chrome = bool(debug.get("using_real_chrome"))
-        uses_playwright_chromium = bool(debug.get("uses_playwright_chromium"))
         if using_real_chrome:
             browser_label = "Chrome"
-        elif uses_playwright_chromium or browser_channel.lower() == "chromium":
-            browser_label = "Chromium"
         elif browser_channel.lower() == "chrome":
             browser_label = "Chrome"
         else:
