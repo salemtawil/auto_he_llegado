@@ -29,11 +29,11 @@ class StubPhotosRepository:
         self.update_calls = []
         self.validate_atomic_claim_support_calls = 0
 
-    def validate_atomic_claim_support(self):
+    def validate_atomic_claim_support(self, *, active_bucket=None):
         self.validate_atomic_claim_support_calls += 1
         return None
 
-    def claim_available(self, *, process_id=None):
+    def claim_available(self, *, process_id=None, active_bucket=None):
         self.claim_calls.append(process_id)
         if not self.records:
             raise AssertionError("No stub photo records available.")
@@ -139,7 +139,7 @@ class FlakyValidationRepository(StubPhotosRepository):
         super().__init__()
         self.validation_outcomes = list(validation_outcomes)
 
-    def validate_atomic_claim_support(self):
+    def validate_atomic_claim_support(self, *, active_bucket=None):
         self.validate_atomic_claim_support_calls += 1
         outcome = self.validation_outcomes.pop(0)
         if isinstance(outcome, Exception):

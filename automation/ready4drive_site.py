@@ -16,10 +16,10 @@ from automation.engines.extension import ExtensionFlowEngine, ExtensionPhaseDeci
 from automation.flow_context import ActiveFlowContext, resolve_live_flow_context
 from core.models import LocalConfig, ProcessExecutionRequest, ReservedPhoto, SiteExecutionResult
 from services.process_photo_service import ProcessPhotoService
-from playwright.sync_api import Locator
+from playwright.sync_api import Frame, Locator
 
 if TYPE_CHECKING:
-    from playwright.sync_api import Frame, Page
+    from playwright.sync_api import Page
 
 
 _WHITESPACE_RE = re.compile(r"\s+")
@@ -49,6 +49,35 @@ class Ready4DriveSelectors:
     borrowed_account_subtitles: tuple[str, ...] = ("Selecciona para generar una foto", "Select to generate a photo", "Selecione para gerar uma foto")
     photo_inputs: tuple[str, ...] = ('#user_avatar', 'input[id="user_avatar"]', 'input[type="file"]', 'input[accept*="image"]')
     continue_texts: tuple[str, ...] = ("Continuar", "Continue", "Prosseguir", "Continuar agora")
+    verification_start_texts: tuple[str, ...] = (
+        "Iniciar verificacion",
+        "Iniciar verificación",
+        "Start verification",
+        "Start Verification",
+        "Iniciar verificacao",
+        "Iniciar verificação",
+    )
+    owner_verification_texts: tuple[str, ...] = (
+        "Verificacion del propietario de la cuenta",
+        "Verificación del propietario de la cuenta",
+        "Que verifique el propietario de la cuenta",
+        "Verificar con una selfie",
+        "Continuar con selfie",
+        "Owner account verification",
+        "Verify with a selfie",
+        "Continue with selfie",
+        "Verificacao do proprietario da conta",
+        "Verificação do proprietário da conta",
+        "Continuar com selfie",
+    )
+    self_owner_continue_texts: tuple[str, ...] = (
+        "Continuar con selfie",
+        "Verificar con una selfie",
+        "Continue with selfie",
+        "Verify with a selfie",
+        "Continuar com selfie",
+        "Verificar com uma selfie",
+    )
     selfie_instruction_texts: tuple[str, ...] = (
         "para continuar, selecciona una opcion y tomate una foto tipo selfie",
         "foto tipo selfie",
@@ -1068,6 +1097,15 @@ class Ready4DriveSite(BaseSite):
         deadline = monotonic() + (timeout_ms / 1000)
         while monotonic() < deadline:
             self._raise_if_cancelled()
+            ready_root = self._find_pre_selfie_context_now(page)
+            if ready_root is not None:
+                self._record_engine_resolution(session, None, phase="iframe_entry", source="polling tradicional", note="pre_selfie_ready")
+                return FlowRoot(
+                    root=ready_root,
+                    phase="iframe_detect" if ready_root is not page else "modal_check",
+                    description="Pantalla de verificacion detectada.",
+                    is_iframe=ready_root is not page,
+                )
             if extension_assisted:
                 extension_state = self._extension_state(session, page, note="wait_iframe_entry")
                 extension_phase = self._extension_phase(extension_state)
@@ -1446,6 +1484,18 @@ class Ready4DriveSite(BaseSite):
             if attempt >= 2:
                 self.emit_progress(progress_callback, phase="selfie_retry_if_needed", message="Selfie subida mas de una vez. Marca de multiples selfies activada.")
                 self.emit_progress(progress_callback, phase="selfie_retry_if_needed", message=f"Reintentando con nueva foto. Intento {attempt_label}.")
+            current_root = self._complete_pre_selfie_account_step(
+                current_root,
+                page=page,
+                progress_callback=progress_callback,
+                timeout_ms=action_timeout_ms,
+            )
+            current_root = self._complete_owner_verification_selfie_step(
+                current_root,
+                page=page,
+                progress_callback=progress_callback,
+                timeout_ms=action_timeout_ms,
+            )
             self.emit_progress(progress_callback, phase="selfie_stage", message="Preparando foto para el input selfie...")
             self._mark_phase_timing("selfie_input_detected", attempt=attempt, url=page.url)
             self._record_run_stat("selfie_input_detected", attempt=attempt, url=page.url)
@@ -1557,7 +1607,100 @@ class Ready4DriveSite(BaseSite):
                 self._discard_background_photo(prepared_photo)
                 raise
 
+    def _complete_pre_selfie_account_step(
+        self,
+        root: Page | Frame | Locator,
+        *,
+        page: Page,
+        progress_callback: ProgressCallback | None,
+        timeout_ms: int,
+    ) -> Page | Frame | Locator:
+        if self._has_photo_input_now(root):
+            return root
+        start_button = self._find_fast_text_button(root, self._selectors.verification_start_texts)
+        if start_button is None:
+            if self._find_fast_text_button(root, self._selectors.self_owner_continue_texts) is not None:
+                return root
+            start_button = self._find_best_text_candidate(root, self._selectors.verification_start_texts)
+        if start_button is None:
+            return root
+
+        self.emit_progress(progress_callback, phase="account_selection", message="Pantalla previa detectada dentro del flujo. Iniciando verificacion...")
+        self._click_locator_fast_or_resilient(
+            start_button,
+            phase="account_selection",
+            error_message="No se pudo presionar 'Iniciar verificacion' dentro del flujo activo.",
+        )
+        self._record_timeline_event("pre_selfie_account_step_done", url=page.url)
+        self._record_run_stat("pre_selfie_account_step_done", url=page.url)
+
+        deadline = monotonic() + (min(max(timeout_ms, 8_000), 15_000) / 1000)
+        current_root = root
+        while monotonic() < deadline:
+            self._raise_if_cancelled()
+            current_root = self._resolve_pre_selfie_transition_root(page, current_root)
+            current_root = self._complete_owner_verification_selfie_step(
+                current_root,
+                page=page,
+                progress_callback=progress_callback,
+                timeout_ms=timeout_ms,
+            )
+            if self._has_photo_input_now(current_root):
+                self._set_active_flow_context(current_root, page=page, source="pre_selfie_account_step")
+                self.emit_progress(progress_callback, phase="selfie_stage", message="Input selfie habilitado despues de la verificacion previa.")
+                return current_root
+            self._wait_interval(current_root, self._POLL_MS)
+        raise Ready4DriveFlowError(
+            "photo_upload",
+            "Se presiono Iniciar verificacion, pero no aparecio el input de imagen.",
+        )
+
+    def _complete_owner_verification_selfie_step(
+        self,
+        root: Page | Frame | Locator,
+        *,
+        page: Page,
+        progress_callback: ProgressCallback | None,
+        timeout_ms: int,
+    ) -> Page | Frame | Locator:
+        if self._has_photo_input_now(root):
+            return root
+        continue_button = self._find_fast_text_button(root, self._selectors.self_owner_continue_texts)
+        if continue_button is None:
+            if not self._has_any_text_now(root, self._selectors.owner_verification_texts):
+                return root
+            continue_button = self._find_best_text_candidate(root, self._selectors.self_owner_continue_texts)
+        if continue_button is None:
+            return root
+
+        self.emit_progress(progress_callback, phase="account_selection", message="Verificacion del propietario detectada. Continuando con selfie propia...")
+        self._click_locator_fast_or_resilient(
+            continue_button,
+            phase="account_selection",
+            error_message="No se pudo presionar 'Continuar con selfie' dentro del flujo activo.",
+        )
+        self._record_timeline_event("owner_verification_selfie_step_done", url=page.url)
+        self._record_run_stat("owner_verification_selfie_step_done", url=page.url)
+
+        deadline = monotonic() + (min(max(timeout_ms, 8_000), 15_000) / 1000)
+        current_root = root
+        while monotonic() < deadline:
+            self._raise_if_cancelled()
+            current_root = self._resolve_pre_selfie_transition_root(page, current_root)
+            if self._has_photo_input_now(current_root):
+                self._set_active_flow_context(current_root, page=page, source="owner_verification_selfie_step")
+                self.emit_progress(progress_callback, phase="selfie_stage", message="Input selfie habilitado despues de continuar con selfie.")
+                return current_root
+            self._wait_interval(current_root, self._POLL_MS)
+        raise Ready4DriveFlowError(
+            "photo_upload",
+            "Se eligio continuar con selfie, pero no aparecio el input de imagen.",
+        )
+
     def _resolve_selfie_retry_root(self, page: Page, previous_root: Page | Frame | Locator) -> Page | Frame | Locator:
+        ready_root = self._find_pre_selfie_context_now(page, previous_root)
+        if ready_root is not None:
+            return ready_root
         current_root = self._resolve_current_flow_context(page, previous_root)
         if self._selfie_phase_visible(current_root):
             return current_root
@@ -2536,6 +2679,15 @@ class Ready4DriveSite(BaseSite):
             self._wait_interval(root, self._POLL_MS)
         return None
 
+    def _has_photo_input_now(self, root: Page | Frame | Locator) -> bool:
+        for selector in self._selectors.photo_inputs:
+            try:
+                if root.locator(selector).count() > 0:
+                    return True
+            except Exception:
+                continue
+        return False
+
     def _fill_first(self, root: Page | Frame | Locator, selectors: tuple[str, ...], value: str) -> None:
         self._first_locator(root, selectors).fill(value)
 
@@ -2582,6 +2734,14 @@ class Ready4DriveSite(BaseSite):
         except Exception as exc:
             raise Ready4DriveFlowError(phase, error_message) from exc
 
+    def _click_locator_fast_or_resilient(self, locator: Locator, *, phase: str, error_message: str) -> None:
+        try:
+            locator.click(timeout=450)
+            return
+        except Exception:
+            pass
+        self._click_locator_resilient(locator, phase=phase, error_message=error_message)
+
     def _click_by_text_variants(self, root: Page | Frame | Locator, texts: tuple[str, ...]) -> bool:
         for selector in self._selectors_for_texts(texts):
             locator = root.locator(selector).first
@@ -2624,6 +2784,84 @@ class Ready4DriveSite(BaseSite):
                 best_score = score
                 best_locator = locator
         return best_locator if best_score > 0 else None
+
+    def _find_pre_selfie_context_now(self, page: Page, preferred_root=None) -> Page | Frame | Locator | None:
+        labels = self._selectors.verification_start_texts + self._selectors.self_owner_continue_texts
+        candidates = [preferred_root]
+        candidates.extend(frame for frame in getattr(page, "frames", ()) if frame is not getattr(page, "main_frame", None))
+        candidates.append(page)
+        seen: set[int] = set()
+        for candidate in candidates:
+            if candidate is None or id(candidate) in seen:
+                continue
+            seen.add(id(candidate))
+            if candidate is preferred_root and self._has_photo_input_now(candidate):
+                return candidate
+            if self._find_fast_text_button(candidate, labels) is not None:
+                return candidate
+            if self._root_is_iframe_flow(candidate) and self._has_photo_input_now(candidate):
+                return candidate
+        return None
+
+    def _resolve_pre_selfie_transition_root(self, page: Page, previous_root: Page | Frame | Locator) -> Page | Frame | Locator:
+        ready_root = self._find_pre_selfie_context_now(page, previous_root)
+        if ready_root is not None:
+            return ready_root
+        # A loading verification frame needs polling, not a scan for later block details.
+        try:
+            if isinstance(previous_root, Frame) and not previous_root.is_detached():
+                return previous_root
+            if isinstance(previous_root, Locator) and previous_root.count() > 0:
+                return previous_root
+        except Exception:
+            pass
+        if previous_root is page:
+            return previous_root
+        return self._resolve_current_flow_context(page, previous_root)
+
+    def _find_fast_text_button(self, root: Page | Frame | Locator, texts: tuple[str, ...]) -> Locator | None:
+        try:
+            buttons = root.locator("button, [role='button'], a")
+        except Exception:
+            return None
+        labels = [self._normalize_text(text) for text in texts]
+        try:
+            index = buttons.evaluate_all(
+                """(nodes, labels) => {
+                    const norm = (value) => (value || "")
+                        .normalize("NFD")
+                        .replace(/[\\u0300-\\u036f]/g, "")
+                        .replace(/\\s+/g, " ")
+                        .trim()
+                        .toLowerCase();
+                    let bestIndex = -1;
+                    let bestScore = 0;
+                    for (let index = 0; index < nodes.length; index += 1) {
+                        const node = nodes[index];
+                        const rect = node.getBoundingClientRect();
+                        const style = window.getComputedStyle(node);
+                        if (rect.width < 2 || rect.height < 2 || style.visibility === "hidden" || style.display === "none") {
+                            continue;
+                        }
+                        const text = norm(node.innerText || node.textContent || node.getAttribute("aria-label"));
+                        for (const label of labels) {
+                            if (!label) continue;
+                            const score = text === label ? 100 : (text.includes(label) ? 80 : 0);
+                            if (score > bestScore) {
+                                bestScore = score;
+                                bestIndex = index;
+                            }
+                        }
+                    }
+                    return bestIndex;
+                }""",
+                labels,
+            )
+            if isinstance(index, int) and index >= 0:
+                return buttons.nth(index)
+        except Exception:
+            pass
+        return None
 
     def _click_best_text_candidate(self, root: Page | Frame | Locator, texts: tuple[str, ...]) -> bool:
         best_locator = self._find_best_text_candidate(root, texts)

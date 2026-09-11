@@ -144,8 +144,8 @@ class AdminUploaderDialog(ctk.CTkToplevel):
     ) -> None:
         super().__init__(master, fg_color=APP_BG, **kwargs)
         self.title("Admin | Herramientas")
-        self.geometry("1200x820")
-        self.minsize(1040, 720)
+        self.geometry("1040x700")
+        self.minsize(900, 620)
         self._on_test_log = on_test_log
         self._diagnostics_provider = diagnostics_provider
         self._on_refresh_diagnostics = on_refresh_diagnostics
@@ -165,7 +165,7 @@ class AdminUploaderDialog(ctk.CTkToplevel):
         self._storage_health_loading = False
 
         container = ctk.CTkFrame(self, fg_color="transparent")
-        container.pack(fill="both", expand=True, padx=20, pady=20)
+        container.pack(fill="both", expand=True, padx=16, pady=14)
         container.grid_columnconfigure(0, weight=1)
         container.grid_rowconfigure(0, weight=1)
 

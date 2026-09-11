@@ -23,7 +23,19 @@ def _build_window(*, thread=None) -> MainAppWindow:
         "slot_1": ProcessSlotRuntime(slot_id="slot_1", panel=_FakePanel(), thread=thread),
         "slot_2": ProcessSlotRuntime(slot_id="slot_2", panel=_FakePanel(), thread=None),
     }
+    window._safe_after = lambda _delay, callback, **_kwargs: callback()  # type: ignore[method-assign]  # noqa: SLF001
     return window
+
+
+def _run_threads_inline(monkeypatch) -> None:
+    class InlineThread:
+        def __init__(self, target, daemon=None, *args, **kwargs) -> None:
+            self._target = target
+
+        def start(self) -> None:
+            self._target()
+
+    monkeypatch.setattr(window_module.threading, "Thread", InlineThread)
 
 
 def _write_updater_config(
@@ -330,10 +342,11 @@ def test_request_external_update_does_not_close_when_launch_fails(monkeypatch) -
     window._handle_app_close = lambda: closed.append(True)  # type: ignore[method-assign]  # noqa: SLF001
     window._broadcast_status_message = lambda message, color=None: messages.append(message)  # type: ignore[method-assign]  # noqa: SLF001
     monkeypatch.setattr(window_module.messagebox, "showerror", lambda *args, **kwargs: None)
+    _run_threads_inline(monkeypatch)
 
     window.request_external_update()
 
-    assert messages == []
+    assert messages == ["Preparando actualizacion en segundo plano..."]
     assert closed == []
 
 
@@ -348,8 +361,12 @@ def test_request_external_update_launches_helper_shows_message_and_closes(monkey
     window._handle_app_close = lambda: closed.append(True)  # type: ignore[method-assign]  # noqa: SLF001
     window._broadcast_status_message = lambda message, color=None: messages.append(message)  # type: ignore[method-assign]  # noqa: SLF001
     monkeypatch.setattr(window_module.messagebox, "showerror", lambda *args, **kwargs: None)
+    _run_threads_inline(monkeypatch)
 
     window.request_external_update()
 
-    assert messages == ["Actualizando a 2026.06.19.1, la app se reiniciara."]
+    assert messages == [
+        "Preparando actualizacion en segundo plano...",
+        "Actualizando a 2026.06.19.1, la app se reiniciara.",
+    ]
     assert closed == [True]

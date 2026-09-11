@@ -9,6 +9,7 @@ from uuid import uuid4
 from config.settings import Settings, get_settings
 from core.enums import PhotoStatus
 from core.models import PhotoCreate, PhotoRecord, UploadBatchProgress, UploadItemResult
+from services.photo_pool_policy_service import PhotoPoolPolicyService
 from storage.photos_repository import PhotosRepository
 from storage.supabase_client import SupabaseClientProvider
 
@@ -21,11 +22,16 @@ class UploaderService:
         self,
         photos_repository: PhotosRepository | None = None,
         client_provider: SupabaseClientProvider | None = None,
+        pool_policy_service: PhotoPoolPolicyService | None = None,
         settings: Settings | None = None,
     ) -> None:
         self._settings = settings or get_settings()
         self._client_provider = client_provider or SupabaseClientProvider(self._settings)
         self._photos_repository = photos_repository or PhotosRepository(
+            client_provider=self._client_provider,
+            settings=self._settings,
+        )
+        self._pool_policy_service = pool_policy_service or PhotoPoolPolicyService(
             client_provider=self._client_provider,
             settings=self._settings,
         )
@@ -158,8 +164,10 @@ class UploaderService:
         *,
         progress_callback: Callable[[UploadItemResult, str, str], None] | None = None,
     ) -> tuple[UploadItemResult, PhotoCreate | None]:
+        pool_policy = self._pool_policy_service.get_policy()
+        storage_bucket = pool_policy.bucket
         photo_id = str(uuid4())
-        storage_path = f"available/{photo_id}.jpg"
+        storage_path = f"{pool_policy.available_prefix}/{photo_id}.jpg"
         result = UploadItemResult(
             source_path=str(path),
             original_filename=path.name,
@@ -192,7 +200,7 @@ class UploaderService:
 
         try:
             self._upload_binary_with_retries(
-                bucket_name=self._settings.supabase_storage_bucket,
+                bucket_name=storage_bucket,
                 storage_path=storage_path,
                 content=path.read_bytes(),
             )
@@ -219,7 +227,7 @@ class UploaderService:
             )
             return result, None
 
-        return result, self._build_photo_create(path, photo_id, storage_path)
+        return result, self._build_photo_create(path, photo_id, storage_path, storage_bucket)
 
     def _upload_binary_with_retries(
         self,
@@ -251,12 +259,13 @@ class UploaderService:
         path: Path,
         photo_id: str,
         storage_path: str,
+        storage_bucket: str,
     ) -> PhotoCreate:
         return PhotoCreate(
             id=photo_id,
             original_filename=path.name,
             storage_path=storage_path,
-            storage_bucket=self._settings.supabase_storage_bucket,
+            storage_bucket=storage_bucket,
             status=PhotoStatus.AVAILABLE,
             source="uploader_app",
         )
@@ -469,7 +478,7 @@ class UploaderService:
     def _rollback_storage_file(self, storage_path: str) -> str | None:
         try:
             self._client_provider.remove_file(
-                bucket_name=self._settings.supabase_storage_bucket,
+                bucket_name=self._pool_policy_service.get_policy().bucket,
                 storage_path=storage_path,
             )
         except Exception as exc:

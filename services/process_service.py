@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import platform
+import queue
 import threading
 import unicodedata
 from collections.abc import Callable
@@ -177,15 +178,65 @@ class ProcessService:
         except Exception as exc:
             register_log_warning(f"No se pudo crear process_logs inicial: {exc}")
 
-        def should_write_log_update(phase: str) -> bool:
+        log_update_queue: queue.Queue[tuple[str, str] | None] = queue.Queue()
+        log_worker_started = False
+        log_worker_lock = threading.Lock()
+
+        def should_write_log_update(phase: str, message: str) -> bool:
+            signature = (phase, message)
             now = monotonic()
+            if signature == run_context.last_log_update_signature:
+                return False
             if phase in self._IMPORTANT_LOG_PHASES or run_context.last_log_update_at is None:
                 run_context.last_log_update_at = now
+                run_context.last_log_update_signature = signature
                 return True
             if (now - run_context.last_log_update_at) >= self._LOG_UPDATE_MIN_INTERVAL_SECONDS:
                 run_context.last_log_update_at = now
+                run_context.last_log_update_signature = signature
                 return True
             return False
+
+        def drain_log_updates() -> None:
+            while True:
+                item = log_update_queue.get()
+                try:
+                    if item is None:
+                        return
+                    phase, message = item
+                    if run_context.log_record_id is None or not run_context.log_updates_enabled:
+                        continue
+                    try:
+                        run_context.log_service.update_process(run_context.log_record_id, phase=phase, message=message)
+                    except Exception as exc:
+                        run_context.log_updates_enabled = False
+                        register_log_warning(
+                            f"process_logs no disponible para updates en esta ejecucion: {exc}"
+                        )
+                finally:
+                    log_update_queue.task_done()
+
+        def ensure_log_worker_started() -> None:
+            nonlocal log_worker_started
+            with log_worker_lock:
+                if log_worker_started:
+                    return
+                log_worker_started = True
+                threading.Thread(
+                    target=drain_log_updates,
+                    name=f"process-log-updates-{normalized_request.process_id}",
+                    daemon=True,
+                ).start()
+
+        def queue_log_update(phase: str, message: str) -> None:
+            ensure_log_worker_started()
+            log_update_queue.put((phase, message))
+
+        def finish_log_updates() -> None:
+            if not log_worker_started:
+                return
+            log_update_queue.put(None)
+            log_update_queue.join()
 
         def emit(phase: str, message: str) -> None:
             emit_progress(phase, message)
@@ -199,16 +250,10 @@ class ProcessService:
             if (
                 run_context.log_record_id is None
                 or not run_context.log_updates_enabled
-                or not should_write_log_update(phase)
+                or not should_write_log_update(phase, message)
             ):
                 return
-            try:
-                run_context.log_service.update_process(run_context.log_record_id, phase=phase, message=message)
-            except Exception as exc:
-                run_context.log_updates_enabled = False
-                register_log_warning(
-                    f"process_logs no disponible para updates en esta ejecucion: {exc}"
-                )
+            queue_log_update(phase, message)
 
         try:
             emit(
@@ -222,6 +267,7 @@ class ProcessService:
                 progress_callback=emit,
             )
         except Exception as exc:
+            finish_log_updates()
             message = f"Error durante la automatizacion de {site_runner.site_host}: {exc}"
             finished_log = None
             run_context.run_stats.record(
@@ -270,6 +316,7 @@ class ProcessService:
                 "success": site_result.success,
             },
         )
+        finish_log_updates()
         if run_context.log_record_id is not None:
             try:
                 finished_log = run_context.log_service.finish_process(

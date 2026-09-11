@@ -321,7 +321,7 @@ class FormPanel(ctk.CTkFrame):
         menu = tk.Menu(self, tearoff=0)
         menu.add_command(label="Cortar", command=lambda current_entry=entry: self._safe_entry_event(current_entry, "<<Cut>>"))
         menu.add_command(label="Copiar", command=lambda current_entry=entry: self._safe_entry_event(current_entry, "<<Copy>>"))
-        menu.add_command(label="Pegar", command=lambda current_entry=entry: self._safe_entry_event(current_entry, "<<Paste>>"))
+        menu.add_command(label="Pegar", command=lambda current_entry=entry: self._paste_entry_text(current_entry))
         menu.add_separator()
         menu.add_command(label="Seleccionar todo", command=lambda current_entry=entry: self._select_all_entry_text(current_entry))
         self._entry_context_menus.append(menu)
@@ -342,6 +342,44 @@ class FormPanel(ctk.CTkFrame):
         try:
             entry.focus_force()
             entry.event_generate(event_name)
+        except Exception:
+            return
+
+    def _paste_entry_text(self, entry: ctk.CTkEntry) -> None:
+        try:
+            text = entry.clipboard_get()
+        except Exception:
+            return
+        if not text:
+            return
+        self._replace_entry_selection_with_text(entry, text)
+        if entry is self.phone_entry:
+            self._apply_phone_cleanup()
+        elif entry is self.password_entry:
+            self._sanitize_password_in_place()
+
+    @staticmethod
+    def _replace_entry_selection_with_text(entry: ctk.CTkEntry, text: str) -> None:
+        try:
+            entry.focus_force()
+        except Exception:
+            pass
+        try:
+            has_selection = bool(entry.selection_present())
+        except Exception:
+            has_selection = False
+        if has_selection:
+            try:
+                entry.delete("sel.first", "sel.last")
+            except Exception:
+                pass
+        try:
+            entry.insert("insert", text)
+            return
+        except Exception:
+            pass
+        try:
+            entry.insert("end", text)
         except Exception:
             return
 

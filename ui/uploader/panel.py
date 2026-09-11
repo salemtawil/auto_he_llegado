@@ -211,7 +211,7 @@ class UploaderPanel(ctk.CTkFrame):
             )
             self.after(0, lambda: self._finish_upload(results))
         except Exception as exc:
-            self.after(0, lambda: self._handle_unexpected_error(exc))
+            self.after(0, lambda error=exc: self._handle_unexpected_error(error))
 
     def _schedule_progress_update(self, progress: UploadBatchProgress) -> None:
         self._progress_callbacks_received += 1

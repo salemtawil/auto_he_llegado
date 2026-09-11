@@ -5,6 +5,7 @@ from time import monotonic
 from config.settings import Settings, get_settings
 from core.enums import PhotoStatus
 from core.models import PhotoCleanupAudit, PhotoCleanupBatchProgress, PhotoCleanupResult, PhotoRecord
+from services.photo_pool_policy_service import PhotoPoolPolicyService
 from storage.photos_repository import PhotosRepository
 from storage.supabase_client import SupabaseClientProvider
 
@@ -21,11 +22,16 @@ class PhotoCleanupService:
         self,
         photos_repository: PhotosRepository | None = None,
         client_provider: SupabaseClientProvider | None = None,
+        pool_policy_service: PhotoPoolPolicyService | None = None,
         settings: Settings | None = None,
     ) -> None:
         self._settings = settings or get_settings()
         self._client_provider = client_provider or SupabaseClientProvider(self._settings)
         self._photos_repository = photos_repository or PhotosRepository(
+            client_provider=self._client_provider,
+            settings=self._settings,
+        )
+        self._pool_policy_service = pool_policy_service or PhotoPoolPolicyService(
             client_provider=self._client_provider,
             settings=self._settings,
         )
@@ -342,7 +348,7 @@ class PhotoCleanupService:
             response = self._client_provider.execute_response_factory(
                 lambda: self._client_provider.client.rpc(
                     "missing_available_photo_audit",
-                    {"p_active_bucket": self._settings.supabase_storage_bucket},
+                    {"p_active_bucket": self._active_bucket()},
                 )
             )
         except Exception as exc:
@@ -398,7 +404,7 @@ class PhotoCleanupService:
                 lambda: self._client_provider.client.rpc(
                     "discard_missing_available_photos",
                     {
-                        "p_active_bucket": self._settings.supabase_storage_bucket,
+                        "p_active_bucket": self._active_bucket(),
                         "p_limit": limit,
                         "p_reason": self._MISSING_AVAILABLE_REASON,
                         "p_cleaned_by": self._CLEANED_BY,
@@ -449,7 +455,7 @@ class PhotoCleanupService:
                 continue
             try:
                 self._client_provider.remove_file(
-                    bucket_name=self._settings.supabase_storage_bucket,
+                    bucket_name=self._bucket_for_record(record),
                     storage_path=normalized_path,
                 )
             except Exception as exc:
@@ -541,7 +547,7 @@ class PhotoCleanupService:
         for record, item, normalized_path in prepared_items:
             try:
                 self._client_provider.remove_file(
-                    bucket_name=self._settings.supabase_storage_bucket,
+                    bucket_name=self._bucket_for_record(record),
                     storage_path=normalized_path,
                 )
             except Exception as exc:
@@ -579,9 +585,12 @@ class PhotoCleanupService:
         remove_files = getattr(self._client_provider, "remove_files", None)
         if not callable(remove_files):
             return False
+        bucket_name = self._bulk_cleanup_bucket(prepared_items)
+        if not bucket_name:
+            return False
         try:
             remove_files(
-                bucket_name=self._settings.supabase_storage_bucket,
+                bucket_name=bucket_name,
                 storage_paths=[storage_path for _record, _item, storage_path in prepared_items],
             )
         except Exception:
@@ -833,6 +842,19 @@ class PhotoCleanupService:
         result.recent_errors.append(message)
         if len(result.recent_errors) > self._RECENT_ERROR_LIMIT:
             result.recent_errors = result.recent_errors[-self._RECENT_ERROR_LIMIT :]
+
+    def _bucket_for_record(self, record: PhotoRecord) -> str:
+        bucket_name = str(getattr(record, "storage_bucket", "") or "").strip()
+        return bucket_name or self._active_bucket()
+
+    def _bulk_cleanup_bucket(self, prepared_items: list[tuple[PhotoRecord, dict, str]]) -> str | None:
+        buckets = {self._bucket_for_record(record) for record, _item, _path in prepared_items}
+        if len(buckets) != 1:
+            return None
+        return next(iter(buckets))
+
+    def _active_bucket(self) -> str:
+        return self._pool_policy_service.get_policy().bucket
 
     @staticmethod
     def _is_storage_missing_error(message: str) -> bool:

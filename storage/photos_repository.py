@@ -111,14 +111,15 @@ class PhotosRepository:
         )
         return [PhotoRecord.model_validate(row) for row in rows]
 
-    def claim_available(self, *, process_id: str | None = None) -> PhotoRecord:
+    def claim_available(self, *, process_id: str | None = None, active_bucket: str | None = None) -> PhotoRecord:
+        bucket_name = str(active_bucket or self._settings.supabase_storage_bucket).strip()
         try:
             rows = self._client_provider.execute(
                 self._client_provider.client.rpc(
                     "claim_available_photo",
                     {
                         "p_process_id": process_id,
-                        "p_active_bucket": self._settings.supabase_storage_bucket,
+                        "p_active_bucket": bucket_name,
                     },
                 )
             )
@@ -135,7 +136,8 @@ class PhotosRepository:
             ) from exc
         return self._single_row(rows, "No hay fotos disponibles en el pool.")
 
-    def validate_atomic_claim_support(self) -> None:
+    def validate_atomic_claim_support(self, *, active_bucket: str | None = None) -> None:
+        bucket_name = str(active_bucket or self._settings.supabase_storage_bucket).strip()
         try:
             self._client_provider.execute_response(
                 self._client_provider.client.table(self._table)
@@ -148,7 +150,7 @@ class PhotosRepository:
                     {
                         "p_process_id": "__migration_validation__",
                         "p_validate_only": True,
-                        "p_active_bucket": self._settings.supabase_storage_bucket,
+                        "p_active_bucket": bucket_name,
                     },
                 )
             )

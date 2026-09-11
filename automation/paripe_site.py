@@ -75,7 +75,25 @@ class ParipeSelectors:
     own_account_texts: tuple[str, ...] = ("Cuenta propia", "Own account", "Personal account", "Conta propria", "Conta própria")
     selfie_dialog: str = '[role="dialog"][aria-modal="true"]'
     file_input: str = '#user_avatar, input[type="file"]'
-    continue_texts: tuple[str, ...] = ("Continuar", "Continue", "Prosseguir")
+    continue_texts: tuple[str, ...] = (
+        "Continuar",
+        "Continue",
+        "Prosseguir",
+        "Iniciar verificacion",
+        "Iniciar verificación",
+        "Start verification",
+        "Start Verification",
+        "Iniciar verificacao",
+        "Iniciar verificação",
+    )
+    verification_start_texts: tuple[str, ...] = (
+        "Iniciar verificacion",
+        "Iniciar verificación",
+        "Start verification",
+        "Start Verification",
+        "Iniciar verificacao",
+        "Iniciar verificação",
+    )
     details_dialog: str = '[role="dialog"][aria-modal="true"]'
     selfie_instruction_texts: tuple[str, ...] = (
         "para continuar, selecciona una opcion y tomate una foto tipo selfie",
@@ -104,6 +122,27 @@ class ParipeSelectors:
         "conta propria",
         "conta própria",
         "conta emprestada",
+    )
+    owner_verification_texts: tuple[str, ...] = (
+        "Verificacion del propietario de la cuenta",
+        "Verificación del propietario de la cuenta",
+        "Que verifique el propietario de la cuenta",
+        "Verificar con una selfie",
+        "Continuar con selfie",
+        "Owner account verification",
+        "Verify with a selfie",
+        "Continue with selfie",
+        "Verificacao do proprietario da conta",
+        "Verificação do proprietário da conta",
+        "Continuar com selfie",
+    )
+    self_owner_continue_texts: tuple[str, ...] = (
+        "Continuar con selfie",
+        "Verificar con una selfie",
+        "Continue with selfie",
+        "Verify with a selfie",
+        "Continuar com selfie",
+        "Verificar com uma selfie",
     )
     processing_texts: tuple[str, ...] = (
         "validamos su foto",
@@ -190,6 +229,7 @@ class ParipeSite(BaseSite):
     _SELFIE_REBOUND_WAIT_MS = 12_000
     _SELFIE_REBOUND_STABLE_MS = 1_200
     _BLOCK_WAIT_POLL_MS = 75
+    _PRE_SELFIE_POLL_MS = 100
 
     def __init__(
         self,
@@ -557,7 +597,7 @@ class ParipeSite(BaseSite):
     ) -> Locator | None:
         if context is None:
             return None
-        if self._looks_like_body_context(context):
+        if self._body_context_is_dashboard(context, page):
             self._record_timeline_event("dashboard_body_discarded_as_flow_context", source=source)
             return None
         reacquired = self._active_flow_context is None
@@ -1390,6 +1430,84 @@ class ParipeSite(BaseSite):
                 best_button = button
         return best_button if best_score > 0 else None
 
+    def _find_fast_text_button(self, context: Locator, labels: tuple[str, ...]) -> Locator | None:
+        try:
+            buttons = context.locator("button, [role='button'], a")
+        except Exception:
+            return None
+        normalized_labels = [self._normalize_text(label) for label in labels]
+        try:
+            index = buttons.evaluate_all(
+                """(nodes, labels) => {
+                    const norm = (value) => (value || "")
+                        .normalize("NFD")
+                        .replace(/[\\u0300-\\u036f]/g, "")
+                        .replace(/\\s+/g, " ")
+                        .trim()
+                        .toLowerCase();
+                    let bestIndex = -1;
+                    let bestScore = 0;
+                    for (let index = 0; index < nodes.length; index += 1) {
+                        const node = nodes[index];
+                        const rect = node.getBoundingClientRect();
+                        const style = window.getComputedStyle(node);
+                        if (rect.width < 2 || rect.height < 2 || style.visibility === "hidden" || style.display === "none") {
+                            continue;
+                        }
+                        const text = norm(node.innerText || node.textContent || node.getAttribute("aria-label"));
+                        for (const label of labels) {
+                            if (!label) continue;
+                            const score = text === label ? 100 : (text.includes(label) ? 80 : 0);
+                            if (score > bestScore) {
+                                bestScore = score;
+                                bestIndex = index;
+                            }
+                        }
+                    }
+                    return bestIndex;
+                }""",
+                normalized_labels,
+            )
+            if isinstance(index, int) and index >= 0:
+                return buttons.nth(index)
+        except Exception:
+            pass
+        return None
+
+    def _find_pre_selfie_context_now(self, page: Page, preferred_root: Locator | None = None) -> Locator | None:
+        labels = self._selectors.verification_start_texts + self._selectors.self_owner_continue_texts
+        if preferred_root is not None:
+            if self._dialog_has_file_input(preferred_root) or self._find_fast_text_button(preferred_root, labels) is not None:
+                return preferred_root
+        roots = [frame for frame in getattr(page, "frames", ()) if frame is not getattr(page, "main_frame", None)]
+        roots.append(page)
+        for root in roots:
+            try:
+                dialogs = root.locator(self._selectors.selfie_dialog)
+                contexts = [dialogs.nth(index) for index in range(dialogs.count() - 1, -1, -1)]
+                contexts.append(root.locator("body").first)
+            except Exception:
+                continue
+            for context in contexts:
+                if self._find_fast_text_button(context, labels) is not None:
+                    return context
+                if preferred_root is not None and root is not page and "imhere" in (getattr(root, "url", "") or ""):
+                    if self._dialog_has_file_input(context):
+                        return context
+        return None
+
+    def _resolve_pre_selfie_transition_dialog(self, page: Page, previous_dialog: Locator) -> Locator:
+        ready_dialog = self._find_pre_selfie_context_now(page, previous_dialog)
+        if ready_dialog is not None:
+            return ready_dialog
+        # Keep polling the current container while its next screen loads.
+        try:
+            if previous_dialog.count() > 0:
+                return previous_dialog
+        except Exception:
+            pass
+        return self._find_photo_phase_dialog(page) or previous_dialog
+
     def _wait_for_selfie_dialog(self, page: Page, *, timeout_ms: int) -> Locator:
         deadline = monotonic() + (timeout_ms / 1000)
         while monotonic() < deadline:
@@ -1429,6 +1547,12 @@ class ParipeSite(BaseSite):
         partial_signal_at: float | None = None
         resolution_logged = False
         while monotonic() < hard_deadline:
+            self._raise_if_cancelled()
+            if not extension_strict:
+                ready_dialog = self._find_pre_selfie_context_now(page)
+                if ready_dialog is not None:
+                    self._record_engine_resolution(session, None, phase="selfie_stage", source="polling tradicional", note="pre_selfie_ready")
+                    return ready_dialog
             if not waiting_reported:
                 self.emit_progress(
                     progress_callback,
@@ -1639,6 +1763,130 @@ class ParipeSite(BaseSite):
             error_message="No se pudo presionar el boton Continuar en paripe.io.",
         )
 
+    def _complete_pre_selfie_account_step(
+        self,
+        dialog: Locator,
+        *,
+        page: Page,
+        progress_callback: ProgressCallback | None,
+        timeout_ms: int,
+    ) -> Locator:
+        if self._dialog_has_file_input(dialog):
+            return dialog
+        start_button = self._find_fast_text_button(dialog, self._selectors.verification_start_texts)
+        if start_button is None:
+            if self._find_fast_text_button(dialog, self._selectors.self_owner_continue_texts) is not None:
+                return dialog
+            dialog_text = self._safe_normalized_text(dialog)
+            if not self._normalized_contains_any(dialog_text, self._selectors.selfie_option_texts):
+                return dialog
+            start_button = self._find_button_by_labels(dialog, self._selectors.verification_start_texts)
+        if start_button is None:
+            return dialog
+
+        self.emit_progress(progress_callback, phase="account_selection", message="Pantalla previa detectada dentro del flujo. Iniciando verificacion...")
+        self._click_locator_fast_or_resilient(
+            start_button,
+            phase="account_selection",
+            error_message="No se pudo presionar 'Iniciar verificacion' dentro del flujo de paripe.io.",
+        )
+        self._record_timeline_event("pre_selfie_account_step_done", url=page.url)
+        self._record_run_stat("pre_selfie_account_step_done", url=page.url)
+
+        deadline = monotonic() + (min(max(timeout_ms, 8_000), 15_000) / 1000)
+        current_dialog = dialog
+        while monotonic() < deadline:
+            self._raise_if_cancelled()
+            current_dialog = self._resolve_pre_selfie_transition_dialog(page, current_dialog)
+            current_dialog = self._complete_owner_verification_selfie_step(
+                current_dialog,
+                page=page,
+                progress_callback=progress_callback,
+                timeout_ms=timeout_ms,
+            )
+            if self._dialog_has_file_input(current_dialog) or self._count_main_page_file_inputs(page) > 0:
+                self._set_active_flow_context(current_dialog, page=page, source="pre_selfie_account_step")
+                self.emit_progress(progress_callback, phase="photo_upload", message="Input selfie habilitado despues de la verificacion previa.")
+                return current_dialog
+            page.wait_for_timeout(self._PRE_SELFIE_POLL_MS)
+        raise ParipeFlowError(
+            "photo_upload",
+            "Se presiono Iniciar verificacion, pero no aparecio el input de imagen.",
+        )
+
+    def _complete_owner_verification_selfie_step(
+        self,
+        dialog: Locator,
+        *,
+        page: Page,
+        progress_callback: ProgressCallback | None,
+        timeout_ms: int,
+    ) -> Locator:
+        if self._dialog_has_file_input(dialog):
+            return dialog
+        continue_button = self._find_fast_text_button(dialog, self._selectors.self_owner_continue_texts)
+        if continue_button is None:
+            dialog_text = self._safe_normalized_text(dialog)
+            if not self._normalized_contains_any(dialog_text, self._selectors.owner_verification_texts):
+                return dialog
+            continue_button = self._find_button_by_labels(dialog, self._selectors.self_owner_continue_texts)
+        if continue_button is None:
+            continue_button = self._find_pre_selfie_text_candidate(dialog, self._selectors.self_owner_continue_texts)
+        if continue_button is None:
+            return dialog
+
+        self.emit_progress(progress_callback, phase="account_selection", message="Verificacion del propietario detectada. Continuando con selfie propia...")
+        self._click_locator_fast_or_resilient(
+            continue_button,
+            phase="account_selection",
+            error_message="No se pudo presionar 'Continuar con selfie' dentro del flujo de paripe.io.",
+        )
+        self._record_timeline_event("owner_verification_selfie_step_done", url=page.url)
+        self._record_run_stat("owner_verification_selfie_step_done", url=page.url)
+
+        deadline = monotonic() + (min(max(timeout_ms, 8_000), 15_000) / 1000)
+        current_dialog = dialog
+        while monotonic() < deadline:
+            self._raise_if_cancelled()
+            current_dialog = self._resolve_pre_selfie_transition_dialog(page, current_dialog)
+            if self._dialog_has_file_input(current_dialog) or self._count_main_page_file_inputs(page) > 0:
+                self._set_active_flow_context(current_dialog, page=page, source="owner_verification_selfie_step")
+                self.emit_progress(progress_callback, phase="photo_upload", message="Input selfie habilitado despues de continuar con selfie.")
+                return current_dialog
+            page.wait_for_timeout(self._PRE_SELFIE_POLL_MS)
+        raise ParipeFlowError(
+            "photo_upload",
+            "Se eligio continuar con selfie, pero no aparecio el input de imagen.",
+        )
+
+    def _find_pre_selfie_text_candidate(self, context: Locator, labels: tuple[str, ...]) -> Locator | None:
+        candidates = context.locator("button, [role='button'], [role='radio'], label, div, span")
+        try:
+            count = candidates.count()
+        except Exception:
+            return None
+        normalized_labels = tuple(self._normalize_text(label) for label in labels)
+        best_locator: Locator | None = None
+        best_score = 0
+        for index in range(count):
+            candidate = candidates.nth(index)
+            try:
+                if not self._locator_is_clickable_candidate(candidate):
+                    continue
+            except Exception:
+                continue
+            text = self._safe_normalized_text(candidate)
+            score = 0
+            for label in normalized_labels:
+                if text == label:
+                    score = max(score, 100)
+                elif label and label in text:
+                    score = max(score, 80)
+            if score > best_score:
+                best_score = score
+                best_locator = candidate
+        return best_locator if best_score > 0 else None
+
     def _complete_selfie_until_block(
         self,
         page: Page,
@@ -1696,6 +1944,18 @@ class ParipeSite(BaseSite):
             if attempt >= 2:
                 self.emit_progress(progress_callback, phase="photo_upload", message="Selfie subida mas de una vez. Marca de multiples selfies activada.")
                 self.emit_progress(progress_callback, phase="photo_upload", message=f"Reintentando con nueva foto. Intento {attempt_label}.")
+            current_dialog = self._complete_pre_selfie_account_step(
+                current_dialog,
+                page=page,
+                progress_callback=progress_callback,
+                timeout_ms=action_timeout_ms,
+            )
+            current_dialog = self._complete_owner_verification_selfie_step(
+                current_dialog,
+                page=page,
+                progress_callback=progress_callback,
+                timeout_ms=action_timeout_ms,
+            )
             self.emit_progress(progress_callback, phase="photo_upload", message="Modal de selfie detectado. Preparando subida...")
             self._mark_phase_timing("selfie_input_detected", attempt=attempt, url=page.url)
             self._record_run_stat("selfie_input_detected", attempt=attempt, url=page.url)
@@ -2563,6 +2823,14 @@ class ParipeSite(BaseSite):
         except Exception as exc:
             raise ParipeFlowError(phase, error_message) from exc
 
+    def _click_locator_fast_or_resilient(self, locator: Locator, *, phase: str, error_message: str) -> None:
+        try:
+            locator.click(timeout=450)
+            return
+        except Exception:
+            pass
+        self._click_locator_resilient(locator, phase=phase, error_message=error_message)
+
     def _describe_live_dialog(self, dialog: Locator) -> str:
         try:
             tag_name = dialog.evaluate("node => node.tagName.toLowerCase()")
@@ -2575,6 +2843,24 @@ class ParipeSite(BaseSite):
             return dialog.evaluate("node => node.tagName.toLowerCase() === 'body'")
         except Exception:
             return False
+
+    def _safe_locator_document_url(self, locator: Locator) -> str:
+        try:
+            value = locator.evaluate("() => window.location.href")
+        except Exception:
+            return ""
+        return str(value or "")
+
+    def _body_context_is_dashboard(self, context: Locator, page: Page | None) -> bool:
+        if not self._looks_like_body_context(context):
+            return False
+        context_url = self._safe_locator_document_url(context)
+        page_url = self._safe_page_url(page)
+        if context_url and page_url and context_url != page_url:
+            return False
+        if "imhere" in context_url.lower():
+            return False
+        return True
 
     def _collect_selfie_return_signals(self, page: Page, dialog: Locator | None) -> dict[str, bool]:
         if dialog is None:
@@ -3046,7 +3332,7 @@ class ParipeSite(BaseSite):
             return False, f"state_{snapshot.state}"
         if float(snapshot.confidence) < 0.95:
             return False, "low_confidence"
-        if self._looks_like_body_context(context):
+        if self._body_context_is_dashboard(context, page=None):
             return False, "dashboard_body_context"
         required_signals = (
             signals.has_final_button,
@@ -3498,7 +3784,7 @@ class ParipeSite(BaseSite):
         best_context: Locator | None = None
         best_score = -1
         for candidate in candidates:
-            if self._looks_like_body_context(candidate):
+            if self._body_context_is_dashboard(candidate, page):
                 self._record_timeline_event("dashboard_body_discarded_as_block_context", url=page.url)
                 continue
             if not self._context_looks_like_block(candidate):

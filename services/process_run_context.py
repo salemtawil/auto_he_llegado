@@ -124,6 +124,7 @@ class ProcessRunContext:
     log_record_id: int | None = None
     log_updates_enabled: bool = True
     last_log_update_at: float | None = None
+    last_log_update_signature: tuple[str, str] | None = None
 
     def add_warning(self, message: str) -> None:
         self.warnings.append(message)

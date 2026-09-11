@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from config.settings import Settings, get_settings
 from core.models import StorageFolderUsage, StorageHealthSnapshot
+from services.photo_pool_policy_service import PhotoPoolPolicyService
 from storage.photos_repository import PhotosRepository
 from storage.supabase_client import SupabaseClientProvider
 
@@ -13,11 +14,16 @@ class StorageHealthService:
         self,
         photos_repository: PhotosRepository | None = None,
         client_provider: SupabaseClientProvider | None = None,
+        pool_policy_service: PhotoPoolPolicyService | None = None,
         settings: Settings | None = None,
     ) -> None:
         self._settings = settings or get_settings()
         self._client_provider = client_provider or SupabaseClientProvider(self._settings)
         self._photos_repository = photos_repository or PhotosRepository(
+            client_provider=self._client_provider,
+            settings=self._settings,
+        )
+        self._pool_policy_service = pool_policy_service or PhotoPoolPolicyService(
             client_provider=self._client_provider,
             settings=self._settings,
         )
@@ -55,7 +61,7 @@ class StorageHealthService:
         )
 
     def _bucket_names(self) -> list[str]:
-        bucket_names = [self._settings.supabase_storage_bucket]
+        bucket_names = [self._pool_policy_service.get_policy().bucket, self._settings.supabase_storage_bucket]
         bucket_names.extend(self._settings.supabase_legacy_storage_buckets)
         normalized: list[str] = []
         seen: set[str] = set()

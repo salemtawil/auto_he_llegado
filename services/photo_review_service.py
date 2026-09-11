@@ -9,6 +9,7 @@ from config.settings import Settings, get_settings
 from core.enums import PhotoStatus
 from core.models import PhotoCreate
 from services.auth_context import AuthSession, require_current_session
+from services.photo_pool_policy_service import PhotoPoolPolicyService
 from storage.photos_repository import PhotosRepository
 from storage.supabase_client import SupabaseClientProvider
 
@@ -26,6 +27,17 @@ class PhotoBatchRecord:
     status: str
     error_message: str | None = None
     created_at: str | None = None
+    video_sha256: str = ""
+    video_size_bytes: int = 0
+    video_duration_seconds: float = 0.0
+    video_width: int = 0
+    video_height: int = 0
+    video_fingerprint: dict | None = None
+    duplicate_score: float | None = None
+    duplicate_of_batch_id: str | None = None
+    delivery_provider: str = ""
+    delivery_file_id: str = ""
+    delivery_url: str = ""
 
 
 @dataclass(frozen=True)
@@ -63,11 +75,16 @@ class PhotoReviewService:
         self,
         client_provider: SupabaseClientProvider | None = None,
         photos_repository: PhotosRepository | None = None,
+        pool_policy_service: PhotoPoolPolicyService | None = None,
         settings: Settings | None = None,
     ) -> None:
         self._settings = settings or get_settings()
         self._client_provider = client_provider or SupabaseClientProvider(self._settings)
         self._photos_repository = photos_repository or PhotosRepository(
+            client_provider=self._client_provider,
+            settings=self._settings,
+        )
+        self._pool_policy_service = pool_policy_service or PhotoPoolPolicyService(
             client_provider=self._client_provider,
             settings=self._settings,
         )
@@ -82,18 +99,42 @@ class PhotoReviewService:
         user_id: str,
         week_start: date,
         original_video_name: str,
+        video_sha256: str | None = None,
+        video_size_bytes: int | None = None,
+        video_duration_seconds: float | None = None,
+        video_width: int | None = None,
+        video_height: int | None = None,
+        video_fingerprint: dict | None = None,
+        duplicate_score: float | None = None,
+        duplicate_of_batch_id: str | None = None,
     ) -> PhotoBatchRecord:
         batch_id = str(uuid4())
+        payload = {
+            "id": batch_id,
+            "user_id": user_id,
+            "week_start": week_start.isoformat(),
+            "original_video_name": original_video_name,
+            "status": "processing",
+        }
+        optional_payload = {
+            "video_sha256": video_sha256,
+            "video_size_bytes": video_size_bytes,
+            "video_duration_seconds": video_duration_seconds,
+            "video_width": video_width,
+            "video_height": video_height,
+            "video_fingerprint": video_fingerprint,
+            "duplicate_score": duplicate_score,
+            "duplicate_of_batch_id": duplicate_of_batch_id,
+        }
+        payload.update(
+            {
+                key: value
+                for key, value in optional_payload.items()
+                if value is not None
+            }
+        )
         rows = self._client_provider.execute(
-            self._client_provider.client.table(self._batches_table).insert(
-                {
-                    "id": batch_id,
-                    "user_id": user_id,
-                    "week_start": week_start.isoformat(),
-                    "original_video_name": original_video_name,
-                    "status": "processing",
-                }
-            )
+            self._client_provider.client.table(self._batches_table).insert(payload)
         )
         return self._batch_from_row(self._single(rows, "No se creo el lote de fotos."))
 
@@ -163,7 +204,7 @@ class PhotoReviewService:
 
     def upload_candidate_binary(self, *, storage_path: str, content: bytes) -> None:
         self._client_provider.upload_binary(
-            bucket_name=self._settings.supabase_storage_bucket,
+            bucket_name=self._active_bucket(),
             storage_path=storage_path,
             content=content,
             content_type="image/jpeg",
@@ -175,20 +216,46 @@ class PhotoReviewService:
         batch_id: str,
         frames_extracted: int,
         candidates_uploaded: int,
+        delivery_provider: str | None = None,
+        delivery_file_id: str | None = None,
+        delivery_url: str | None = None,
+        status: str = "pending_review",
     ) -> PhotoBatchRecord:
+        payload = {
+            "frames_extracted": frames_extracted,
+            "candidates_uploaded": candidates_uploaded,
+            "status": status,
+            "updated_at": self._utcnow(),
+        }
+        if delivery_provider is not None:
+            payload["delivery_provider"] = delivery_provider
+        if delivery_file_id is not None:
+            payload["delivery_file_id"] = delivery_file_id
+        if delivery_url is not None:
+            payload["delivery_url"] = delivery_url
         rows = self._client_provider.execute(
             self._client_provider.client.table(self._batches_table)
-            .update(
-                {
-                    "frames_extracted": frames_extracted,
-                    "candidates_uploaded": candidates_uploaded,
-                    "status": "pending_review",
-                    "updated_at": self._utcnow(),
-                }
-            )
+            .update(payload)
             .eq("id", batch_id)
         )
         return self._batch_from_row(self._single(rows, "No se actualizo el lote."))
+
+    def list_video_fingerprint_candidates(
+        self,
+        *,
+        user_id: str | None = None,
+        limit: int = 300,
+    ) -> list[dict]:
+        query = (
+            self._client_provider.client.table(self._batches_table)
+            .select("id,user_id,video_sha256,video_fingerprint,original_video_name,created_at")
+            .not_.is_("video_fingerprint", "null")
+            .order("created_at", desc=True)
+            .limit(max(int(limit), 1))
+        )
+        if user_id:
+            query = query.eq("user_id", user_id)
+        return [dict(row) for row in self._client_provider.execute(query)]
 
     def list_review_snapshot(
         self,
@@ -255,13 +322,13 @@ class PhotoReviewService:
         if candidate.status == "approved":
             return candidate
         content = self._client_provider.download_binary(
-            bucket_name=self._settings.supabase_storage_bucket,
+            bucket_name=self._active_bucket(),
             storage_path=candidate.storage_path,
         )
         photo_id = str(uuid4())
         storage_path = f"available/{photo_id}.jpg"
         self._client_provider.upload_binary(
-            bucket_name=self._settings.supabase_storage_bucket,
+            bucket_name=self._active_bucket(),
             storage_path=storage_path,
             content=content,
             content_type="image/jpeg",
@@ -271,7 +338,7 @@ class PhotoReviewService:
                 id=photo_id,
                 original_filename=candidate.original_name,
                 storage_path=storage_path,
-                storage_bucket=self._settings.supabase_storage_bucket,
+                storage_bucket=self._active_bucket(),
                 status=PhotoStatus.AVAILABLE,
                 source="reviewed_video_frame",
             )
@@ -313,7 +380,7 @@ class PhotoReviewService:
             photo_id = str(uuid4())
             available_path = f"available/{photo_id}.jpg"
             self._client_provider.move_file(
-                bucket_name=self._settings.supabase_storage_bucket,
+                bucket_name=self._active_bucket(),
                 from_path=self._normalize_storage_path(candidate.storage_path),
                 to_path=available_path,
             )
@@ -322,7 +389,7 @@ class PhotoReviewService:
                     id=photo_id,
                     original_filename=candidate.original_name,
                     storage_path=available_path,
-                    storage_bucket=self._settings.supabase_storage_bucket,
+                    storage_bucket=self._active_bucket(),
                     status=PhotoStatus.AVAILABLE,
                     source="reviewed_video_frame",
                 )
@@ -400,7 +467,7 @@ class PhotoReviewService:
             ]
             for chunk in self._chunks(storage_paths, self._BULK_ACTION_CHUNK_SIZE):
                 self._client_provider.remove_files(
-                    bucket_name=self._settings.supabase_storage_bucket,
+                    bucket_name=self._active_bucket(),
                     storage_paths=chunk,
                 )
 
@@ -432,7 +499,7 @@ class PhotoReviewService:
             return
         try:
             self._client_provider.remove_file(
-                bucket_name=self._settings.supabase_storage_bucket,
+                bucket_name=self._active_bucket(),
                 storage_path=self._normalize_storage_path(candidate.storage_path),
             )
         except Exception:
@@ -470,7 +537,7 @@ class PhotoReviewService:
         if thumbnail_path.exists():
             return thumbnail_path
         content = self._client_provider.download_binary(
-            bucket_name=self._settings.supabase_storage_bucket,
+            bucket_name=self._active_bucket(),
             storage_path=candidate.storage_path,
         )
         try:
@@ -490,6 +557,9 @@ class PhotoReviewService:
     @staticmethod
     def _normalize_storage_path(storage_path: str) -> str:
         return str(storage_path or "").strip().replace("\\", "/").lstrip("/")
+
+    def _active_bucket(self) -> str:
+        return self._pool_policy_service.get_policy().bucket
 
     def _list_recent_batches(self, limit: int = 20) -> list[PhotoBatchRecord]:
         rows = self._client_provider.execute(
@@ -597,6 +667,17 @@ class PhotoReviewService:
             status=str(row.get("status") or ""),
             error_message=row.get("error_message"),
             created_at=str(row.get("created_at") or "") or None,
+            video_sha256=str(row.get("video_sha256") or ""),
+            video_size_bytes=int(row.get("video_size_bytes") or 0),
+            video_duration_seconds=float(row.get("video_duration_seconds") or 0.0),
+            video_width=int(row.get("video_width") or 0),
+            video_height=int(row.get("video_height") or 0),
+            video_fingerprint=row.get("video_fingerprint") if isinstance(row.get("video_fingerprint"), dict) else None,
+            duplicate_score=None if row.get("duplicate_score") is None else float(row.get("duplicate_score")),
+            duplicate_of_batch_id=row.get("duplicate_of_batch_id"),
+            delivery_provider=str(row.get("delivery_provider") or ""),
+            delivery_file_id=str(row.get("delivery_file_id") or ""),
+            delivery_url=str(row.get("delivery_url") or ""),
         )
 
     @staticmethod

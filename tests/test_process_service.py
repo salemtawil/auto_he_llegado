@@ -469,9 +469,10 @@ def test_execute_compinche_continues_when_log_updates_fail() -> None:
     assert result.success is True
     assert result.process_log_id == 77
     assert progress_events[0][0] == "login"
-    assert progress_events[1][0] == "log_warning"
-    assert "updates" in progress_events[1][1]
-    assert progress_events[2][0] == "photo_upload"
+    assert progress_events[1][0] == "photo_upload"
+    warnings = [message for phase, message in progress_events if phase == "log_warning"]
+    assert warnings
+    assert "updates" in warnings[0]
     assert log_service.finish_calls[0][1]["final_status"] == "success"
 
 

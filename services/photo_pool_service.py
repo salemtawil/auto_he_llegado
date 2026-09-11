@@ -4,6 +4,7 @@ from dataclasses import dataclass
 
 from config.settings import Settings, get_settings
 from core.enums import PhotoStatus
+from services.photo_pool_policy_service import PhotoPoolPolicyService
 from storage.photos_repository import PhotosRepository
 from storage.supabase_client import SupabaseClientProvider
 
@@ -24,6 +25,7 @@ class PhotoPoolService:
         self,
         photos_repository: PhotosRepository | None = None,
         client_provider: SupabaseClientProvider | None = None,
+        pool_policy_service: PhotoPoolPolicyService | None = None,
         settings: Settings | None = None,
     ) -> None:
         self._settings = settings or get_settings()
@@ -32,32 +34,40 @@ class PhotoPoolService:
             client_provider=self._client_provider,
             settings=self._settings,
         )
+        self._pool_policy_service = pool_policy_service or PhotoPoolPolicyService(
+            client_provider=self._client_provider,
+            settings=self._settings,
+        )
 
     def get_snapshot(self) -> PhotoPoolSnapshot:
+        active_bucket = self._pool_policy_service.get_policy().bucket
         old_bucket_name = self._settings.supabase_legacy_storage_buckets[0] if self._settings.supabase_legacy_storage_buckets else ""
-        rpc_snapshot = self._get_snapshot_from_rpc(old_bucket_name=old_bucket_name)
+        rpc_snapshot = self._get_snapshot_from_rpc(active_bucket=active_bucket, old_bucket_name=old_bucket_name)
         if rpc_snapshot is not None:
             return rpc_snapshot
-        new_count, old_count = self._count_available_records_by_bucket(old_bucket_name=old_bucket_name)
+        new_count, old_count = self._count_available_records_by_bucket(
+            active_bucket=active_bucket,
+            old_bucket_name=old_bucket_name,
+        )
         display_count = new_count + old_count
         color, label = self._resolve_state(display_count)
         return PhotoPoolSnapshot(
             available_count=display_count,
             color=color,
             label=label,
-            new_bucket_name=self._settings.supabase_storage_bucket,
+            new_bucket_name=active_bucket,
             new_bucket_count=new_count,
             old_bucket_name=old_bucket_name,
             old_bucket_count=old_count,
         )
 
-    def _get_snapshot_from_rpc(self, *, old_bucket_name: str) -> PhotoPoolSnapshot | None:
+    def _get_snapshot_from_rpc(self, *, active_bucket: str, old_bucket_name: str) -> PhotoPoolSnapshot | None:
         try:
             response = self._client_provider.execute_response_factory(
                 lambda: self._client_provider.client.rpc(
                     "photo_pool_counts",
                     {
-                        "p_active_bucket": self._settings.supabase_storage_bucket,
+                        "p_active_bucket": active_bucket,
                         "p_legacy_bucket": old_bucket_name or None,
                     },
                 )
@@ -76,16 +86,16 @@ class PhotoPoolService:
             available_count=display_count,
             color=color,
             label=label,
-            new_bucket_name=self._settings.supabase_storage_bucket,
+            new_bucket_name=active_bucket,
             new_bucket_count=new_count,
             old_bucket_name=old_bucket_name,
             old_bucket_count=old_count,
         )
 
-    def _count_available_records_by_bucket(self, *, old_bucket_name: str) -> tuple[int, int]:
+    def _count_available_records_by_bucket(self, *, active_bucket: str, old_bucket_name: str) -> tuple[int, int]:
         total_count = self._count_available_rows()
         try:
-            new_count = self._count_available_rows(bucket_name=self._settings.supabase_storage_bucket)
+            new_count = self._count_available_rows(bucket_name=active_bucket)
             old_count = self._count_available_rows(bucket_name=old_bucket_name) if old_bucket_name else 0
             unknown_count = self._count_available_rows(bucket_is_null=True)
         except Exception:

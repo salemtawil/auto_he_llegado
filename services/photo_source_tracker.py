@@ -17,10 +17,16 @@ def reset_photo_source_counts(process_id: str | None) -> None:
         _counts_by_process.pop(process_id, None)
 
 
-def record_photo_source(process_id: str | None, bucket_name: str, settings: Settings | None = None) -> None:
+def record_photo_source(
+    process_id: str | None,
+    bucket_name: str,
+    settings: Settings | None = None,
+    *,
+    active_bucket: str | None = None,
+) -> None:
     if not process_id or not bucket_name:
         return
-    label = _bucket_label(bucket_name, settings or get_settings())
+    label = _bucket_label(bucket_name, settings or get_settings(), active_bucket=active_bucket)
     with _lock:
         _counts_by_process.setdefault(process_id, Counter())[label] += 1
 
@@ -42,9 +48,10 @@ def get_photo_source_summary(process_id: str | None) -> str:
     return " | ".join(parts)
 
 
-def _bucket_label(bucket_name: str, settings: Settings) -> str:
+def _bucket_label(bucket_name: str, settings: Settings, *, active_bucket: str | None = None) -> str:
     normalized = bucket_name.strip()
-    if normalized == settings.supabase_storage_bucket:
+    current_bucket = (active_bucket or settings.supabase_storage_bucket).strip()
+    if normalized == current_bucket:
         if not settings.supabase_legacy_storage_buckets:
             return normalized or "bucket activo"
         return "pool nuevo"

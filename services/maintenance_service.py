@@ -8,6 +8,7 @@ import shutil
 from config.settings import Settings, get_settings
 from core.enums import PhotoStatus
 from core.models import PhotoRecord, PhotoUpdate
+from services.photo_pool_policy_service import PhotoPoolPolicyService
 from storage.photos_repository import PhotosRepository
 from storage.supabase_client import SupabaseClientProvider
 
@@ -19,10 +20,15 @@ class MaintenanceService:
         settings: Settings | None = None,
         photos_repository: PhotosRepository | None = None,
         client_provider: SupabaseClientProvider | None = None,
+        pool_policy_service: PhotoPoolPolicyService | None = None,
     ) -> None:
         self._settings = settings or get_settings()
         self._photos_repository = photos_repository or PhotosRepository(settings=self._settings)
         self._client_provider = client_provider or SupabaseClientProvider(self._settings)
+        self._pool_policy_service = pool_policy_service or PhotoPoolPolicyService(
+            settings=self._settings,
+            client_provider=self._client_provider,
+        )
         self._local_data_dir = self._settings.local_data_dir.resolve()
 
     def audit(
@@ -195,7 +201,7 @@ class MaintenanceService:
             if not dry_run:
                 if current_path != target_path:
                     self._client_provider.move_file(
-                        bucket_name=self._settings.supabase_storage_bucket,
+                        bucket_name=self._bucket_for_record(record),
                         from_path=current_path,
                         to_path=target_path,
                     )
@@ -236,7 +242,7 @@ class MaintenanceService:
 
     def _list_storage_paths(self, folder: str, *, limit: int) -> list[str]:
         entries = self._client_provider.list_files(
-            bucket_name=self._settings.supabase_storage_bucket,
+            bucket_name=self._active_bucket(),
             folder_path=folder,
             limit=limit,
         )
@@ -351,6 +357,13 @@ class MaintenanceService:
     @staticmethod
     def _normalize_storage_path(storage_path: str) -> str:
         return storage_path.replace("\\", "/").lstrip("/")
+
+    def _bucket_for_record(self, record: PhotoRecord) -> str:
+        bucket_name = str(getattr(record, "storage_bucket", "") or "").strip()
+        return bucket_name or self._active_bucket()
+
+    def _active_bucket(self) -> str:
+        return self._pool_policy_service.get_policy().bucket
 
     @staticmethod
     def _measure_path_size(path: Path) -> int:

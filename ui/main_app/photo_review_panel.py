@@ -236,7 +236,7 @@ class PhotoReviewPanel(ctk.CTkFrame):
         try:
             snapshot = self._review_service.list_review_snapshot(
                 status=status,
-                limit=None,
+                limit=max(int(self._display_limit), self.DISPLAY_BATCH_SIZE),
             )
             self.after(0, lambda: self._apply_snapshot(snapshot))
         except Exception as exc:
@@ -245,7 +245,6 @@ class PhotoReviewPanel(ctk.CTkFrame):
     def _apply_snapshot(self, snapshot: PhotoReviewSnapshot) -> None:
         self._snapshot = snapshot
         self._selected_candidate_ids.clear()
-        self._display_limit = self.DISPLAY_BATCH_SIZE
         self._is_loading = False
         self.refresh_button.configure(state="normal", text="Refrescar")
         self.bulk_progress_label.configure(text="")
@@ -261,8 +260,18 @@ class PhotoReviewPanel(ctk.CTkFrame):
         status = self.status_menu.get()
         rendered = min(len(snapshot.candidates), self._display_limit)
         if status == "pending":
-            return f"{rendered}/{len(snapshot.candidates)} pendientes"
-        return f"{rendered}/{len(snapshot.candidates)} fotos"
+            return f"{rendered}/{snapshot.pending_count} pendientes"
+        return f"{rendered}/{self._candidate_total_for_current_filter(snapshot)} fotos"
+
+    def _candidate_total_for_current_filter(self, snapshot: PhotoReviewSnapshot) -> int:
+        status = self.status_menu.get()
+        if status == "approved":
+            return snapshot.approved_count
+        if status == "rejected":
+            return snapshot.rejected_count
+        if status == "all":
+            return snapshot.pending_count + snapshot.approved_count + snapshot.rejected_count
+        return len(snapshot.candidates)
 
     def _render_candidates(self, candidates: list[PhotoCandidateRecord]) -> None:
         self._render_generation += 1
@@ -272,7 +281,8 @@ class PhotoReviewPanel(ctk.CTkFrame):
         self._images.clear()
         visible_candidates = candidates[: self._display_limit]
         self._rendered_candidates = list(visible_candidates)
-        self._update_load_more_button(len(candidates), len(visible_candidates))
+        total_candidates = self._candidate_total_for_current_filter(self._snapshot) if self._snapshot is not None else len(candidates)
+        self._update_load_more_button(total_candidates, len(visible_candidates))
         if not candidates:
             ctk.CTkLabel(
                 self.scroll,
@@ -541,8 +551,7 @@ class PhotoReviewPanel(ctk.CTkFrame):
         if self._snapshot is None:
             return
         self._display_limit += self.DISPLAY_BATCH_SIZE
-        self.status_box.configure(text=self._status_summary(self._snapshot))
-        self._render_candidates(self._snapshot.candidates)
+        self.refresh()
 
     def _update_load_more_button(self, total: int, visible: int) -> None:
         if total > visible:

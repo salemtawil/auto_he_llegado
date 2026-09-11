@@ -90,6 +90,19 @@ class Settings:
     video_frame_interval_seconds: float
     video_max_candidate_frames: int
     video_jpeg_quality: int
+    video_requirement_days: int = 7
+    video_submission_mode: str = "drive"
+    video_min_duration_seconds: float = 10.0
+    video_duplicate_similarity_threshold: float = 0.72
+    video_duplicate_hamming_threshold: int = 10
+    google_drive_auth_mode: str = "oauth"
+    google_drive_service_account_file: Path | None = None
+    google_drive_oauth_client_file: Path | None = None
+    google_drive_oauth_token_file: Path | None = None
+    google_drive_folder_id: str = ""
+    google_drive_share_anyone: bool = False
+    telegram_bot_token: str = ""
+    telegram_chat_id: str = ""
     use_chrome_profile_extension: bool = False
     chrome_profile_dir: Path | None = None
     chrome_executable_path: Path | None = None
@@ -133,6 +146,30 @@ def get_settings() -> Settings:
     )
     if chrome_executable_path is not None and not chrome_executable_path.is_absolute():
         chrome_executable_path = (PROJECT_ROOT / chrome_executable_path).resolve()
+    drive_credentials_value = _get_env("GOOGLE_DRIVE_SERVICE_ACCOUNT_FILE")
+    drive_credentials_path = (
+        Path(drive_credentials_value).expanduser()
+        if drive_credentials_value
+        else None
+    )
+    if drive_credentials_path is not None and not drive_credentials_path.is_absolute():
+        drive_credentials_path = (PROJECT_ROOT / drive_credentials_path).resolve()
+    drive_oauth_client_value = _get_env("GOOGLE_DRIVE_OAUTH_CLIENT_FILE")
+    drive_oauth_client_path = (
+        Path(drive_oauth_client_value).expanduser()
+        if drive_oauth_client_value
+        else None
+    )
+    if drive_oauth_client_path is not None and not drive_oauth_client_path.is_absolute():
+        drive_oauth_client_path = (PROJECT_ROOT / drive_oauth_client_path).resolve()
+    drive_oauth_token_value = _get_env("GOOGLE_DRIVE_OAUTH_TOKEN_FILE")
+    drive_oauth_token_path = (
+        Path(drive_oauth_token_value).expanduser()
+        if drive_oauth_token_value
+        else local_data_dir / "google_drive_token.json"
+    )
+    if not drive_oauth_token_path.is_absolute():
+        drive_oauth_token_path = (PROJECT_ROOT / drive_oauth_token_path).resolve()
 
     return Settings(
         app_name=_get_env("APP_NAME", "auto_he_llegado") or "auto_he_llegado",
@@ -167,9 +204,32 @@ def get_settings() -> Settings:
         supabase_storage_limit_mb=_get_int_env("SUPABASE_STORAGE_LIMIT_MB", 0),
         admin_access_password=_get_env("ADMIN_ACCESS_PASSWORD", "123456987") or "123456987",
         weekly_min_approved_photos=_get_int_env("WEEKLY_MIN_APPROVED_PHOTOS", 20),
+        video_requirement_days=_get_int_env("VIDEO_REQUIREMENT_DAYS", 7),
         video_frame_interval_seconds=_get_float_env("VIDEO_FRAME_INTERVAL_SECONDS", 0.0),
         video_max_candidate_frames=_get_int_env("VIDEO_MAX_CANDIDATE_FRAMES", 300),
         video_jpeg_quality=_get_int_env("VIDEO_JPEG_QUALITY", 88),
+        video_submission_mode=(
+            _get_env("VIDEO_SUBMISSION_MODE", "drive") or "drive"
+        ).lower(),
+        video_min_duration_seconds=_get_float_env("VIDEO_MIN_DURATION_SECONDS", 10.0),
+        video_duplicate_similarity_threshold=_get_float_env(
+            "VIDEO_DUPLICATE_SIMILARITY_THRESHOLD",
+            0.72,
+        ),
+        video_duplicate_hamming_threshold=_get_int_env(
+            "VIDEO_DUPLICATE_HAMMING_THRESHOLD",
+            10,
+        ),
+        google_drive_auth_mode=(
+            _get_env("GOOGLE_DRIVE_AUTH_MODE", "oauth") or "oauth"
+        ).lower(),
+        google_drive_service_account_file=drive_credentials_path,
+        google_drive_oauth_client_file=drive_oauth_client_path,
+        google_drive_oauth_token_file=drive_oauth_token_path,
+        google_drive_folder_id=_get_env("GOOGLE_DRIVE_FOLDER_ID", "") or "",
+        google_drive_share_anyone=_get_bool_env("GOOGLE_DRIVE_SHARE_ANYONE", False),
+        telegram_bot_token=_get_env("TELEGRAM_BOT_TOKEN", "") or "",
+        telegram_chat_id=_get_env("TELEGRAM_CHAT_ID", "") or "",
         use_chrome_profile_extension=_get_bool_env(
             "AUTO_HE_LLEGADO_USE_CHROME_PROFILE_EXTENSION",
             False,

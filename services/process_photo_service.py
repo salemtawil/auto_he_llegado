@@ -8,6 +8,7 @@ from core.enums import PhotoStatus
 from core.exceptions import RepositoryError
 from core.models import PhotoUpdate, ReservedPhoto
 from services.photo_source_tracker import record_photo_source
+from services.photo_pool_policy_service import PhotoPoolPolicyService
 from services.temp_file_service import TempFileService
 from storage.photos_repository import PhotosRepository
 from storage.supabase_client import SupabaseClientProvider
@@ -24,6 +25,7 @@ class ProcessPhotoService:
         photos_repository: PhotosRepository | None = None,
         client_provider: SupabaseClientProvider | None = None,
         temp_file_service: TempFileService | None = None,
+        pool_policy_service: PhotoPoolPolicyService | None = None,
         settings: Settings | None = None,
     ) -> None:
         self._settings = settings or get_settings()
@@ -33,6 +35,10 @@ class ProcessPhotoService:
             settings=self._settings,
         )
         self._temp_file_service = temp_file_service or TempFileService(self._settings)
+        self._pool_policy_service = pool_policy_service or PhotoPoolPolicyService(
+            client_provider=self._client_provider,
+            settings=self._settings,
+        )
         self._atomic_claim_support_validated = False
         self._reserved_storage_buckets: dict[str, tuple[str, str]] = {}
 
@@ -40,7 +46,7 @@ class ProcessPhotoService:
         if self._atomic_claim_support_validated:
             return
         try:
-            self._photos_repository.validate_atomic_claim_support()
+            self._photos_repository.validate_atomic_claim_support(active_bucket=self._active_bucket())
         except RepositoryError as exc:
             if self._is_missing_atomic_claim_function_error(exc):
                 raise RuntimeError(
@@ -63,7 +69,7 @@ class ProcessPhotoService:
             with contextlib.suppress(Exception):
                 reset_client()
         try:
-            self._photos_repository.validate_atomic_claim_support()
+            self._photos_repository.validate_atomic_claim_support(active_bucket=self._active_bucket())
         except RepositoryError as exc:
             return exc
         return None
@@ -91,7 +97,10 @@ class ProcessPhotoService:
         missing_count = 0
         for _attempt in range(self._MAX_RESERVATION_DOWNLOAD_ATTEMPTS):
             try:
-                reserved_photo = self._photos_repository.claim_available(process_id=process_id)
+                reserved_photo = self._photos_repository.claim_available(
+                    process_id=process_id,
+                    active_bucket=self._active_bucket(),
+                )
             except Exception as exc:
                 if missing_count > 0:
                     raise RuntimeError(
@@ -116,7 +125,12 @@ class ProcessPhotoService:
                     reserved_photo.storage_path,
                     storage_bucket,
                 )
-                record_photo_source(process_id, storage_bucket, self._settings)
+                record_photo_source(
+                    process_id,
+                    storage_bucket,
+                    self._settings,
+                    active_bucket=self._active_bucket(),
+                )
             except Exception as exc:
                 if self._is_storage_missing_error(exc):
                     last_missing_error = exc
@@ -202,7 +216,8 @@ class ProcessPhotoService:
         raise RuntimeError(f"No hay bucket configurado para descargar {normalized_path}.")
 
     def _download_bucket_names(self, *, preferred_bucket: str | None = None) -> tuple[str, ...]:
-        bucket_names = [preferred_bucket, self._settings.supabase_storage_bucket]
+        active_bucket = self._active_bucket()
+        bucket_names = [preferred_bucket, active_bucket, self._settings.supabase_storage_bucket]
         bucket_names.extend(self._settings.supabase_legacy_storage_buckets)
         deduped = []
         for bucket_name in bucket_names:
@@ -210,6 +225,9 @@ class ProcessPhotoService:
             if normalized and normalized not in deduped:
                 deduped.append(normalized)
         return tuple(deduped)
+
+    def _active_bucket(self) -> str:
+        return self._pool_policy_service.get_policy().bucket
 
     def _remember_reserved_storage(self, photo_id: str, storage_path: str, storage_bucket: str) -> None:
         self._reserved_storage_buckets[photo_id] = (storage_bucket, self._normalize_storage_path(storage_path))

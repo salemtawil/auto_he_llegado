@@ -267,6 +267,16 @@ class SupabaseClientProvider:
             return dict(data())
         return dict(getattr(bucket, "__dict__", {}) or {})
 
+    def list_buckets(self) -> list[dict[str, Any]]:
+        try:
+            buckets = self._run_storage_operation(lambda: self.client.storage.list_buckets())
+        except Exception as exc:
+            raise SupabaseClientError(
+                "Failed to list Supabase Storage buckets: "
+                f"{self._describe_exception(exc)}"
+            ) from exc
+        return [self._bucket_to_dict(bucket) for bucket in list(buckets or [])]
+
     def download_binary(
         self,
         *,
@@ -291,6 +301,18 @@ class SupabaseClientProvider:
             if self._is_jwt_expired_error(exc) and self._refresh_current_session():
                 return operation()
             raise
+
+    @staticmethod
+    def _bucket_to_dict(bucket: Any) -> dict[str, Any]:
+        if isinstance(bucket, dict):
+            return dict(bucket)
+        data = getattr(bucket, "dict", None)
+        if callable(data):
+            return dict(data())
+        data = getattr(bucket, "model_dump", None)
+        if callable(data):
+            return dict(data())
+        return dict(getattr(bucket, "__dict__", {}) or {})
 
     @staticmethod
     def _describe_exception(exc: Exception) -> str:

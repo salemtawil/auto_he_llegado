@@ -27,6 +27,7 @@ from services.last_result_service import LastResultService
 from services.local_config_service import LocalConfigService
 from services.log_service import LogService
 from services.auth_context import get_current_session
+from services.access_service import AccessService, AccessSnapshot
 from services.background_video_status import get_video_status, set_video_status
 from services.photo_pool_service import PhotoPoolService
 from services.process_service import ProcessService
@@ -50,6 +51,7 @@ from ui.theme import (
     SUCCESS,
     TEXT_MUTED,
     TEXT_PRIMARY,
+    WARNING,
     apply_theme_mode,
 )
 
@@ -77,11 +79,13 @@ class MainAppWindow(ctk.CTk):
         process_service: ProcessService | None = None,
         log_service: LogService | None = None,
         last_result_service: LastResultService | None = None,
+        access_service: AccessService | None = None,
     ) -> None:
         super().__init__()
         self._config_service = config_service or LocalConfigService()
         self._photo_pool_service = photo_pool_service or PhotoPoolService()
         self._process_service = process_service or ProcessService()
+        self._access_service = access_service or AccessService()
         self._video_contribution_service = VideoContributionService()
         self._log_service = log_service or LogService()
         self._last_result_service = last_result_service or LastResultService()
@@ -99,7 +103,10 @@ class MainAppWindow(ctk.CTk):
         self._latest_debug_slot_id = "slot_1"
         self._pending_admin_tab: str | None = None
         self._auth_session = get_current_session()
+        self._access_snapshot: AccessSnapshot | None = None
+        self._process_access_block_reason = "Validando acceso por video..."
         self._video_upload_running = False
+        self._extension_status_refresh_scheduled = False
 
         apply_theme_mode(self._current_config.theme_mode)
         self.title("Auto He Llegado")
@@ -115,9 +122,10 @@ class MainAppWindow(ctk.CTk):
         self.bind("<Configure>", self._handle_window_resize)
         self.protocol("WM_DELETE_WINDOW", self._handle_app_close)
         self._safe_after(150, self.refresh_pool_count)
-        self._safe_after(200, self.refresh_extension_status)
+        self._schedule_extension_status_refresh(200)
         self._safe_after(220, self._prompt_agent_name_if_needed)
         self._safe_after(500, self.refresh_background_video_status)
+        self._safe_after(550, self.refresh_process_access_state)
         self._safe_after(50, lambda: self._apply_responsive_layout(self.winfo_width()))
 
     def _build_header(self) -> None:
@@ -416,11 +424,11 @@ class MainAppWindow(ctk.CTk):
         self._video_upload_running = True
         set_video_status(
             phase="queued",
-            message=f"Video recibido: {video_path.name}. Preparando extraccion...",
+            message=f"Video recibido: {video_path.name}. Preparando envio...",
             is_running=True,
         )
         self._broadcast_status_message(
-            "Video recibido. La extraccion y subida continuan en segundo plano.",
+            "Video recibido. La carga a Drive continua en segundo plano.",
             color=SUCCESS,
         )
         thread = threading.Thread(
@@ -437,33 +445,43 @@ class MainAppWindow(ctk.CTk):
                 progress_callback=self._apply_optional_video_progress,
             )
             photo_count = result.candidates_uploaded
+            message = (
+                f"Video procesado. {photo_count} fotos candidatas listas para revision."
+                if photo_count > 0
+                else "Video enviado a Drive. Admin notificado por Telegram."
+            )
             set_video_status(
                 phase="done",
-                message=f"Video procesado. {photo_count} fotos candidatas listas para revision.",
+                message=message,
                 current=photo_count,
                 total=max(photo_count, 1),
                 is_complete=True,
             )
             self._safe_after(
                 0,
-                lambda: self._broadcast_status_message(
-                    f"Video procesado. {photo_count} fotos candidatas listas para revision.",
-                    color=SUCCESS,
+                lambda: (
+                    self._broadcast_status_message(message, color=SUCCESS),
+                    self.refresh_process_access_state(),
                 ),
             )
         except Exception as exc:
-            error_message = f"No se pudo procesar el video: {exc}"
+            error_message = f"No se pudo enviar el video: {exc}"
             set_video_status(
                 phase="error",
                 message=error_message,
                 is_error=True,
             )
-            self._safe_after(0, lambda message=error_message: self._broadcast_status_message(message, color=ERROR))
+            self._safe_after(
+                0,
+                lambda message=error_message: (
+                    self._broadcast_status_message(message, color=ERROR),
+                    self.refresh_process_access_state(),
+                ),
+            )
         finally:
             self._video_upload_running = False
 
-    @staticmethod
-    def _apply_optional_video_progress(progress: VideoContributionProgress) -> None:
+    def _apply_optional_video_progress(self, progress: VideoContributionProgress) -> None:
         set_video_status(
             phase=progress.phase,
             message=progress.message,
@@ -471,6 +489,36 @@ class MainAppWindow(ctk.CTk):
             total=progress.total,
             is_running=True,
         )
+        if progress.phase == "received":
+            session = self._auth_session or get_current_session()
+            if session is not None and not session.is_admin:
+                self._safe_after(
+                    0,
+                    lambda current_session=session, reason=progress.message: self._grant_temporary_video_access(
+                        current_session,
+                        reason=reason,
+                    ),
+                )
+
+    def _grant_temporary_video_access(self, session, *, reason: str) -> None:
+        if self._is_closing or session.is_admin:
+            return
+        self._access_snapshot = AccessSnapshot(
+            can_use_app=True,
+            needs_weekly_video=False,
+            reason=reason,
+            week_start=AccessService.current_week_start(),
+            profile={
+                "id": session.user_id,
+                "role": session.role,
+                "approved": session.approved,
+                "disabled": session.disabled,
+            },
+            latest_batch={"status": "processing"},
+        )
+        self._process_access_block_reason = ""
+        self._sync_run_button_state()
+        self._broadcast_status_message(reason, color=SUCCESS)
 
     def open_settings_dialog(self) -> None:
         if self._settings_dialog is not None and self._settings_dialog.winfo_exists():
@@ -489,13 +537,21 @@ class MainAppWindow(ctk.CTk):
         if error_message:
             messagebox.showerror("Actualizar app", error_message, parent=self)
             return
+        with contextlib.suppress(Exception):
+            self._broadcast_status_message("Preparando actualizacion en segundo plano...", color=SUCCESS)
+        threading.Thread(target=self._request_external_update_worker, daemon=True).start()
 
+    def _request_external_update_worker(self) -> None:
         try:
             downloaded_update = self._download_update_package_from_github()
         except ReleaseUpdateError as exc:
-            messagebox.showerror("Actualizar app", str(exc), parent=self)
+            self._safe_after(0, lambda error=exc: messagebox.showerror("Actualizar app", str(error), parent=self))
             return
+        self._safe_after(0, lambda current=downloaded_update: self._finish_external_update_request(current))
 
+    def _finish_external_update_request(self, downloaded_update) -> None:
+        if self._is_closing:
+            return
         if not self._launch_integrated_updater(downloaded_update.path):
             return
 
@@ -1000,12 +1056,65 @@ class MainAppWindow(ctk.CTk):
         self.pool_badge.set_snapshot(snapshot)
         self._refresh_header_summary()
 
+    def refresh_process_access_state(self) -> None:
+        if self._is_closing:
+            return
+        session = self._auth_session or get_current_session()
+        if session is None or session.is_admin:
+            self._access_snapshot = None
+            self._process_access_block_reason = ""
+            self._sync_run_button_state()
+            return
+        self._process_access_block_reason = "Validando acceso por video..."
+        self._sync_run_button_state()
+        threading.Thread(target=lambda: self._refresh_process_access_worker(session), daemon=True).start()
+
+    def _refresh_process_access_worker(self, session) -> None:
+        try:
+            snapshot = self._access_service.get_access_snapshot(session)
+            self._safe_after(0, lambda current=snapshot: self._apply_process_access_snapshot(current))
+        except Exception as exc:
+            self._safe_after(0, lambda error=exc: self._apply_process_access_error(error))
+
+    def _apply_process_access_snapshot(self, snapshot: AccessSnapshot) -> None:
+        self._access_snapshot = snapshot
+        self._process_access_block_reason = "" if snapshot.can_use_app else snapshot.reason
+        self._sync_run_button_state()
+        if not snapshot.can_use_app:
+            self._broadcast_status_message(snapshot.reason, color=WARNING)
+
+    def _apply_process_access_error(self, exc: Exception) -> None:
+        self._access_snapshot = None
+        self._process_access_block_reason = f"No se pudo validar el acceso por video: {exc}"
+        self._sync_run_button_state()
+        self._broadcast_status_message(self._process_access_block_reason, color=ERROR)
+
+    def _process_access_allows_start(self) -> bool:
+        session = self._auth_session or get_current_session()
+        if session is None:
+            self._process_access_block_reason = "No hay una sesion activa."
+            return False
+        if session.is_admin:
+            return True
+        if self._access_snapshot is None:
+            self._process_access_block_reason = "Validando acceso por video..."
+            self.refresh_process_access_state()
+            return False
+        snapshot = self._access_snapshot
+        self._access_snapshot = snapshot
+        self._process_access_block_reason = "" if snapshot.can_use_app else snapshot.reason
+        return snapshot.can_use_app
+
     def start_process(self, slot_id: str) -> None:
         if self._is_closing:
             return
         slot = self._get_slot(slot_id)
         active_count = self._active_process_count()
         current_flow_engine = (self._current_config.flow_engine or "").strip().lower()
+        if not self._process_access_allows_start():
+            self._set_slot_status(slot_id, self._process_access_block_reason, color=WARNING)
+            self._sync_run_button_state()
+            return
         if slot.thread is not None:
             self._set_slot_status(slot_id, "Este panel ya tiene un proceso en ejecución.", color=ERROR)
             return
@@ -1196,11 +1305,19 @@ class MainAppWindow(ctk.CTk):
             return
         active_count = self._active_process_count()
         current_flow_engine = (self._current_config.flow_engine or "").strip().lower()
+        access_blocked = bool(
+            not self._current_user_is_admin()
+            and (self._access_snapshot is None or not self._access_snapshot.can_use_app)
+        )
         for slot in self._slots.values():
             if slot.thread is not None:
                 slot.panel.run_button.configure(state="disabled")
                 continue
-            disabled = active_count >= 2 or (active_count >= 1 and current_flow_engine != "traditional")
+            disabled = (
+                access_blocked
+                or active_count >= 2
+                or (active_count >= 1 and current_flow_engine != "traditional")
+            )
             slot.panel.run_button.configure(state="disabled" if disabled else "normal")
         self._refresh_header_summary()
 
@@ -1657,6 +1774,16 @@ class MainAppWindow(ctk.CTk):
             text="Extensión" if self._current_config.flow_engine == "extension" else "Tradicional"
         )
 
+    def _schedule_extension_status_refresh(self, delay_ms: int = 1000) -> None:
+        if self._is_closing or getattr(self, "_extension_status_refresh_scheduled", False):
+            return
+        self._extension_status_refresh_scheduled = True
+        self._safe_after(delay_ms, self._run_scheduled_extension_status_refresh)
+
+    def _run_scheduled_extension_status_refresh(self) -> None:
+        self._extension_status_refresh_scheduled = False
+        self.refresh_extension_status()
+
     def refresh_extension_status(self) -> None:
         if self._is_closing:
             return
@@ -1714,7 +1841,7 @@ class MainAppWindow(ctk.CTk):
                 self._set_extension_placeholder(slot_id, "No se pudo actualizar el estado de extension.")
             self._broadcast_status_message(f"No se pudo actualizar el estado de extension: {exc}", color=ERROR)
         finally:
-            self._safe_after(1000, self.refresh_extension_status)
+            self._schedule_extension_status_refresh()
 
     def _safe_after(self, delay_ms: int, callback, *, allow_during_close: bool = False) -> None:
         if self._is_closing and not allow_during_close:
