@@ -55,22 +55,33 @@ jobs:
           cache: pip
 
       - name: Definir version
+        env:
+          REQUESTED_VERSION: ${{ inputs.version }}
         shell: bash
         run: |
-          version="${{ inputs.version }}"
+          version="$REQUESTED_VERSION"
           if [[ -z "$version" ]]; then
             version="1.0.${GITHUB_RUN_NUMBER}"
           fi
           echo "AUTO_HE_LLEGADO_VERSION=$version" >> "$GITHUB_ENV"
 
-      - name: Preparar configuracion privada opcional
+      - name: Preparar configuracion privada
         env:
           MACOS_ENV_FILE_B64: ${{ secrets.MACOS_ENV_FILE_B64 }}
+          MACOS_DRIVE_CLIENT_B64: ${{ secrets.MACOS_DRIVE_CLIENT_B64 }}
+          MACOS_ARTIFACT_KEY_B64: ${{ secrets.MACOS_ARTIFACT_KEY_B64 }}
         shell: bash
         run: |
-          if [[ -n "$MACOS_ENV_FILE_B64" ]]; then
-            printf '%s' "$MACOS_ENV_FILE_B64" | base64 --decode > .env
-          fi
+          python - <<'PY'
+          import base64
+          import os
+          from pathlib import Path
+          for name in ("MACOS_ENV_FILE_B64", "MACOS_DRIVE_CLIENT_B64", "MACOS_ARTIFACT_KEY_B64"):
+              if not os.environ.get(name):
+                  raise SystemExit(f"Falta el secreto {name}")
+          Path(".env").write_bytes(base64.b64decode(os.environ["MACOS_ENV_FILE_B64"]))
+          Path("config/google-drive-oauth-client.json").write_bytes(base64.b64decode(os.environ["MACOS_DRIVE_CLIENT_B64"]))
+          PY
 
       - name: Construir instalador
         env:
@@ -87,12 +98,45 @@ jobs:
             exit 1
           fi
 
+      - name: Probar instalacion y reinstalacion
+        shell: bash
+        run: |
+          set -euo pipefail
+          pkg=(releases/*_Installer_*.pkg)
+          sudo installer -pkg "${pkg[0]}" -target / -verboseR
+          support="$HOME/Library/Application Support/AutoHeLlegado"
+          test -s "$support/.env"
+          test -s "$support/config/google-drive-oauth-client.json"
+          test -x /Applications/AutoHeLlegado.app/Contents/MacOS/AutoHeLlegado
+          codesign --verify --deep --strict /Applications/AutoHeLlegado.app
+          before=$(shasum -a 256 "$support/.env")
+          sudo installer -pkg "${pkg[0]}" -target / -verboseR
+          test "$before" = "$(shasum -a 256 "$support/.env")"
+          /Applications/AutoHeLlegado.app/Contents/MacOS/AutoHeLlegado > "$RUNNER_TEMP/app-startup.log" 2>&1 &
+          app_pid=$!
+          sleep 10
+          if ! kill -0 "$app_pid" 2>/dev/null; then
+            cat "$RUNNER_TEMP/app-startup.log"
+            exit 1
+          fi
+          kill "$app_pid"
+          wait "$app_pid" || true
+
+      - name: Cifrar instaladores privados
+        env:
+          MACOS_ARTIFACT_KEY_B64: ${{ secrets.MACOS_ARTIFACT_KEY_B64 }}
+        shell: bash
+        run: |
+          mkdir -p releases/encrypted
+          for file in releases/*.pkg releases/*_Update_*.zip; do
+            python packaging/macos/private_artifacts.py "$file" "releases/encrypted/$(basename "$file").enc"
+          done
+
       - name: Publicar instalador
         uses: actions/upload-artifact@v4
         with:
           name: AutoHeLlegado-macOS-${{ matrix.arch }}
           path: |
-            releases/*_${{ matrix.arch }}_Installer_*.pkg
-            releases/*_${{ matrix.arch }}_Update_*.zip
+            releases/encrypted/*.enc
           if-no-files-found: error
           retention-days: 30

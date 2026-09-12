@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, time, timezone
+from uuid import uuid4
 
 from config.settings import Settings, get_settings
 from services.access_service import AccessService, VideoRequirementPolicy
@@ -32,6 +33,7 @@ class UserAccessRecord:
     role: str
     approved: bool
     disabled: bool
+    video_exempt: bool = False
     weekly_video: WeeklyVideoRecord | None = None
     created_at: str | None = None
 
@@ -138,6 +140,13 @@ class UserAccessAdminService:
     def make_admin(self, user_id: str) -> UserAccessRecord:
         return self._update_user(user_id, {"role": "admin", "approved": True, "disabled": False})
 
+    def set_video_exempt(self, user_id: str, exempt: bool) -> UserAccessRecord:
+        if exempt:
+            self._create_video_exemption_batch(user_id)
+        else:
+            self._revoke_video_exemption_batches(user_id)
+        return self._update_user(user_id, {"video_exempt": bool(exempt)})
+
     def update_login_id(self, user_id: str, login_id: str) -> UserAccessRecord:
         normalized_login_id = login_id.strip().lower()
         return self._update_user(user_id, {"login_id": normalized_login_id or None})
@@ -177,6 +186,45 @@ class UserAccessAdminService:
         if not rows:
             raise RuntimeError("No se actualizo el video requerido.")
         return self._weekly_video_from_row(rows[0])
+
+    def _create_video_exemption_batch(self, user_id: str) -> None:
+        if not user_id:
+            return
+        policy = self.get_video_requirement_policy()
+        period_start = AccessService.current_requirement_start(policy.days)
+        payload = {
+            "id": str(uuid4()),
+            "user_id": user_id,
+            "week_start": period_start.isoformat(),
+            "original_video_name": "exencion_admin_sin_video",
+            "frames_extracted": 0,
+            "candidates_uploaded": 0,
+            "approved_count": 0,
+            "rejected_count": 0,
+            "status": "accepted",
+            "error_message": "Exencion de video aplicada por admin.",
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }
+        self._client_provider.execute(
+            self._client_provider.client.table(self._batches_table).insert(payload)
+        )
+
+    def _revoke_video_exemption_batches(self, user_id: str) -> None:
+        if not user_id:
+            return
+        payload = {
+            "status": "rejected",
+            "error_message": "Exencion de video revocada por admin.",
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }
+        self._client_provider.execute(
+            self._client_provider.client.table(self._batches_table)
+            .update(payload)
+            .eq("user_id", user_id)
+            .eq("original_video_name", "exencion_admin_sin_video")
+            .in_("status", ["processing", "pending_review", "accepted", "reviewed"])
+        )
 
     def _latest_weekly_video(self, user_id: str, *, cutoff_iso: str | None = None) -> WeeklyVideoRecord | None:
         if not user_id:
@@ -244,6 +292,7 @@ class UserAccessAdminService:
             role=str(row.get("role") or "member"),
             approved=bool(row.get("approved")),
             disabled=bool(row.get("disabled")),
+            video_exempt=bool(row.get("video_exempt")),
             weekly_video=weekly_video,
             created_at=str(row.get("created_at") or "") or None,
         )

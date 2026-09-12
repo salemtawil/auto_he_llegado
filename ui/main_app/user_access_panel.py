@@ -396,9 +396,10 @@ class UserAccessPanel(ctk.CTkFrame):
             font=ctk.CTkFont(size=12, weight="bold"),
             anchor="w",
         ).grid(row=0, column=0, padx=10, pady=(8, 1), sticky="ew")
+        video_exempt_text = " | exento de video" if user.video_exempt else ""
         ctk.CTkLabel(
             row,
-            text=f"{state} | rol {user.role}",
+            text=f"{state} | rol {user.role}{video_exempt_text}",
             text_color=state_color,
             font=ctk.CTkFont(size=12),
             anchor="w",
@@ -500,6 +501,22 @@ class UserAccessPanel(ctk.CTkFrame):
             text_color=TEXT_PRIMARY,
             state="disabled" if not has_video or video_rejected else "normal",
         ).grid(row=1, column=1, pady=(8, 0))
+        ctk.CTkButton(
+            actions,
+            text="Exigir video" if user.video_exempt else "Eximir video",
+            command=lambda current=user: self._run_action(
+                "require_video" if current.video_exempt else "exempt_video",
+                current,
+            ),
+            height=30,
+            width=98,
+            corner_radius=9,
+            font=ctk.CTkFont(size=12),
+            fg_color=NEUTRAL_BUTTON,
+            hover_color=NEUTRAL_BUTTON_HOVER,
+            text_color=TEXT_PRIMARY,
+            state="disabled" if user.disabled or str(user.role).strip().lower() == "admin" else "normal",
+        ).grid(row=2, column=0, columnspan=2, pady=(8, 0), sticky="ew")
         return row
 
     def _run_login_id_update(self, user: UserAccessRecord, login_id: str) -> None:
@@ -530,6 +547,10 @@ class UserAccessPanel(ctk.CTkFrame):
                 self._service.approve_weekly_video(user.id)
             elif action == "reject_video":
                 self._service.reject_weekly_video(user.id)
+            elif action == "exempt_video":
+                self._service.set_video_exempt(user.id, True)
+            elif action == "require_video":
+                self._service.set_video_exempt(user.id, False)
             else:
                 self._service.enable_user(user.id)
             self.after(0, self.refresh)

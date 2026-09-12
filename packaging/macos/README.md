@@ -7,6 +7,7 @@ Generar un instalador `.pkg` para macOS:
 - Instala `AutoHeLlegado.app` en `/Applications`.
 - Guarda configuracion, logs, updater, extension y Playwright en `~/Library/Application Support/AutoHeLlegado`.
 - Conserva `.env` existente cuando se instala una version nueva.
+- Instala tambien la credencial privada de Google Drive indicada en `.env`.
 - Usa exclusivamente Google Chrome instalado en la Mac; no descarga ni incluye Chromium.
 
 Comando:
@@ -100,7 +101,8 @@ SKIP_TESTS=1 packaging/macos/build_portable_macos.sh
 
 - `AutoHeLlegado.app`
 - `.env.example`
-- `.env` si existe en la raiz del proyecto; si no existe, se crea desde `.env.example`
+- `.env` real de la raiz del proyecto; el build se detiene si falta o contiene valores de ejemplo
+- credencial de Google Drive configurada para service account u OAuth
 - `browser_extension/`
 - `sql/`
 - `updater/`
@@ -116,6 +118,7 @@ SKIP_TESTS=1 packaging/macos/build_portable_macos.sh
 - `chrome_profiles/`.
 - Chromium o cualquier navegador embebido.
 - datos reales de `local_data/`, `logs/`, `exports/` o `updates/`.
+- credenciales privadas dentro del ZIP publico de actualizacion.
 
 ## Build automatico en GitHub
 
@@ -126,7 +129,9 @@ El workflow `Build macOS PKG` genera dos instaladores:
 
 Puede ejecutarse manualmente desde la pestana Actions. En cada push a `main` que cambie la app o el empaquetado tambien se construyen ambos paquetes.
 
-Para incluir la configuracion real sin subir `.env` al repositorio, crea el secreto de GitHub `MACOS_ENV_FILE_B64` con el contenido de `.env` codificado en base64. Si el secreto no existe, el instalador incluye `.env.example` como configuracion inicial.
+La compilacion requiere los secretos `MACOS_ENV_FILE_B64` (configuracion), `MACOS_DRIVE_CLIENT_B64` (cliente OAuth de escritorio) y `MACOS_ARTIFACT_KEY_B64` (clave AES de 32 bytes), todos en base64. Nunca se suben esos archivos al repositorio. Los artefactos se cifran antes de publicarlos en Actions y deben descifrarse localmente con `private_artifacts.py --decrypt` y la clave correspondiente. No se incluye el token OAuth personal del administrador.
+
+Antes de publicar artefactos, el workflow prueba instalar y reinstalar el paquete, conservar la configuracion y arrancar la app durante diez segundos. Esta prueba no inicia sesion ni ejecuta automatizaciones.
 
 ## Entrega
 

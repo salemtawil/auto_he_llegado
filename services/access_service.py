@@ -191,6 +191,14 @@ class AccessService:
                 week_start=period_start,
                 profile=profile,
             )
+        if bool(profile.get("video_exempt")):
+            return AccessSnapshot(
+                can_use_app=True,
+                needs_weekly_video=False,
+                reason="Acceso aprobado. Usuario exento de video requerido.",
+                week_start=period_start,
+                profile=profile,
+            )
         if not policy.enabled:
             return AccessSnapshot(
                 can_use_app=True,

@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import ctypes
 import json
+import subprocess
 import sys
 from ctypes import wintypes
 from dataclasses import dataclass
@@ -18,6 +19,8 @@ class RememberedLogin:
 
 
 class LoginCredentialsStore:
+    _KEYCHAIN_SERVICE = "AutoHeLlegado Login"
+
     def __init__(self, settings: Settings | None = None) -> None:
         self._settings = settings or get_settings()
         self._path = self._settings.local_data_dir / "remembered_login.json"
@@ -29,8 +32,12 @@ class LoginCredentialsStore:
         except Exception:
             return RememberedLogin()
         identifier = str(data.get("identifier") or "")
-        encrypted_password = str(data.get("password_dpapi") or "")
-        password = self._decrypt(encrypted_password) if encrypted_password else ""
+        password = ""
+        if bool(data.get("password_keychain")) and identifier:
+            password = self._load_keychain_password(identifier)
+        if not password:
+            encrypted_password = str(data.get("password_dpapi") or "")
+            password = self._decrypt(encrypted_password) if encrypted_password else ""
         return RememberedLogin(identifier=identifier, password=password)
 
     def save(self, *, identifier: str, password: str) -> None:
@@ -39,12 +46,19 @@ class LoginCredentialsStore:
             self.clear()
             return
         payload = {"identifier": normalized_identifier}
-        encrypted_password = self._encrypt(password)
-        if encrypted_password:
-            payload["password_dpapi"] = encrypted_password
+        if sys.platform == "darwin":
+            if self._save_keychain_password(normalized_identifier, password):
+                payload["password_keychain"] = True
+        else:
+            encrypted_password = self._encrypt(password)
+            if encrypted_password:
+                payload["password_dpapi"] = encrypted_password
         self._path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
     def clear(self) -> None:
+        remembered = self.load()
+        if remembered.identifier and sys.platform == "darwin":
+            self._delete_keychain_password(remembered.identifier)
         try:
             self._path.unlink()
         except FileNotFoundError:
@@ -117,3 +131,65 @@ class LoginCredentialsStore:
             return ctypes.string_at(output_blob.pbData, output_blob.cbData)
         finally:
             ctypes.windll.kernel32.LocalFree(output_blob.pbData)
+
+    @classmethod
+    def _save_keychain_password(cls, identifier: str, password: str) -> bool:
+        if sys.platform != "darwin" or not identifier or not password:
+            return False
+        result = subprocess.run(
+            [
+                "security",
+                "add-generic-password",
+                "-U",
+                "-s",
+                cls._KEYCHAIN_SERVICE,
+                "-a",
+                identifier,
+                "-w",
+                password,
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        return result.returncode == 0
+
+    @classmethod
+    def _load_keychain_password(cls, identifier: str) -> str:
+        if sys.platform != "darwin" or not identifier:
+            return ""
+        result = subprocess.run(
+            [
+                "security",
+                "find-generic-password",
+                "-s",
+                cls._KEYCHAIN_SERVICE,
+                "-a",
+                identifier,
+                "-w",
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if result.returncode != 0:
+            return ""
+        return result.stdout.rstrip("\n")
+
+    @classmethod
+    def _delete_keychain_password(cls, identifier: str) -> None:
+        if sys.platform != "darwin" or not identifier:
+            return
+        subprocess.run(
+            [
+                "security",
+                "delete-generic-password",
+                "-s",
+                cls._KEYCHAIN_SERVICE,
+                "-a",
+                identifier,
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )

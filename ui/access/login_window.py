@@ -305,8 +305,8 @@ class LoginWindow(ctk.CTk):
     def _handle_login(self) -> None:
         if self._busy:
             return
-        identifier = self.email_entry.get()
-        password = self.password_entry.get()
+        identifier = self.email_entry.get().strip()
+        password = self.password_entry.get().strip()
         self._set_busy(True, "Validando acceso...")
         thread = threading.Thread(target=lambda: self._login_worker(identifier, password), daemon=True)
         thread.start()
@@ -320,9 +320,9 @@ class LoginWindow(ctk.CTk):
     def _handle_register(self) -> None:
         if self._busy:
             return
-        login_id = self.email_entry.get()
-        email = self.register_email_entry.get()
-        password = self.password_entry.get()
+        login_id = self.email_entry.get().strip()
+        email = self.register_email_entry.get().strip()
+        password = self.password_entry.get().strip()
         self._set_busy(True, "Creando cuenta...")
         thread = threading.Thread(
             target=lambda: self._register_worker(login_id, email, password),
@@ -340,7 +340,12 @@ class LoginWindow(ctk.CTk):
             snapshot = self._access_service.get_access_snapshot(session)
             self.after(0, lambda: self._finish_login(session, snapshot))
         except Exception as exc:
-            self.after(0, lambda error=exc: self._finish_error(f"No se pudo iniciar sesion: {error}"))
+            self.after(
+                0,
+                lambda error=exc: self._finish_error(
+                    f"No se pudo iniciar sesion: {self._friendly_access_error(error)}"
+                ),
+            )
 
     def _render_mode_buttons(self) -> None:
         active_text = ("#FFFFFF", "#FFFFFF")
@@ -373,7 +378,12 @@ class LoginWindow(ctk.CTk):
             )
             self.after(0, lambda current=result: self._finish_register(current.login_id, current.email))
         except Exception as exc:
-            self.after(0, lambda error=exc: self._finish_error(f"No se pudo crear la cuenta: {error}"))
+            self.after(
+                0,
+                lambda error=exc: self._finish_error(
+                    f"No se pudo crear la cuenta: {self._friendly_access_error(error)}"
+                ),
+            )
 
     def _finish_register(self, login_id: str, email: str) -> None:
         self._set_busy(False)
@@ -517,6 +527,24 @@ class LoginWindow(ctk.CTk):
         self.status_label.configure(text=message, text_color=ERROR)
         if self.video_panel.winfo_manager():
             self.video_status_label.configure(text=message, text_color=ERROR)
+
+    @staticmethod
+    def _friendly_access_error(exc: Exception) -> str:
+        message = str(exc).strip()
+        normalized = message.lower()
+        if (
+            "nodename nor servname provided" in normalized
+            or "name or service not known" in normalized
+            or "failed to resolve" in normalized
+            or "getaddrinfo failed" in normalized
+            or "[errno 8]" in normalized
+            or "[errno 11001]" in normalized
+        ):
+            return (
+                "No se pudo conectar con Supabase. Revisa la conexion a internet y que "
+                "SUPABASE_URL este configurado correctamente en esta instalacion."
+            )
+        return message or exc.__class__.__name__
 
     def _set_busy(self, busy: bool, message: str | None = None) -> None:
         self._busy = busy

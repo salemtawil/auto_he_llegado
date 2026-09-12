@@ -213,6 +213,23 @@ def test_admin_can_use_app_without_weekly_video() -> None:
     assert "admin" in snapshot.reason.lower()
 
 
+def test_video_exempt_member_can_use_app_without_weekly_video() -> None:
+    service = _service_with_batch(None)
+    service.get_profile = lambda *, user_id: {  # type: ignore[method-assign]
+        "id": user_id,
+        "approved": True,
+        "disabled": False,
+        "role": "member",
+        "video_exempt": True,
+    }
+
+    snapshot = service.get_access_snapshot(_session())
+
+    assert snapshot.can_use_app is True
+    assert snapshot.needs_weekly_video is False
+    assert "exento" in snapshot.reason.lower()
+
+
 def test_video_requirement_policy_reads_days_from_supabase() -> None:
     service = _service_for_policy(
         _FakePolicyProvider(
@@ -286,3 +303,22 @@ def test_register_member_rejects_existing_login_id_before_signup() -> None:
         raise AssertionError("Expected existing login id to be rejected.")
 
     assert service._client_provider.client.auth.sign_up_payloads == []  # noqa: SLF001
+
+
+def test_register_member_rejects_invalid_login_id_before_network_calls() -> None:
+    service = _service_for_registration()
+
+    try:
+        service.register_member(
+            login_id="alvaro>",
+            email="nuevo@example.com",
+            password="secret123",
+        )
+    except ValueError as exc:
+        assert "3 a 32 caracteres" in str(exc)
+    else:
+        raise AssertionError("Expected invalid login id to be rejected.")
+
+    provider = service._client_provider  # noqa: SLF001
+    assert provider.client.rpc_calls == []
+    assert provider.client.auth.sign_up_payloads == []

@@ -25,7 +25,7 @@ Revisa:
 open "$HOME/Library/Application Support/AutoHeLlegado"
 ```
 
-Si `.env` ya existe, solo verifica sus valores. Si no existe, el instalador lo crea desde `.env.example`.
+Si `.env` ya existe y es valido, se conserva. Si falta o contiene los marcadores de ejemplo conocidos, el instalador copia la configuracion real incluida en el paquete.
 
 ## Requisito de navegador
 
