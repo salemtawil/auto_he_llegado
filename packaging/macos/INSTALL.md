@@ -25,7 +25,7 @@ Revisa:
 open "$HOME/Library/Application Support/AutoHeLlegado"
 ```
 
-Si `.env` ya existe y es valido, se conserva. Si falta o contiene los marcadores de ejemplo conocidos, el instalador copia la configuracion real incluida en el paquete.
+El instalador copia la configuracion real incluida en el paquete en cada instalacion. Si ya existe `.env`, conserva una copia previa como `.env.backup` antes de actualizarlo.
 
 ## Requisito de navegador
 
@@ -57,7 +57,7 @@ open "/ruta/al/AutoHeLlegado_Mac.pkg"
 
 Instala encima con el nuevo `.pkg`.
 
-El instalador reemplaza la app en `/Applications` y actualiza recursos, pero no reemplaza un `.env` existente.
+El instalador reemplaza la app en `/Applications`, actualiza los recursos y reemplaza `.env` con la configuracion incluida. La configuracion anterior queda disponible como `.env.backup`.
 
 ## Opcion de respaldo: portable
 

@@ -6,7 +6,7 @@ Generar un instalador `.pkg` para macOS:
 
 - Instala `AutoHeLlegado.app` en `/Applications`.
 - Guarda configuracion, logs, updater, extension y Playwright en `~/Library/Application Support/AutoHeLlegado`.
-- Conserva `.env` existente cuando se instala una version nueva.
+- Actualiza `.env` con la configuracion incluida en cada instalador y conserva la version anterior como `.env.backup`.
 - Instala tambien la credencial privada de Google Drive indicada en `.env`.
 - Usa exclusivamente Google Chrome instalado en la Mac; no descarga ni incluye Chromium.
 

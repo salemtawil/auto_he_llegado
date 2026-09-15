@@ -110,6 +110,26 @@ if not url.startswith("https://") or ".supabase.co" not in url or any(marker in 
     raise SystemExit("SUPABASE_URL en .env no parece real. Corrige .env antes de construir el instalador.")
 if not key or any(marker in key.lower() for marker in bad_markers):
     raise SystemExit("SUPABASE_KEY en .env no parece real. Corrige .env antes de construir el instalador.")
+
+auth_mode = values.get("GOOGLE_DRIVE_AUTH_MODE", "oauth").strip().lower()
+if auth_mode not in {"oauth", "service_account"}:
+    raise SystemExit("GOOGLE_DRIVE_AUTH_MODE debe ser 'oauth' o 'service_account'.")
+if not values.get("GOOGLE_DRIVE_FOLDER_ID", "").strip():
+    raise SystemExit("Falta configurar GOOGLE_DRIVE_FOLDER_ID en .env.")
+
+credentials_key = (
+    "GOOGLE_DRIVE_OAUTH_CLIENT_FILE"
+    if auth_mode == "oauth"
+    else "GOOGLE_DRIVE_SERVICE_ACCOUNT_FILE"
+)
+configured_file = values.get(credentials_key, "").strip()
+if not configured_file:
+    raise SystemExit(f"Falta configurar {credentials_key} en .env.")
+credentials_path = Path(configured_file).expanduser()
+if not credentials_path.is_absolute():
+    credentials_path = (env_path.parent / credentials_path).resolve()
+if not credentials_path.is_file():
+    raise SystemExit(f"No existe el archivo configurado en {credentials_key}: {credentials_path}")
 PY
 }
 
@@ -265,17 +285,14 @@ if [ -f "$PAYLOAD_ROOT/.env.example" ]; then
   /bin/cp "$PAYLOAD_ROOT/.env.example" "$SUPPORT_DIR/.env.example"
 fi
 
-env_needs_install=0
-if [ ! -f "$SUPPORT_DIR/.env" ]; then
-  env_needs_install=1
-elif /usr/bin/grep -Eq "tu-proyecto|tu-anon|example\.supabase\.co|SUPABASE_URL=$|SUPABASE_KEY=$" "$SUPPORT_DIR/.env"; then
-  env_needs_install=1
-fi
-
-if [ "$env_needs_install" = "1" ]; then
-  if [ -f "$PAYLOAD_ROOT/.env" ]; then
-    /bin/cp "$PAYLOAD_ROOT/.env" "$SUPPORT_DIR/.env"
+if [ -f "$PAYLOAD_ROOT/.env" ]; then
+  if [ -f "$SUPPORT_DIR/.env" ]; then
+    /bin/cp -p "$SUPPORT_DIR/.env" "$SUPPORT_DIR/.env.backup"
   fi
+  /bin/cp "$PAYLOAD_ROOT/.env" "$SUPPORT_DIR/.env"
+elif [ ! -f "$SUPPORT_DIR/.env" ]; then
+  echo "El instalador no contiene .env y tampoco existe una configuracion instalada." >&2
+  exit 1
 fi
 
 /bin/mkdir -p \
@@ -293,6 +310,9 @@ fi
 /bin/chmod -R u+rwX "$SUPPORT_DIR"
 if [ -f "$SUPPORT_DIR/.env" ]; then
   /bin/chmod 600 "$SUPPORT_DIR/.env"
+fi
+if [ -f "$SUPPORT_DIR/.env.backup" ]; then
+  /bin/chmod 600 "$SUPPORT_DIR/.env.backup"
 fi
 /bin/chmod +x "$SUPPORT_DIR/updater/launchers/ActualizarApp.command" 2>/dev/null || true
 /bin/rm -rf "$SUPPORT_DIR/ms-playwright"
