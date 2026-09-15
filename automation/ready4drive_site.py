@@ -13,7 +13,7 @@ import unicodedata
 from automation.base_site import BaseSite, ProgressCallback
 from automation.browser_manager import BrowserManager
 from automation.engines.extension import ExtensionFlowEngine, ExtensionPhaseDecider
-from automation.flow_context import ActiveFlowContext, resolve_live_flow_context
+from automation.flow_context import ActiveFlowContext, resolve_live_flow_context, should_ignore_frame
 from core.models import LocalConfig, ProcessExecutionRequest, ReservedPhoto, SiteExecutionResult
 from services.process_photo_service import ProcessPhotoService
 from playwright.sync_api import Frame, Locator
@@ -2795,11 +2795,11 @@ class Ready4DriveSite(BaseSite):
             if candidate is None or id(candidate) in seen:
                 continue
             seen.add(id(candidate))
-            if candidate is preferred_root and self._has_photo_input_now(candidate):
+            if isinstance(candidate, Frame) and should_ignore_frame(candidate):
+                continue
+            if self._has_photo_input_now(candidate):
                 return candidate
             if self._find_fast_text_button(candidate, labels) is not None:
-                return candidate
-            if self._root_is_iframe_flow(candidate) and self._has_photo_input_now(candidate):
                 return candidate
         return None
 

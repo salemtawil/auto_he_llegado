@@ -93,3 +93,64 @@ def test_buttons_advance_to_hidden_photo_input(browser, monkeypatch, site_type, 
         print(f"{site_type.__name__} owner={owner_step}: button delays={delays}, total={monotonic() - started:.3f}s")
     finally:
         context.close()
+
+
+@pytest.mark.parametrize("site_type", [CompincheSite, Ready4DriveSite, ParipeSite])
+def test_owner_step_follows_replaced_iframe_to_photo_input(browser, site_type):
+    site = site_type()
+    context = browser.new_context()
+    page = context.new_page()
+    start_html = """
+        <div role="dialog" aria-modal="true">
+          <button id="start">Iniciar verificaci&#243;n</button>
+        </div>
+        <script>
+          document.querySelector('#start').onclick = () => parent.postMessage('owner', '*');
+        </script>
+    """
+    owner_html = """
+        <div role="dialog" aria-modal="true">
+          <h2>Verificaci&#243;n del propietario de la cuenta</h2>
+          <button id="selfie">Continuar con selfie</button>
+        </div>
+        <script>
+          document.querySelector('#selfie').onclick = () => parent.postMessage('photo', '*');
+        </script>
+    """
+    photo_html = """
+        <div role="dialog" aria-modal="true">
+          <input type="file" id="user_avatar" hidden>
+          <button>Continuar</button>
+        </div>
+    """
+    try:
+        page.route("https://paripe.io/imhere-light", lambda route: route.fulfill(body=start_html, content_type="text/html"))
+        page.route("https://verify.example/owner", lambda route: route.fulfill(body=owner_html, content_type="text/html"))
+        page.route("https://verify.example/photo", lambda route: route.fulfill(body=photo_html, content_type="text/html"))
+        page.set_content(
+            """
+            <script>
+              window.addEventListener('message', event => {
+                const frame = document.querySelector('iframe');
+                if (event.data === 'owner') frame.src = 'https://verify.example/owner';
+                if (event.data === 'photo') frame.src = 'https://verify.example/photo';
+              });
+            </script>
+            <iframe title="He llegado" src="https://paripe.io/imhere-light"></iframe>
+            """
+        )
+        frame = page.frames[1]
+        frame.locator("#start").wait_for()
+
+        if site_type is ParipeSite:
+            root = site._wait_for_photo_phase(page, progress_callback=None, timeout_ms=1000)
+        else:
+            root = site._wait_for_flow_root(page, site._get_action_spec("He llegado"), timeout_ms=1000).root
+
+        result = site._complete_pre_selfie_account_step(root, page=page, progress_callback=None, timeout_ms=1000)
+
+        assert result.locator("input[type=file]").count() == 1
+        assert "verify.example/photo" in result.evaluate("() => window.location.href")
+        assert site._active_flow_context is not None
+    finally:
+        context.close()

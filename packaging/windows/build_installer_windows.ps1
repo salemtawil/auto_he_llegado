@@ -94,6 +94,39 @@ function Assert-InternalEnvExists {
     if (-not (Test-Path $EnvPath)) {
         throw "No se encontró .env en la raíz del proyecto. Este instalador interno requiere .env para Supabase. Crea .env antes de construir. No se imprimen secretos."
     }
+
+    $values = @{}
+    foreach ($line in Get-Content -Path $EnvPath -Encoding UTF8) {
+        $trimmed = $line.Trim()
+        if ([string]::IsNullOrWhiteSpace($trimmed) -or $trimmed.StartsWith("#") -or -not $trimmed.Contains("=")) {
+            continue
+        }
+        $parts = $trimmed.Split("=", 2)
+        $values[$parts[0].Trim()] = $parts[1].Trim().Trim('"').Trim("'")
+    }
+
+    $supabaseUrl = [string]($values["SUPABASE_URL"])
+    $supabaseKey = [string]($values["SUPABASE_KEY"])
+    $badMarkers = @("tu-proyecto", "tu-anon", "example.supabase.co", "xxxxx", "xxxx")
+    $urlLooksBad = [string]::IsNullOrWhiteSpace($supabaseUrl) -or -not $supabaseUrl.StartsWith("https://") -or -not $supabaseUrl.Contains(".supabase.co")
+    foreach ($marker in $badMarkers) {
+        if ($supabaseUrl.ToLowerInvariant().Contains($marker)) {
+            $urlLooksBad = $true
+        }
+    }
+    if ($urlLooksBad) {
+        throw "SUPABASE_URL en .env no parece real. Corrige .env antes de construir el instalador."
+    }
+
+    $keyLooksBad = [string]::IsNullOrWhiteSpace($supabaseKey)
+    foreach ($marker in $badMarkers) {
+        if ($supabaseKey.ToLowerInvariant().Contains($marker)) {
+            $keyLooksBad = $true
+        }
+    }
+    if ($keyLooksBad) {
+        throw "SUPABASE_KEY en .env no parece real. Corrige .env antes de construir el instalador."
+    }
 }
 
 function Assert-UpdaterConfigIsUsable {

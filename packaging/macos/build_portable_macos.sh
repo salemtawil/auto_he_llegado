@@ -78,6 +78,37 @@ assert_path_exists() {
   fi
 }
 
+assert_internal_env_usable() {
+  local env_path="$PROJECT_ROOT/.env"
+  if [ ! -f "$env_path" ]; then
+    echo "No se encontro .env en la raiz del proyecto. El portable interno requiere .env real para Supabase." >&2
+    exit 1
+  fi
+  "$PYTHON" - "$env_path" <<'PY'
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+env_path = Path(sys.argv[1])
+values: dict[str, str] = {}
+for raw_line in env_path.read_text(encoding="utf-8-sig").splitlines():
+    line = raw_line.strip()
+    if not line or line.startswith("#") or "=" not in line:
+        continue
+    key, value = line.split("=", 1)
+    values[key.strip()] = value.strip().strip('"').strip("'")
+
+url = values.get("SUPABASE_URL", "")
+key = values.get("SUPABASE_KEY", "")
+bad_markers = ("tu-proyecto", "tu-anon", "example.supabase.co", "xxxxx", "xxxx")
+if not url.startswith("https://") or ".supabase.co" not in url or any(marker in url.lower() for marker in bad_markers):
+    raise SystemExit("SUPABASE_URL en .env no parece real. Corrige .env antes de construir el portable.")
+if not key or any(marker in key.lower() for marker in bad_markers):
+    raise SystemExit("SUPABASE_KEY en .env no parece real. Corrige .env antes de construir el portable.")
+PY
+}
+
 copy_tree() {
   local source_dir="$1"
   local target_dir="$2"
@@ -114,6 +145,7 @@ PYTHON="$(find_base_python)"
 run_step "Verificando Python" "$PYTHON" --version
 assert_supported_python "$PYTHON"
 assert_tkinter_available "$PYTHON"
+run_step "Validando .env interno" assert_internal_env_usable
 
 if [ "${AUTO_VENV:-1}" = "1" ] && [ ! -x "$PROJECT_ROOT/.venv/bin/python" ]; then
   run_step "Creando entorno virtual .venv" "$PYTHON" -m venv "$PROJECT_ROOT/.venv"
@@ -173,11 +205,7 @@ if [ -f "$PROJECT_ROOT/.env.example" ]; then
   cp "$PROJECT_ROOT/.env.example" "$PORTABLE_ROOT/.env.example"
 fi
 
-if [ -f "$PROJECT_ROOT/.env" ]; then
-  cp "$PROJECT_ROOT/.env" "$PORTABLE_ROOT/.env"
-elif [ -f "$PROJECT_ROOT/.env.example" ]; then
-  cp "$PROJECT_ROOT/.env.example" "$PORTABLE_ROOT/.env"
-fi
+cp "$PROJECT_ROOT/.env" "$PORTABLE_ROOT/.env"
 
 mkdir -p \
   "$PORTABLE_ROOT/logs" \

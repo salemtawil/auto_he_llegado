@@ -10,7 +10,7 @@ import unicodedata
 from automation.base_site import BaseSite, ProgressCallback
 from automation.browser_manager import BrowserManager
 from automation.engines.extension import ExtensionFlowEngine, ExtensionPhaseDecider
-from automation.flow_context import ActiveFlowContext, resolve_live_flow_context
+from automation.flow_context import ActiveFlowContext, resolve_live_flow_context, should_ignore_frame
 from core.models import LocalConfig, ProcessExecutionRequest, ReservedPhoto, SiteExecutionResult
 from services.process_photo_service import ProcessPhotoService
 
@@ -1482,6 +1482,8 @@ class ParipeSite(BaseSite):
         roots = [frame for frame in getattr(page, "frames", ()) if frame is not getattr(page, "main_frame", None)]
         roots.append(page)
         for root in roots:
+            if root is not page and should_ignore_frame(root):
+                continue
             try:
                 dialogs = root.locator(self._selectors.selfie_dialog)
                 contexts = [dialogs.nth(index) for index in range(dialogs.count() - 1, -1, -1)]
@@ -1491,9 +1493,8 @@ class ParipeSite(BaseSite):
             for context in contexts:
                 if self._find_fast_text_button(context, labels) is not None:
                     return context
-                if preferred_root is not None and root is not page and "imhere" in (getattr(root, "url", "") or ""):
-                    if self._dialog_has_file_input(context):
-                        return context
+                if self._dialog_has_file_input(context):
+                    return context
         return None
 
     def _resolve_pre_selfie_transition_dialog(self, page: Page, previous_dialog: Locator) -> Locator:

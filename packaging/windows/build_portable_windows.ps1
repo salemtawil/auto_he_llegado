@@ -9,6 +9,7 @@ $PortableRoot = Join-Path $DistRoot "AutoHeLlegado"
 $ReleasesRoot = Join-Path $ProjectRoot "releases"
 $Timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
 $ZipPath = Join-Path $ReleasesRoot "AutoHeLlegado_Windows_Portable_$Timestamp.zip"
+$EnvPath = Join-Path $ProjectRoot ".env"
 
 function Get-PythonExe {
     $venvPython = Join-Path $ProjectRoot ".venv\Scripts\python.exe"
@@ -66,6 +67,45 @@ function Assert-PathExists {
     }
 }
 
+function Assert-InternalEnvIsUsable {
+    if (-not (Test-Path $EnvPath)) {
+        throw "No se encontró .env en la raíz del proyecto. El portable interno requiere .env real para Supabase."
+    }
+
+    $values = @{}
+    foreach ($line in Get-Content -Path $EnvPath -Encoding UTF8) {
+        $trimmed = $line.Trim()
+        if ([string]::IsNullOrWhiteSpace($trimmed) -or $trimmed.StartsWith("#") -or -not $trimmed.Contains("=")) {
+            continue
+        }
+        $parts = $trimmed.Split("=", 2)
+        $values[$parts[0].Trim()] = $parts[1].Trim().Trim('"').Trim("'")
+    }
+
+    $supabaseUrl = [string]($values["SUPABASE_URL"])
+    $supabaseKey = [string]($values["SUPABASE_KEY"])
+    $badMarkers = @("tu-proyecto", "tu-anon", "example.supabase.co", "xxxxx", "xxxx")
+    $urlLooksBad = [string]::IsNullOrWhiteSpace($supabaseUrl) -or -not $supabaseUrl.StartsWith("https://") -or -not $supabaseUrl.Contains(".supabase.co")
+    foreach ($marker in $badMarkers) {
+        if ($supabaseUrl.ToLowerInvariant().Contains($marker)) {
+            $urlLooksBad = $true
+        }
+    }
+    if ($urlLooksBad) {
+        throw "SUPABASE_URL en .env no parece real. Corrige .env antes de construir el portable."
+    }
+
+    $keyLooksBad = [string]::IsNullOrWhiteSpace($supabaseKey)
+    foreach ($marker in $badMarkers) {
+        if ($supabaseKey.ToLowerInvariant().Contains($marker)) {
+            $keyLooksBad = $true
+        }
+    }
+    if ($keyLooksBad) {
+        throw "SUPABASE_KEY en .env no parece real. Corrige .env antes de construir el portable."
+    }
+}
+
 function Copy-PortableAssetFromInternal {
     param(
         [Parameter(Mandatory = $true)][string]$RelativePath
@@ -114,6 +154,10 @@ function Write-PortableUpdaterConfig {
 
 Push-Location $ProjectRoot
 try {
+    Invoke-Step -Label "Validando .env interno" -Script {
+        Assert-InternalEnvIsUsable
+    }
+
     Invoke-Step -Label "Validando tests previos" -Script {
         Invoke-Python -Arguments @("-m", "pytest", "tests", "-q")
     }
@@ -179,6 +223,7 @@ try {
         if (Test-Path $envExampleInternal) {
             Copy-Item -Path $envExampleInternal -Destination (Join-Path $PortableRoot ".env.example") -Force
         }
+        Copy-Item -Path $EnvPath -Destination (Join-Path $PortableRoot ".env") -Force
     }
 
     Invoke-Step -Label "Preparando archivos publicos del updater" -Script {
