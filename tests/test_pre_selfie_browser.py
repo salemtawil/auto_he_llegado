@@ -213,3 +213,62 @@ def test_compinche_owner_step_follows_recreated_generic_iframe(browser):
         assert site._active_flow_context is not None
     finally:
         context.close()
+
+
+def test_ready4drive_owner_step_follows_recreated_generic_iframe(browser):
+    site = Ready4DriveSite()
+    context = browser.new_context()
+    page = context.new_page()
+    start_html = """
+        <main>
+          <button id="start">Iniciar verificaci&#243;n</button>
+        </main>
+        <script>
+          document.querySelector('#start').onclick = () => parent.postMessage('owner', '*');
+        </script>
+    """
+    owner_html = """
+        <section aria-modal="true">
+          <h2>Verificaci&#243;n del propietario de la cuenta</h2>
+          <div role="button" id="selfie">Continuar con selfie</div>
+        </section>
+        <script>
+          document.querySelector('#selfie').onclick = () => parent.postMessage('photo', '*');
+        </script>
+    """
+    photo_html = """
+        <section aria-modal="true">
+          <input type="file" id="user_avatar" hidden>
+          <button>Continuar</button>
+        </section>
+    """
+    try:
+        page.route("https://ready4drive-flow.example/start", lambda route: route.fulfill(body=start_html, content_type="text/html"))
+        page.route("https://owner-check.example/ready-step", lambda route: route.fulfill(body=owner_html, content_type="text/html"))
+        page.route("https://owner-check.example/ready-photo", lambda route: route.fulfill(body=photo_html, content_type="text/html"))
+        page.set_content(
+            """
+            <script>
+              window.addEventListener('message', event => {
+                const current = document.querySelector('iframe');
+                if (current) current.remove();
+                const frame = document.createElement('iframe');
+                frame.src = event.data === 'owner'
+                  ? 'https://owner-check.example/ready-step'
+                  : 'https://owner-check.example/ready-photo';
+                document.body.appendChild(frame);
+              });
+            </script>
+            <iframe src="https://ready4drive-flow.example/start"></iframe>
+            """
+        )
+        page.frames[1].locator("#start").wait_for()
+
+        root = site._wait_for_flow_root(page, site._get_action_spec("He llegado"), timeout_ms=1000).root
+        result = site._complete_pre_selfie_account_step(root, page=page, progress_callback=None, timeout_ms=1000)
+
+        assert result.locator("input[type=file]").count() == 1
+        assert "owner-check.example/ready-photo" in result.evaluate("() => window.location.href")
+        assert site._active_flow_context is not None
+    finally:
+        context.close()

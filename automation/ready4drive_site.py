@@ -447,6 +447,14 @@ class Ready4DriveSite(BaseSite):
         except Exception:
             return False
 
+    def _looks_like_top_page_body_context(self, root: Page | Frame | Locator) -> bool:
+        if not self._looks_like_body_context(root):
+            return False
+        try:
+            return bool(root.evaluate("() => window === window.top"))
+        except Exception:
+            return True
+
     def _set_active_flow_context(
         self,
         context: Page | Frame | Locator | None,
@@ -456,7 +464,7 @@ class Ready4DriveSite(BaseSite):
     ) -> Page | Frame | Locator | None:
         if context is None:
             return None
-        if self._looks_like_body_context(context):
+        if self._looks_like_top_page_body_context(context):
             self._record_timeline_event("dashboard_body_discarded_as_flow_context", source=source)
             return None
         current_page = page or (context.page if isinstance(context, Locator) else context.page if hasattr(context, "page") else None)
@@ -2797,11 +2805,31 @@ class Ready4DriveSite(BaseSite):
             seen.add(id(candidate))
             if isinstance(candidate, Frame) and should_ignore_frame(candidate):
                 continue
+            for context in self._iter_pre_selfie_contexts(candidate):
+                if self._has_photo_input_now(context):
+                    return context
+                if self._find_fast_text_button(context, labels) is not None:
+                    return context
             if self._has_photo_input_now(candidate):
                 return candidate
             if self._find_fast_text_button(candidate, labels) is not None:
                 return candidate
         return None
+
+    def _iter_pre_selfie_contexts(self, root: Page | Frame | Locator) -> list[Locator]:
+        contexts: list[Locator] = []
+        try:
+            dialogs = root.locator(", ".join(self._selectors.modal_roots))
+            count = dialogs.count()
+            contexts.extend(dialogs.nth(index) for index in range(count - 1, -1, -1))
+        except Exception:
+            pass
+        try:
+            body = root.locator("body").first
+            contexts.append(body)
+        except Exception:
+            pass
+        return contexts
 
     def _resolve_pre_selfie_transition_root(self, page: Page, previous_root: Page | Frame | Locator) -> Page | Frame | Locator:
         ready_root = self._find_pre_selfie_context_now(page, previous_root)
