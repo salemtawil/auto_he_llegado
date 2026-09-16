@@ -447,6 +447,14 @@ class CompincheSite(BaseSite):
         except Exception:
             pass
 
+    def _owner_selfie_upload_path(self, request: ProcessExecutionRequest) -> Path | None:
+        if not request.owner_selfie_enabled:
+            return None
+        owner_selfie_path = Path(request.owner_selfie_path or "")
+        if not request.owner_selfie_path or not owner_selfie_path.is_file():
+            raise RuntimeError("Selfie titular habilitada, pero no se encontro la foto local del titular.")
+        return owner_selfie_path
+
     def _looks_like_body_context(self, root: Page | Frame | Locator) -> bool:
         if not isinstance(root, Locator):
             return False
@@ -719,10 +727,17 @@ class CompincheSite(BaseSite):
                 phase="account_selection",
                 message="Validacion de cuenta omitida. Continuando directo al flujo.",
             )
-            prepared_photo = self._start_background_photo_preparation(
-                process_id=process_id,
-                progress_callback=progress_callback,
-            )
+            owner_selfie_path = self._owner_selfie_upload_path(request)
+            prepared_photo = None
+            if owner_selfie_path is None:
+                prepared_photo = self._start_background_photo_preparation(
+                    process_id=process_id,
+                    progress_callback=progress_callback,
+                )
+            else:
+                self._record_timeline_event("owner_selfie_primary_upload_enabled", path=str(owner_selfie_path))
+                self._record_run_stat("owner_selfie_primary_upload_enabled", path=str(owner_selfie_path))
+                self.emit_progress(progress_callback, phase="photo_prepare", message="Selfie titular activa: se usara esa foto en el input principal.")
             self.emit_progress(progress_callback, phase="initial_action", message=f"Resolviendo la accion inicial '{action_spec.ui_name}' segun idioma y estructura...")
             frame_count_before_action = len(page.frames)
             self._mark_phase_timing("initial_action_started", action=action_spec.ui_name)
@@ -778,6 +793,7 @@ class CompincheSite(BaseSite):
                 max_selfie_retries=local_config.max_selfie_retries,
                 process_id=process_id,
                 prepared_photo=prepared_photo,
+                owner_selfie_path=owner_selfie_path,
                 extension_assisted=extension_engine_requested and session.extension_loaded,
             )
             self._mark_phase_timing("process_finished", success=result.success, final_status=result.final_status, phase=result.phase)
@@ -818,6 +834,7 @@ class CompincheSite(BaseSite):
         max_selfie_retries: int,
         process_id: str | None = None,
         prepared_photo: BackgroundPhotoPreparation | None = None,
+        owner_selfie_path: Path | None = None,
         extension_assisted: bool = False,
     ) -> SiteExecutionResult:
         reserved_photo: ReservedPhoto | None = None
@@ -848,6 +865,7 @@ class CompincheSite(BaseSite):
                 max_selfie_retries=max_selfie_retries,
                 process_id=process_id,
                 prepared_photo=prepared_photo,
+                owner_selfie_path=owner_selfie_path,
                 session=session,
                 extension_assisted=extension_assisted,
             )
@@ -1435,9 +1453,26 @@ class CompincheSite(BaseSite):
             return False
 
     def _upload_photo(self, root: Page | Frame | Locator, *, reserved_photo: ReservedPhoto, timeout_ms: int, file_input: Locator | None = None) -> None:
+        self._upload_photo_file(
+            root,
+            local_path=Path(reserved_photo.local_path),
+            original_filename=reserved_photo.original_filename,
+            timeout_ms=timeout_ms,
+            file_input=file_input,
+        )
+
+    def _upload_photo_file(
+        self,
+        root: Page | Frame | Locator,
+        *,
+        local_path: Path,
+        original_filename: str,
+        timeout_ms: int,
+        file_input: Locator | None = None,
+    ) -> None:
         file_input = file_input or self._require_photo_input(root, timeout_ms=timeout_ms)
-        file_input.set_input_files(Path(reserved_photo.local_path))
-        if self._wait_for_uploaded_photo(root, file_input, reserved_photo=reserved_photo, timeout_ms=min(timeout_ms, 3_000)):
+        file_input.set_input_files(local_path)
+        if self._wait_for_uploaded_photo(root, file_input, original_filename=original_filename, timeout_ms=min(timeout_ms, 3_000)):
             return
         raise CompincheFlowError("photo_upload", "No se pudo confirmar que la foto quedo cargada antes de continuar.")
 
@@ -1564,6 +1599,7 @@ class CompincheSite(BaseSite):
         max_selfie_retries: int,
         process_id: str | None = None,
         prepared_photo: BackgroundPhotoPreparation | None = None,
+        owner_selfie_path: Path | None = None,
         session=None,
         extension_assisted: bool = False,
     ) -> tuple[Page | Frame | Locator, ReservedPhoto | None, int, bool]:
@@ -1623,33 +1659,49 @@ class CompincheSite(BaseSite):
             self._mark_phase_timing("selfie_input_detected", attempt=attempt, url=page.url)
             self._record_run_stat("selfie_input_detected", attempt=attempt, url=page.url)
             selfie_input_detected_at = monotonic()
-            reserved_photo = self._resolve_prepared_photo(
-                prepared_photo,
-                progress_callback=progress_callback,
-                process_id=process_id,
-            )
+            reserved_photo = None
+            upload_path: Path
+            upload_name: str
+            if owner_selfie_path is not None:
+                upload_path = owner_selfie_path
+                upload_name = owner_selfie_path.name
+                self._record_timeline_event("owner_selfie_primary_upload_used", attempt=attempt, file_name=upload_name)
+                self._record_run_stat("owner_selfie_primary_upload_used", attempt=attempt, file_name=upload_name)
+                self.emit_progress(progress_callback, phase="selfie_stage", message="Usando selfie titular en el input principal.")
+            else:
+                reserved_photo = self._resolve_prepared_photo(
+                    prepared_photo,
+                    progress_callback=progress_callback,
+                    process_id=process_id,
+                )
+                upload_path = Path(reserved_photo.local_path)
+                upload_name = reserved_photo.original_filename
             prepared_photo = None
             try:
                 self.emit_progress(progress_callback, phase="selfie_stage", message="Subiendo la foto dentro del iframe o contenedor activo...")
                 file_input = self._require_photo_input(current_root, timeout_ms=action_timeout_ms)
                 self.emit_progress(progress_callback, phase="selfie_stage", message="Input file encontrado.")
                 self._observe_flow_state(current_root, page, "selfie_input_detected")
-                self.emit_progress(progress_callback, phase="selfie_stage", message=f"Foto usada en intento {attempt}: {reserved_photo.original_filename}.")
-                self._mark_phase_timing("photo_upload_started", attempt=attempt, file_name=reserved_photo.original_filename)
-                self._record_run_stat("photo_upload_started", attempt=attempt, file_name=reserved_photo.original_filename)
+                self.emit_progress(progress_callback, phase="selfie_stage", message=f"Foto usada en intento {attempt}: {upload_name}.")
+                self._mark_phase_timing("photo_upload_started", attempt=attempt, file_name=upload_name)
+                self._record_run_stat("photo_upload_started", attempt=attempt, file_name=upload_name)
                 selfie_input_to_upload_ms = int(max(monotonic() - selfie_input_detected_at, 0.0) * 1000)
                 self._record_timeline_event("selfie_input_to_upload_ms", attempt=attempt, value=selfie_input_to_upload_ms)
                 self._record_run_stat("selfie_input_to_upload_ms", attempt=attempt, value=selfie_input_to_upload_ms)
-                self._upload_photo(current_root, reserved_photo=reserved_photo, timeout_ms=action_timeout_ms, file_input=file_input)
+                if reserved_photo is not None:
+                    self._upload_photo(current_root, reserved_photo=reserved_photo, timeout_ms=action_timeout_ms, file_input=file_input)
+                else:
+                    self._upload_photo_file(current_root, local_path=upload_path, original_filename=upload_name, timeout_ms=action_timeout_ms, file_input=file_input)
                 self.emit_progress(progress_callback, phase="selfie_stage", message="Foto cargada.")
-                self._mark_phase_timing("photo_upload_done", attempt=attempt, file_name=reserved_photo.original_filename)
-                self._record_run_stat("photo_upload_done", attempt=attempt, file_name=reserved_photo.original_filename)
-                self._maybe_handle_owner_selfie_option(
-                    current_root,
-                    request=self._request,
-                    progress_callback=progress_callback,
-                    timeout_ms=action_timeout_ms,
-                )
+                self._mark_phase_timing("photo_upload_done", attempt=attempt, file_name=upload_name)
+                self._record_run_stat("photo_upload_done", attempt=attempt, file_name=upload_name)
+                if owner_selfie_path is None:
+                    self._maybe_handle_owner_selfie_option(
+                        current_root,
+                        request=self._request,
+                        progress_callback=progress_callback,
+                        timeout_ms=action_timeout_ms,
+                    )
                 self.emit_progress(progress_callback, phase="selfie_stage", message="Presionando Continuar para seguir el flujo...")
                 continue_button = self._require_continue_button(current_root)
                 self.emit_progress(progress_callback, phase="selfie_stage", message="Continuar encontrado.")
@@ -2536,7 +2588,7 @@ class CompincheSite(BaseSite):
         block_duration: str,
         selfie_retry_count: int,
         deepfakescore_activated: bool,
-        reserved_photo: ReservedPhoto,
+        reserved_photo: ReservedPhoto | None,
         progress_callback: ProgressCallback | None,
         session=None,
         extension_assisted: bool = False,
@@ -2609,7 +2661,7 @@ class CompincheSite(BaseSite):
                     selfie_retry_count=selfie_retry_count,
                     deepfakescore_retries=selfie_retry_count,
                     deepfakescore_activated=deepfakescore_activated,
-                    reserved_photo_id=reserved_photo.photo_id,
+                    reserved_photo_id=reserved_photo.photo_id if reserved_photo else None,
                 )
             current_root = self._resolve_iframe_final_context(page, iframe_root)
             root_text = self._normalized_root_text(current_root)
@@ -2644,7 +2696,7 @@ class CompincheSite(BaseSite):
                     selfie_retry_count=selfie_retry_count,
                     deepfakescore_retries=selfie_retry_count,
                     deepfakescore_activated=deepfakescore_activated,
-                    reserved_photo_id=reserved_photo.photo_id,
+                    reserved_photo_id=reserved_photo.photo_id if reserved_photo else None,
                 )
             if self._contains_any(root_text, self._selectors.final_failure_texts):
                 raise CompincheFlowError(
@@ -2697,7 +2749,7 @@ class CompincheSite(BaseSite):
                         selfie_retry_count=selfie_retry_count,
                         deepfakescore_retries=selfie_retry_count,
                         deepfakescore_activated=deepfakescore_activated,
-                        reserved_photo_id=reserved_photo.photo_id,
+                        reserved_photo_id=reserved_photo.photo_id if reserved_photo else None,
                     )
             else:
                 inferred_success_since = None
@@ -3389,9 +3441,9 @@ class CompincheSite(BaseSite):
         except Exception:
             return ""
 
-    def _wait_for_uploaded_photo(self, root: Page | Frame | Locator, locator: Locator, *, reserved_photo: ReservedPhoto, timeout_ms: int) -> bool:
+    def _wait_for_uploaded_photo(self, root: Page | Frame | Locator, locator: Locator, *, original_filename: str, timeout_ms: int) -> bool:
         deadline = monotonic() + (timeout_ms / 1000)
-        filename_marker = self._normalize_text(reserved_photo.original_filename)
+        filename_marker = self._normalize_text(original_filename)
         while monotonic() < deadline:
             if self._locator_has_uploaded_file(locator):
                 return True

@@ -3,6 +3,7 @@ from __future__ import annotations
 import threading
 from dataclasses import dataclass, field
 from datetime import datetime
+from pathlib import Path
 from time import monotonic, sleep
 import re
 import unicodedata
@@ -588,6 +589,14 @@ class ParipeSite(BaseSite):
         with suppress(Exception):
             self._photo_service.delete_local_copy(reserved_photo.local_path)
 
+    def _owner_selfie_upload_path(self, request: ProcessExecutionRequest) -> Path | None:
+        if not request.owner_selfie_enabled:
+            return None
+        owner_selfie_path = Path(request.owner_selfie_path or "")
+        if not request.owner_selfie_path or not owner_selfie_path.is_file():
+            raise RuntimeError("Selfie titular habilitada, pero no se encontro la foto local del titular.")
+        return owner_selfie_path
+
     def _set_active_flow_context(
         self,
         context: Locator | None,
@@ -920,10 +929,17 @@ class ParipeSite(BaseSite):
                 message="Validacion de cuenta omitida. Continuando directo al flujo.",
             )
             session.capture_extension_debug(page=page, note="account_selection_skipped")
-            prepared_photo = self._start_background_photo_preparation(
-                process_id=getattr(request, "process_id", None),
-                progress_callback=progress_callback,
-            )
+            owner_selfie_path = self._owner_selfie_upload_path(request)
+            prepared_photo = None
+            if owner_selfie_path is None:
+                prepared_photo = self._start_background_photo_preparation(
+                    process_id=getattr(request, "process_id", None),
+                    progress_callback=progress_callback,
+                )
+            else:
+                self._record_timeline_event("owner_selfie_primary_upload_enabled", path=str(owner_selfie_path))
+                self._record_run_stat("owner_selfie_primary_upload_enabled", path=str(owner_selfie_path))
+                self.emit_progress(progress_callback, phase="photo_prepare", message="Selfie titular activa: se usara esa foto en el input principal.")
 
             action_spec = self._get_action_spec(request.action_name)
             self.emit_progress(progress_callback, phase="initial_action", message=f"Ejecutando accion '{action_spec.ui_name}'...")
@@ -957,6 +973,7 @@ class ParipeSite(BaseSite):
                 max_selfie_retries=local_config.max_selfie_retries,
                 process_id=getattr(request, "process_id", None),
                 prepared_photo=prepared_photo,
+                owner_selfie_path=owner_selfie_path,
                 session=session,
                 extension_assisted=extension_engine_requested and session.extension_loaded,
                 extension_strict=extension_strict,
@@ -1740,9 +1757,17 @@ class ParipeSite(BaseSite):
         return None
 
     def _upload_photo(self, dialog: Locator, reserved_photo: ReservedPhoto, *, timeout_ms: int) -> None:
+        self._upload_photo_file(
+            dialog,
+            local_path=Path(reserved_photo.local_path),
+            original_filename=reserved_photo.original_filename,
+            timeout_ms=timeout_ms,
+        )
+
+    def _upload_photo_file(self, dialog: Locator, *, local_path: Path, original_filename: str, timeout_ms: int) -> None:
         file_input = dialog.locator(self._selectors.file_input).first
         file_input.wait_for(state="attached", timeout=timeout_ms)
-        file_input.set_input_files(reserved_photo.local_path, timeout=timeout_ms)
+        file_input.set_input_files(local_path, timeout=timeout_ms)
         self._wait_for(
             lambda: self._locator_has_files(file_input),
             timeout_ms=timeout_ms,
@@ -1899,6 +1924,7 @@ class ParipeSite(BaseSite):
         max_selfie_retries: int,
         process_id: str | None = None,
         prepared_photo: BackgroundPhotoPreparation | None = None,
+        owner_selfie_path: Path | None = None,
         session=None,
         extension_assisted: bool = False,
         extension_strict: bool = False,
@@ -1961,23 +1987,37 @@ class ParipeSite(BaseSite):
             self._mark_phase_timing("selfie_input_detected", attempt=attempt, url=page.url)
             self._record_run_stat("selfie_input_detected", attempt=attempt, url=page.url)
             selfie_input_detected_at = monotonic()
-            reserved_photo, photo_ready_before_input = self._await_background_photo(
-                prepared_photo,
-                progress_callback=progress_callback,
-                process_id=process_id,
-            )
+            reserved_photo = None
+            photo_ready_before_input = False
+            upload_path: Path
+            upload_name: str
+            if owner_selfie_path is not None:
+                upload_path = owner_selfie_path
+                upload_name = owner_selfie_path.name
+                self._record_timeline_event("owner_selfie_primary_upload_used", attempt=attempt, file_name=upload_name)
+                self._record_run_stat("owner_selfie_primary_upload_used", attempt=attempt, file_name=upload_name)
+                self.emit_progress(progress_callback, phase="photo_upload", message="Usando selfie titular en el input principal.")
+            else:
+                reserved_photo, photo_ready_before_input = self._await_background_photo(
+                    prepared_photo,
+                    progress_callback=progress_callback,
+                    process_id=process_id,
+                )
+                upload_path = Path(reserved_photo.local_path)
+                upload_name = reserved_photo.original_filename
             prepared_photo = None
             try:
-                self.emit_progress(progress_callback, phase="photo_upload", message="Foto reservada y descargada localmente.")
-                self.emit_progress(progress_callback, phase="photo_upload", message=f"Foto usada en intento {attempt}: {reserved_photo.original_filename}.")
+                if reserved_photo is not None:
+                    self.emit_progress(progress_callback, phase="photo_upload", message="Foto reservada y descargada localmente.")
+                self.emit_progress(progress_callback, phase="photo_upload", message=f"Foto usada en intento {attempt}: {upload_name}.")
                 self._record_timeline_event(
                     "photo_ready_before_input",
                     attempt=attempt,
                     ready=photo_ready_before_input,
-                    photo_id=reserved_photo.photo_id,
+                    photo_id=reserved_photo.photo_id if reserved_photo else None,
                 )
-                self._mark_phase_timing("photo_upload_started", attempt=attempt, file_name=reserved_photo.original_filename)
-                self._record_run_stat("photo_upload_started", attempt=attempt, file_name=reserved_photo.original_filename)
+                self._mark_phase_timing("photo_upload_started", attempt=attempt, file_name=upload_name)
+                self._record_run_stat("photo_upload_started", attempt=attempt, file_name=upload_name)
                 self._record_timeline_event(
                     "selfie_input_to_upload_ms",
                     attempt=attempt,
@@ -1988,12 +2028,15 @@ class ParipeSite(BaseSite):
                     attempt=attempt,
                     value=int(max(monotonic() - selfie_input_detected_at, 0.0) * 1000),
                 )
-                self._upload_photo(current_dialog, reserved_photo, timeout_ms=action_timeout_ms)
+                if reserved_photo is not None:
+                    self._upload_photo(current_dialog, reserved_photo, timeout_ms=action_timeout_ms)
+                else:
+                    self._upload_photo_file(current_dialog, local_path=upload_path, original_filename=upload_name, timeout_ms=action_timeout_ms)
                 self.emit_progress(progress_callback, phase="photo_upload", message="Foto cargada.")
                 self._observe_flow_state(current_dialog, page, "selfie_input_detected")
-                self._mark_phase_timing("photo_upload_done", attempt=attempt, file_name=reserved_photo.original_filename)
-                self._record_run_stat("photo_upload_done", attempt=attempt, file_name=reserved_photo.original_filename)
-                self._record_timeline_event("photo_uploaded", file_name=reserved_photo.original_filename)
+                self._mark_phase_timing("photo_upload_done", attempt=attempt, file_name=upload_name)
+                self._record_run_stat("photo_upload_done", attempt=attempt, file_name=upload_name)
+                self._record_timeline_event("photo_uploaded", file_name=upload_name)
                 self.emit_progress(progress_callback, phase="continue_submit", message="Presionando Continuar...")
                 self._click_continue(current_dialog, timeout_ms=action_timeout_ms)
                 continue_clicked_at = monotonic()
