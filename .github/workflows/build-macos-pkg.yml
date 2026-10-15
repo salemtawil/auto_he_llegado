@@ -88,7 +88,12 @@ jobs:
           AUTO_VENV: "0"
           MACOS_TARGET_ARCH: ${{ matrix.arch }}
         shell: bash
-        run: bash packaging/macos/build_installer_macos.sh
+        run: |
+          if [[ "$MACOS_TARGET_ARCH" == "x86_64" ]]; then
+            bash packaging/macos/build_intel_pkg.sh
+          else
+            bash packaging/macos/build_installer_macos.sh
+          fi
 
       - name: Verificar que no se incluyo Chromium
         shell: bash

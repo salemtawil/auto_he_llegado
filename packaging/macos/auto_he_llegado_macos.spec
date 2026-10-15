@@ -31,6 +31,7 @@ packages_to_collect = (
     "pydantic_core",
     "cv2",
     "numpy",
+    "psutil",
 )
 
 for package_name in packages_to_collect:

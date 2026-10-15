@@ -19,6 +19,17 @@ packaging/macos/build_installer_macos.sh
 
 Por defecto genera `x86_64`, que cubre Mac Intel de forma nativa y Apple Silicon con Rosetta.
 
+En una Mac Intel, el punto de entrada dedicado para construir el `.pkg` desde el
+estado actual del proyecto es:
+
+```bash
+bash packaging/macos/build_intel_pkg.sh
+```
+
+Ejecuta las pruebas antes de empaquetar y conserva el `.env` operativo dentro del
+instalador interno. El archivo resultante en `releases/` es confidencial. El build
+debe hacerse en macOS: Windows no puede generar ni validar un `.pkg`.
+
 Para intentar un binario universal nativo Intel + Apple Silicon, usa:
 
 ```bash

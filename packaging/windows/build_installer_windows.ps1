@@ -4,11 +4,13 @@ Set-StrictMode -Version Latest
 $ProjectRoot = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
 $SpecPath = Join-Path $PSScriptRoot "auto_he_llegado.spec"
 $InstallerScriptPath = Join-Path $PSScriptRoot "installer\auto_he_llegado.iss"
-$BuildRoot = Join-Path $ProjectRoot "build\installer_windows"
-$DistRoot = Join-Path $ProjectRoot "dist"
+$DriveConfigScriptPath = Join-Path $PSScriptRoot "stage_drive_config.py"
+$Timestamp = Get-Date -Format "yyyyMMdd_HHmmss_fff"
+$BuildSessionRoot = Join-Path $ProjectRoot "build\installer_windows_$Timestamp"
+$BuildRoot = Join-Path $BuildSessionRoot "work"
+$DistRoot = Join-Path $BuildSessionRoot "dist"
 $DistAppRoot = Join-Path $DistRoot "AutoHeLlegado"
 $ReleasesRoot = Join-Path $ProjectRoot "releases"
-$Timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
 $SetupPath = Join-Path $ReleasesRoot "AutoHeLlegado_Setup_$Timestamp.exe"
 $UpdateZipPath = Join-Path $ReleasesRoot "AutoHeLlegado_Update_$Timestamp.zip"
 $EnvPath = Join-Path $ProjectRoot ".env"
@@ -31,7 +33,8 @@ function Get-InnoSetupExe {
 
     $commonPaths = @(
         "C:\Program Files (x86)\Inno Setup 6\ISCC.exe",
-        "C:\Program Files\Inno Setup 6\ISCC.exe"
+        "C:\Program Files\Inno Setup 6\ISCC.exe",
+        (Join-Path $env:LOCALAPPDATA "Programs\Inno Setup 6\ISCC.exe")
     )
     foreach ($candidate in $commonPaths) {
         if (Test-Path $candidate) {
@@ -260,6 +263,12 @@ try {
         Assert-PathExists -PathValue $EnvExamplePath -Message "No se encontro .env.example en la raiz del proyecto."
         Assert-UpdaterConfigIsUsable -PathValue $UpdaterConfigPath
         Assert-PathExists -PathValue $InstallerScriptPath -Message "No se encontro packaging\windows\installer\auto_he_llegado.iss"
+        Assert-PathExists -PathValue $DriveConfigScriptPath -Message "No se encontro stage_drive_config.py"
+        Invoke-Python -Arguments @(
+            $DriveConfigScriptPath,
+            "--source-env", $EnvPath,
+            "--project-root", $ProjectRoot
+        )
     }
 
     Invoke-Step -Label "Validando tests previos" -Script {
@@ -276,9 +285,12 @@ try {
         Invoke-Python -Arguments @("-m", "py_compile", "ui\main_app\window.py")
     }
 
-    Invoke-Step -Label "Limpiando salidas anteriores del instalador" -Script {
-        Remove-PathIfExists -PathValue $BuildRoot
-        Remove-PathIfExists -PathValue $DistAppRoot
+    Invoke-Step -Label "Preparando salida aislada del instalador" -Script {
+        if ((Test-Path -LiteralPath $BuildSessionRoot) -or
+            (Test-Path -LiteralPath $SetupPath) -or
+            (Test-Path -LiteralPath $UpdateZipPath)) {
+            throw "La salida de este build ya existe. Vuelve a ejecutar el script para generar otro identificador."
+        }
         Ensure-Directory -PathValue $BuildRoot
         Ensure-Directory -PathValue $DistRoot
         Ensure-Directory -PathValue $ReleasesRoot
@@ -286,6 +298,10 @@ try {
 
     Invoke-Step -Label "Verificando PyInstaller e Inno Setup" -Script {
         Invoke-Python -Arguments @("-m", "PyInstaller", "--version")
+        Invoke-Python -Arguments @(
+            "-c",
+            "import googleapiclient.discovery, googleapiclient.http, google.auth.transport.requests, google.oauth2.credentials, google.oauth2.service_account, google_auth_oauthlib.flow"
+        )
         $null = Get-InnoSetupExe
     }
 
@@ -303,7 +319,12 @@ try {
     Invoke-Step -Label "Preparando layout instalable" -Script {
         Copy-UpdaterFilesForInstaller
         Copy-DirectoryContents -SourcePath (Join-Path $ProjectRoot "browser_extension") -TargetPath (Join-Path $DistAppRoot "browser_extension")
-        Copy-Item -Path $EnvPath -Destination (Join-Path $DistAppRoot ".env") -Force
+        Invoke-Python -Arguments @(
+            $DriveConfigScriptPath,
+            "--source-env", $EnvPath,
+            "--project-root", $ProjectRoot,
+            "--stage-root", $DistAppRoot
+        )
         Copy-Item -Path $EnvExamplePath -Destination (Join-Path $DistAppRoot ".env.example") -Force
         Initialize-InstallerRuntimeDirectories
     }
@@ -332,6 +353,7 @@ try {
         Assert-PathExists -PathValue (Join-Path $DistAppRoot "_internal") -Message "Falta dist\AutoHeLlegado\_internal\"
         Assert-PathExists -PathValue (Join-Path $DistAppRoot "updater") -Message "Falta dist\AutoHeLlegado\updater\"
         Assert-PathExists -PathValue (Join-Path $DistAppRoot "browser_extension") -Message "Falta dist\AutoHeLlegado\browser_extension\"
+        Assert-PathExists -PathValue (Join-Path $DistAppRoot "config") -Message "Falta la configuracion privada de Google Drive."
         Assert-PathExists -PathValue (Join-Path $DistAppRoot ".env") -Message "Falta dist\AutoHeLlegado\.env"
         Assert-PathExists -PathValue (Join-Path $DistAppRoot ".env.example") -Message "Falta dist\AutoHeLlegado\.env.example"
         Assert-PathExists -PathValue $SetupPath -Message "No se genero releases\AutoHeLlegado_Setup_$Timestamp.exe"

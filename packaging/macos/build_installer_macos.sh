@@ -349,6 +349,9 @@ if [ "${SKIP_DEP_INSTALL:-0}" != "1" ]; then
 fi
 
 if [ "${SKIP_TESTS:-0}" != "1" ]; then
+  if [ "${SKIP_DEP_INSTALL:-0}" != "1" ]; then
+    run_step "Instalando dependencias de pruebas" "$PYTHON" -m pip install -r requirements-dev.txt -c packaging/macos/constraints-macos.txt
+  fi
   run_step "Ejecutando tests" "$PYTHON" -m pytest tests -q
 fi
 
