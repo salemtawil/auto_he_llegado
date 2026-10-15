@@ -251,6 +251,9 @@ class UploadItemResult(DomainModel):
     original_filename: str
     photo_id: str | None = None
     storage_path: str | None = None
+    # Bucket de destino congelado para el lote; permite contar resultados y
+    # revertir en el bucket correcto aunque cambie el pool activo.
+    storage_bucket: str | None = None
     success: bool
     message: str
     processing_status: str = "Pendiente"
@@ -281,6 +284,9 @@ class LocalConfig(DomainModel):
     agent_name: str = "Agente Local"
     agent_name_confirmed: bool = False
     flow_engine: str = "traditional"
+    # Version de las automatizaciones: "v1" son las de siempre, "v2" las
+    # optimizadas. Por defecto v1: la v2 solo se usa si se elige a proposito.
+    automation_version: str = "v1"
     keep_browser_open: bool = True
     enable_browser_extension: bool = True
     browser_extension_overlay: bool = True

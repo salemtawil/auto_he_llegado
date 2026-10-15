@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import logging
 import os
 import platform
 import re
@@ -38,7 +39,12 @@ from ui.main_app.agent_name_dialog import AgentNameDialog
 from ui.main_app.pool_badge import PoolBadge
 from ui.main_app.process_slot_panel import ProcessSlotPanel
 from ui.main_app.settings_dialog import SettingsDialog
+from ui.admin_auth import is_admin_password_valid
+from ui.shared.dialogs import confirm_destructive_action
+from ui.shared.errors import safe_error_summary
 from ui.theme import (
+    SECONDARY_BUTTON,
+    SECONDARY_BUTTON_HOVER,
     ACCENT,
     ACCENT_SOFT,
     APP_BG,
@@ -70,6 +76,8 @@ class ProcessSlotRuntime:
     timer_generation: int = 0
     execution_mode: str = "traditional"
 
+
+_LOGGER = logging.getLogger(__name__)
 
 class MainAppWindow(ctk.CTk):
     def __init__(
@@ -106,12 +114,13 @@ class MainAppWindow(ctk.CTk):
         self._access_snapshot: AccessSnapshot | None = None
         self._process_access_block_reason = "Validando acceso por video..."
         self._video_upload_running = False
-        self._extension_status_refresh_scheduled = False
 
         apply_theme_mode(self._current_config.theme_mode)
         self.title("Auto He Llegado")
         self.geometry("1280x760")
-        self.minsize(1020, 680)
+        # Minimo mas permisivo: el contenido ya no se recorta por debajo de el,
+        # porque el area de procesos se desplaza cuando no cabe.
+        self.minsize(820, 560)
         self.configure(fg_color=APP_BG)
         self.grid_columnconfigure(0, weight=1)
         self.grid_rowconfigure(1, weight=1)
@@ -122,10 +131,13 @@ class MainAppWindow(ctk.CTk):
         self.bind("<Configure>", self._handle_window_resize)
         self.protocol("WM_DELETE_WINDOW", self._handle_app_close)
         self._safe_after(150, self.refresh_pool_count)
-        self._schedule_extension_status_refresh(200)
+        self._safe_after(200, self.refresh_extension_status)
         self._safe_after(220, self._prompt_agent_name_if_needed)
         self._safe_after(500, self.refresh_background_video_status)
         self._safe_after(550, self.refresh_process_access_state)
+        # La purga de local_data va la ultima y en segundo plano: es I/O de
+        # disco sobre miles de archivos y no debe competir con el arranque.
+        self._safe_after(3000, self._start_local_data_cleanup)
         self._safe_after(50, lambda: self._apply_responsive_layout(self.winfo_width()))
 
     def _build_header(self) -> None:
@@ -143,7 +155,9 @@ class MainAppWindow(ctk.CTk):
         self.header.grid_rowconfigure(0, weight=1)
 
         self.title_wrap = ctk.CTkFrame(self.header, fg_color="transparent")
-        self.title_wrap.grid(row=0, column=0, padx=(12, 12), pady=7, sticky="w")
+        # sticky="ew": la celda del titulo puede encogerse cuando la ventana estrecha,
+        # en vez de empujar la insignia del pool fuera del borde derecho.
+        self.title_wrap.grid(row=0, column=0, padx=(12, 12), pady=7, sticky="ew")
         self.title_wrap.grid_columnconfigure(0, weight=1)
 
         self.title_label = ctk.CTkLabel(
@@ -157,10 +171,14 @@ class MainAppWindow(ctk.CTk):
         self.header_meta_label = ctk.CTkLabel(
             self.title_wrap,
             text="Motor: Tradicional | Procesos activos: 0/2",
-            font=ctk.CTkFont(size=8, weight="bold"),
+            font=ctk.CTkFont(size=10, weight="bold"),
             text_color=TEXT_MUTED,
+            anchor="w",
+            justify="left",
         )
-        self.header_meta_label.grid(row=1, column=0, pady=(2, 0), sticky="w")
+        self.header_meta_label.grid(row=1, column=0, pady=(2, 0), sticky="ew")
+        # Texto completo del resumen; lo que se pinta se acorta segun el ancho real.
+        self._header_meta_parts: list[str] = []
 
         self.header_status_label = ctk.CTkLabel(
             self.title_wrap,
@@ -171,6 +189,7 @@ class MainAppWindow(ctk.CTk):
         self.header_status_label.grid_forget()
 
         self.header_video_progress = ctk.CTkProgressBar(self.title_wrap, height=8, corner_radius=999)
+        self._header_progress_indeterminate = False
         self.header_video_progress.grid(row=3, column=0, pady=(4, 0), sticky="ew")
         self.header_video_progress.set(0)
         self.header_video_progress.grid_remove()
@@ -357,16 +376,26 @@ class MainAppWindow(ctk.CTk):
         self.content.grid_columnconfigure(0, weight=1)
         self.content.grid_rowconfigure(0, weight=1)
 
-        self.main_column = ctk.CTkFrame(self.content, fg_color="transparent")
-        self.main_column.grid(row=0, column=0, sticky="nsew")
+        # Los dos procesos viven dentro de un contenedor desplazable: cuando la
+        # ventana no da para las dos tarjetas completas, se desplaza en vez de
+        # recortarlas. La barra solo aparece cuando hace falta (_sync_slots_scrollbar).
+        self.slots_scroll = ctk.CTkScrollableFrame(
+            self.content,
+            fg_color="transparent",
+            corner_radius=0,
+            scrollbar_button_color=SECONDARY_BUTTON,
+            scrollbar_button_hover_color=SECONDARY_BUTTON_HOVER,
+        )
+        self.slots_scroll.grid(row=0, column=0, sticky="nsew")
+        self.slots_scroll.grid_columnconfigure(0, weight=1)
+
+        self.main_column = self.slots_scroll
         self.main_column.grid_columnconfigure(0, weight=1)
-        self.main_column.grid_rowconfigure(0, weight=1, uniform="process_slots")
-        self.main_column.grid_rowconfigure(1, weight=1, uniform="process_slots")
 
         slot_1_panel = ProcessSlotPanel(
             self.main_column,
             title="Proceso 1",
-            on_start=lambda: self.start_process("slot_1"),
+            on_start=lambda: self._handle_run_button("slot_1"),
             on_clear=lambda: self.clear_form("slot_1"),
             on_export_state=lambda: self.export_extension_state("slot_1"),
             on_open_diagnostics=self._open_diagnostics_panel,
@@ -380,7 +409,7 @@ class MainAppWindow(ctk.CTk):
         slot_2_panel = ProcessSlotPanel(
             self.main_column,
             title="Proceso 2",
-            on_start=lambda: self.start_process("slot_2"),
+            on_start=lambda: self._handle_run_button("slot_2"),
             on_clear=lambda: self.clear_form("slot_2"),
             on_export_state=lambda: self.export_extension_state("slot_2"),
             on_open_diagnostics=self._open_diagnostics_panel,
@@ -465,7 +494,7 @@ class MainAppWindow(ctk.CTk):
                 ),
             )
         except Exception as exc:
-            error_message = f"No se pudo enviar el video: {exc}"
+            error_message = f"No se pudo enviar el video. Revisa tu conexión y vuelve a intentar. ({safe_error_summary(exc, context='envio de video')})"
             set_video_status(
                 phase="error",
                 message=error_message,
@@ -560,7 +589,7 @@ class MainAppWindow(ctk.CTk):
                 f"Actualizando a {downloaded_update.asset.revision}, la app se reiniciara.",
                 color=SUCCESS,
             )
-        self._handle_app_close()
+        self._handle_app_close(confirm=False)
 
     def _validate_updater_ready(self) -> str | None:
         if self._active_process_count() > 0:
@@ -727,7 +756,7 @@ class MainAppWindow(ctk.CTk):
         except Exception as exc:
             messagebox.showerror(
                 "Actualizar app",
-                f"No se pudo iniciar el helper de actualizacion: {exc}",
+                f"No se pudo iniciar el helper de actualización. Cierra la app y vuelve a intentarlo. ({safe_error_summary(exc, context='helper de actualizacion')})",
                 parent=self,
             )
             return False
@@ -756,7 +785,16 @@ class MainAppWindow(ctk.CTk):
         self._open_admin_tool("Diagnostico")
 
     def _validate_admin_access(self, password: str) -> None:
-        if password != self._settings.admin_access_password:
+        if not self._settings.admin_access_password:
+            message = (
+                "El panel Admin esta bloqueado: falta definir ADMIN_ACCESS_PASSWORD "
+                "en el archivo .env de esta instalacion."
+            )
+            if self._admin_password_dialog is not None and self._admin_password_dialog.winfo_exists():
+                self._admin_password_dialog.set_error(message)
+            self._broadcast_status_message(message, color=ERROR)
+            return
+        if not is_admin_password_valid(password, self._settings):
             if self._admin_password_dialog is not None and self._admin_password_dialog.winfo_exists():
                 self._admin_password_dialog.set_error("Contrasena incorrecta. Acceso Admin denegado.")
             self._broadcast_status_message("Acceso Admin denegado por contrasena incorrecta.", color=ERROR)
@@ -795,14 +833,14 @@ class MainAppWindow(ctk.CTk):
                 color=SUCCESS,
             )
         except Exception as exc:
-            self._broadcast_status_message(f"Error al guardar configuracion: {exc}", color=ERROR)
+            self._broadcast_status_message(f"No se pudo guardar la configuración local. Revisa los permisos de la carpeta de datos y vuelve a intentar. ({safe_error_summary(exc, context='guardar configuracion local')})", color=ERROR)
 
     def toggle_theme_mode(self) -> None:
         next_mode = "dark" if self._current_config.theme_mode == "light" else "light"
         try:
             self._persist_theme_mode_only(next_mode)
         except Exception as exc:
-            self._broadcast_status_message(f"No se pudo cambiar el tema: {exc}", color=ERROR)
+            self._broadcast_status_message(f"No se pudo cambiar el tema. ({safe_error_summary(exc, context='tema')})", color=ERROR)
 
     def _persist_local_config(self, config: LocalConfig) -> None:
         previous_theme_mode = self._current_config.theme_mode
@@ -881,6 +919,9 @@ class MainAppWindow(ctk.CTk):
         if event.widget is not self:
             return
         self._apply_responsive_layout(event.width)
+        self._apply_header_width(event.width)
+        self._apply_slot_widths()
+        self._sync_slots_scrollbar()
 
     def _apply_responsive_layout(self, width: int) -> None:
         mode = "fixed"
@@ -904,15 +945,93 @@ class MainAppWindow(ctk.CTk):
             slot.panel.set_compact_layout(False)
 
         self._sync_primary_slot_refs()
-        self.main_column.grid(row=0, column=0, sticky="nsew")
         self.main_column.grid_columnconfigure(0, weight=1)
         self.main_column.grid_columnconfigure(1, weight=0)
-        self.main_column.grid_rowconfigure(0, weight=1, uniform="process_slots")
-        self.main_column.grid_rowconfigure(1, weight=1, uniform="process_slots")
-        slot_1.grid(row=0, column=0, pady=(0, 10), sticky="nsew")
-        slot_2.grid(row=1, column=0, sticky="nsew")
+        # sticky="ew" y sin weight en las filas: cada tarjeta ocupa su altura natural
+        # dentro del area desplazable. Antes se repartia el alto disponible a partes
+        # iguales ("uniform"), asi que en una ventana baja ambas tarjetas recibian
+        # menos de lo que su contenido necesita y la fila de botones quedaba cortada.
+        self.main_column.grid_rowconfigure(0, weight=0)
+        self.main_column.grid_rowconfigure(1, weight=0)
+        slot_1.grid(row=0, column=0, pady=(0, 10), sticky="ew")
+        slot_2.grid(row=1, column=0, pady=(0, 4), sticky="ew")
 
         self._refresh_header_summary()
+        self._safe_after(0, self._apply_slot_widths)
+        self._safe_after(0, self._sync_slots_scrollbar)
+
+    # Anchos por debajo de los cuales el resumen de cabecera se recorta por partes.
+    _HEADER_PART_BREAKPOINTS = (1180, 1000, 860)
+
+    @staticmethod
+    def build_header_summary(parts: list[str], width: int) -> str:
+        """Resumen de cabecera adaptado al ancho disponible.
+
+        Devuelve una sola linea legible: va soltando las partes menos importantes
+        a medida que la ventana estrecha, en vez de dejar que el texto se salga de
+        su celda y se corte por los dos lados.
+        """
+
+        if not parts:
+            return ""
+        keep = len(parts)
+        for index, breakpoint_width in enumerate(MainAppWindow._HEADER_PART_BREAKPOINTS):
+            if width and width < breakpoint_width:
+                keep = len(parts) - index - 1
+        # Nunca por debajo de motor + procesos activos: es el minimo util.
+        keep = max(keep, 2)
+        return " | ".join(parts[:keep])
+
+    def _apply_header_width(self, width: int) -> None:
+        """Ajusta el resumen y el ajuste de linea de la cabecera al ancho actual."""
+
+        label = getattr(self, "header_meta_label", None)
+        if label is None:
+            return
+        parts = getattr(self, "_header_meta_parts", None) or []
+        with contextlib.suppress(Exception):
+            if parts:
+                label.configure(text=self.build_header_summary(parts, width))
+            # wraplength deja que el texto envuelva dentro de la cabecera en vez de
+            # desbordarla; se reserva el sitio de la insignia del pool y los margenes.
+            available = max(int(width) - 320, 220) if width else 220
+            label.configure(wraplength=available)
+            status_label = getattr(self, "header_status_label", None)
+            if status_label is not None:
+                status_label.configure(wraplength=available, anchor="w", justify="left")
+
+    def _apply_slot_widths(self) -> None:
+        """Propaga el ancho real a cada tarjeta de proceso."""
+
+        for slot in self._slots.values():
+            panel = getattr(slot, "panel", None)
+            apply_width = getattr(panel, "apply_width_layout", None)
+            if callable(apply_width):
+                with contextlib.suppress(Exception):
+                    apply_width(panel.winfo_width())
+
+    def _sync_slots_scrollbar(self) -> None:
+        """Muestra la barra de desplazamiento solo si el contenido no cabe.
+
+        Mantiene el aspecto compacto: en una ventana normal no se ve ninguna barra,
+        y en cuanto el contenido excede el alto disponible aparece, de modo que los
+        botones nunca quedan inalcanzables.
+        """
+
+        scroll = getattr(self, "slots_scroll", None)
+        if scroll is None:
+            return
+        try:
+            scroll.update_idletasks()
+            needed = self.main_column.winfo_reqheight()
+            available = scroll.winfo_height()
+            scrollbar = scroll._scrollbar  # noqa: SLF001 - CTkScrollableFrame no lo expone
+            if needed > available + 2:
+                scrollbar.grid()
+            else:
+                scrollbar.grid_remove()
+        except Exception:  # noqa: BLE001 - nunca romper el redibujado por esto
+            return
 
     def _sync_primary_slot_refs(self) -> None:
         primary_panel = (
@@ -923,7 +1042,6 @@ class MainAppWindow(ctk.CTk):
         self.form_panel = primary_panel.form_panel
         self.status_panel = primary_panel.status_panel
         self.current_result_panel = primary_panel.current_result_panel
-        self.extension_status_panel = primary_panel.extension_status_panel
         self.run_button = primary_panel.run_button
         self.clear_button = primary_panel.clear_button
 
@@ -946,9 +1064,13 @@ class MainAppWindow(ctk.CTk):
         page_name = primary_slot.panel.form_panel.page_menu.get() or "N/A"
         slot_title = "Proceso 1" if primary_slot_id == "slot_1" else "Proceso 2"
         engine_label = self._flow_engine_label(self._current_config.flow_engine)
-        self.header_meta_label.configure(
-            text=f"Motor: {engine_label} | Procesos activos: {self._active_process_count()}/2 | Principal: {slot_title} | Pagina: {page_name}"
-        )
+        self._header_meta_parts = [
+            f"Motor: {engine_label}",
+            f"Activos: {self._active_process_count()}/2",
+            f"Principal: {slot_title}",
+            f"Página: {page_name}",
+        ]
+        self._apply_header_width(self.winfo_width())
 
     def _refresh_widget_tree(self, widget) -> None:
         theme_keys = (
@@ -977,6 +1099,25 @@ class MainAppWindow(ctk.CTk):
 
     def _get_slot(self, slot_id: str) -> ProcessSlotRuntime:
         return self._slots[slot_id]
+
+    def _set_header_progress_determinate(self, fraction: float) -> None:
+        if self._header_progress_indeterminate:
+            with contextlib.suppress(Exception):
+                self.header_video_progress.stop()
+            with contextlib.suppress(Exception):
+                self.header_video_progress.configure(mode="determinate")
+            self._header_progress_indeterminate = False
+        self.header_video_progress.set(fraction)
+
+    def _set_header_progress_indeterminate(self) -> None:
+        if self._header_progress_indeterminate:
+            return
+        try:
+            self.header_video_progress.configure(mode="indeterminate")
+            self.header_video_progress.start()
+        except Exception:  # noqa: BLE001 - keep the bar usable if CTk refuses
+            return
+        self._header_progress_indeterminate = True
 
     def _active_process_count(self) -> int:
         return sum(1 for slot in self._slots.values() if slot.thread is not None)
@@ -1018,6 +1159,7 @@ class MainAppWindow(ctk.CTk):
         try:
             if status.phase == "idle":
                 self.header_status_label.grid_forget()
+                self._set_header_progress_determinate(0.0)
                 self.header_video_progress.grid_remove()
             else:
                 color = ERROR if status.is_error else (SUCCESS if status.is_complete else TEXT_MUTED)
@@ -1025,13 +1167,14 @@ class MainAppWindow(ctk.CTk):
                 self.header_status_label.grid(row=2, column=0, pady=(2, 0), sticky="w")
                 self.header_video_progress.grid(row=3, column=0, pady=(4, 0), sticky="ew")
                 if status.total > 0:
-                    self.header_video_progress.set(status.fraction)
+                    self._set_header_progress_determinate(status.fraction)
                 elif status.is_running:
-                    self.header_video_progress.set(0.08)
+                    # Total unknown: an indeterminate bar, not a fake 8%.
+                    self._set_header_progress_indeterminate()
                 elif status.is_complete:
-                    self.header_video_progress.set(1.0)
+                    self._set_header_progress_determinate(1.0)
                 else:
-                    self.header_video_progress.set(0.0)
+                    self._set_header_progress_determinate(0.0)
         except Exception:
             pass
         finally:
@@ -1049,7 +1192,7 @@ class MainAppWindow(ctk.CTk):
             snapshot = self._photo_pool_service.get_snapshot()
             self._safe_after(0, lambda: self._apply_pool_snapshot(snapshot))
         except Exception as exc:
-            error_message = f"No se pudo consultar el contador: {exc}"
+            error_message = f"No se pudo consultar el pool de fotos. Revisa tu conexión y pulsa Refrescar. ({safe_error_summary(exc, context='contador del pool')})"
             self._safe_after(0, lambda message=error_message: self._broadcast_status_message(message, color=ERROR))
 
     def _apply_pool_snapshot(self, snapshot) -> None:
@@ -1085,7 +1228,7 @@ class MainAppWindow(ctk.CTk):
 
     def _apply_process_access_error(self, exc: Exception) -> None:
         self._access_snapshot = None
-        self._process_access_block_reason = f"No se pudo validar el acceso por video: {exc}"
+        self._process_access_block_reason = f"No se pudo validar el acceso por video. Revisa tu conexión y vuelve a intentar. ({safe_error_summary(exc, context='acceso por video')})"
         self._sync_run_button_state()
         self._broadcast_status_message(self._process_access_block_reason, color=ERROR)
 
@@ -1116,10 +1259,10 @@ class MainAppWindow(ctk.CTk):
             self._sync_run_button_state()
             return
         if slot.thread is not None:
-            self._set_slot_status(slot_id, "Este panel ya tiene un proceso en ejecución.", color=ERROR)
+            self._set_slot_status(slot_id, "Este panel ya tiene un proceso en ejecución. Espera a que termine antes de iniciar otro.", color=ERROR)
             return
         if active_count >= 2:
-            self._set_slot_status(slot_id, "Ya hay 2 procesos activos.", color=ERROR)
+            self._set_slot_status(slot_id, "Ya hay 2 procesos activos. Espera a que termine uno para iniciar otro.", color=ERROR)
             return
         if active_count >= 1 and current_flow_engine != "traditional":
             self._set_slot_status(
@@ -1137,7 +1280,7 @@ class MainAppWindow(ctk.CTk):
             if error_message == "Selecciona una foto valida del titular o desactiva la opcion.":
                 self._set_slot_status(slot_id, error_message, color=ERROR)
             else:
-                self._set_slot_status(slot_id, f"Formulario invalido: {exc}", color=ERROR)
+                self._set_slot_status(slot_id, "Revisa el formulario antes de iniciar: el teléfono debe tener 10 dígitos y la contraseña no puede estar vacía.", color=ERROR)
             return
 
         self._process_service.register_process_slot(process_id, slot_id)
@@ -1154,7 +1297,12 @@ class MainAppWindow(ctk.CTk):
         slot.thread = threading.Thread(
             target=self._run_process_worker,
             args=(slot_id, process_id, request),
-            daemon=False,
+            # Daemon as a last resort only: _shutdown_and_destroy first cancels the
+            # run and waits SHUTDOWN_GRACE_SECONDS for its own finally block to
+            # release the photo, delete temp files, persist the result and close
+            # Playwright. Daemon just guarantees the frozen build can still exit if
+            # a worker never answers -- and in that case the UI says so.
+            daemon=True,
         )
         BrowserManager.begin_new_run(flow_engine=self._current_config.flow_engine)
         self._start_process_timer(slot_id, process_id)
@@ -1230,7 +1378,10 @@ class MainAppWindow(ctk.CTk):
         self._set_slot_status(
             slot_id,
             (
-                f"Error en el proceso: {exc}. Tiempo final: {self._format_elapsed_time(elapsed_seconds)}. "
+                "El proceso falló y no se completó. Revisa la conexión y los datos del "
+                "formulario, luego vuelve a intentar; usa 'Exportar debug' si se repite. "
+                f"({safe_error_summary(exc, context='proceso')}) "
+                f"Tiempo final: {self._format_elapsed_time(elapsed_seconds)}. "
                 f"{self._slot_process_count_label()}"
             ),
             color=ERROR,
@@ -1300,6 +1451,119 @@ class MainAppWindow(ctk.CTk):
         self._layout_slots(self._layout_mode or "wide")
         return elapsed_seconds
 
+    # ------------------------------------------------------------------
+    # Purga automatica de local_data
+    # ------------------------------------------------------------------
+    #
+    # MaintenanceService ya sabia limpiar por antiguedad, pero NADIE lo llamaba
+    # desde la app: solo existia scripts/run_maintenance.py, que nadie ejecuta.
+    # El resultado eran cientos de MB acumulados en el disco de cada agente.
+
+    _LOCAL_CLEANUP_MIN_BYTES_TO_REPORT = 20 * 1024 * 1024
+
+    def _start_local_data_cleanup(self) -> None:
+        if self._is_closing:
+            return
+        threading.Thread(
+            target=self._local_data_cleanup_worker,
+            name="local-data-cleanup",
+            daemon=True,
+        ).start()
+
+    def _local_data_cleanup_worker(self) -> None:
+        """Corre en un hilo aparte. No toca Tk: solo disco y log."""
+
+        try:
+            from services.maintenance_service import MaintenanceService
+
+            report = MaintenanceService(settings=self._settings).cleanup_local_data(
+                dry_run=False,
+                collect_items=False,
+                # Mas conservador que el script manual: una corrida larga puede
+                # seguir usando sus temporales horas despues de empezar.
+                temp_photos_hours=24,
+                failed_uploads_days=30,
+                screenshots_days=14,
+                debug_days=7,
+                browser_profiles_days=3,
+                review_thumbnails_days=30,
+            )
+        except Exception as exc:  # noqa: BLE001 - nunca debe tumbar la app
+            _LOGGER.warning("No se pudo purgar local_data: %s", exc)
+            return
+
+        liberado = sum(
+            int((seccion or {}).get("bytes_freed") or 0)
+            for clave, seccion in report.items()
+            if isinstance(seccion, dict)
+        )
+        borrados = sum(
+            int((seccion or {}).get("removed") or 0)
+            for clave, seccion in report.items()
+            if isinstance(seccion, dict)
+        )
+        if not borrados:
+            return
+        _LOGGER.info(
+            "Purga de local_data: %s elementos, %.1f MB liberados.",
+            borrados,
+            liberado / (1024 * 1024),
+        )
+        # Solo se molesta al operador si el ahorro fue notable.
+        if liberado >= self._LOCAL_CLEANUP_MIN_BYTES_TO_REPORT:
+            self._safe_after(
+                0,
+                lambda mb=liberado / (1024 * 1024): self._broadcast_status_message(
+                    f"Limpieza automática: se liberaron {mb:.0f} MB de archivos antiguos.",
+                    color=TEXT_MUTED,
+                ),
+            )
+
+    def _handle_run_button(self, slot_id: str) -> None:
+        """El boton principal inicia o detiene segun el estado del panel."""
+
+        if self._get_slot(slot_id).thread is not None:
+            self.stop_process(slot_id)
+            return
+        self.start_process(slot_id)
+
+    def stop_process(self, slot_id: str) -> None:
+        slot = self._get_slot(slot_id)
+        if slot.thread is None:
+            return
+        if self._process_service.is_cancel_requested(slot_id):
+            self._set_slot_status(
+                slot_id,
+                "Ya se pidio detener este proceso. Esperando al siguiente punto de control...",
+                color=WARNING,
+            )
+            return
+        if not confirm_destructive_action(
+            title="Detener proceso",
+            what="Se detendra este proceso en el siguiente punto de control.",
+            scope=(
+                "Si el proceso ya pulso el boton final en la pagina, el bloque puede "
+                "haber quedado tomado aunque la corrida se detenga: compruebalo en la "
+                "pagina antes de volver a intentarlo. El otro panel no se ve afectado."
+            ),
+            parent=self,
+        ):
+            return
+        notified = self._process_service.request_cancel(slot_id)
+        if not notified:
+            self._set_slot_status(
+                slot_id,
+                "No se encontro una corrida activa que detener.",
+                color=ERROR,
+            )
+            return
+        self._set_slot_status(
+            slot_id,
+            "Deteniendo proceso... se cerrara en el siguiente punto de control.",
+            color=WARNING,
+        )
+        self._sync_run_button_state()
+
     def _sync_run_button_state(self) -> None:
         if self._is_closing:
             return
@@ -1309,10 +1573,17 @@ class MainAppWindow(ctk.CTk):
             not self._current_user_is_admin()
             and (self._access_snapshot is None or not self._access_snapshot.can_use_app)
         )
-        for slot in self._slots.values():
+        for slot_id, slot in self._slots.items():
             if slot.thread is not None:
-                slot.panel.run_button.configure(state="disabled")
+                # Mientras corre, el boton principal pasa a "Detener" y sigue
+                # activo: antes quedaba gris y no habia forma de parar nada.
+                slot.panel.set_run_button_mode("stop")
+                already_cancelling = self._process_service.is_cancel_requested(slot_id)
+                slot.panel.run_button.configure(
+                    state="disabled" if already_cancelling else "normal"
+                )
                 continue
+            slot.panel.set_run_button_mode("start")
             disabled = (
                 access_blocked
                 or active_count >= 2
@@ -1437,6 +1708,63 @@ class MainAppWindow(ctk.CTk):
         )
         thread.start()
 
+    @staticmethod
+    def _session_is_usable_here(session) -> bool:
+        """Playwright's sync API may only be driven from the thread that created it.
+
+        The UI thread is never that thread (sessions are created on the run
+        worker), so a live capture from here used to be both a freeze and a
+        cross-thread Playwright call. When the session is not ours we fall back to
+        the snapshot the run itself captured.
+        """
+
+        checker = getattr(session, "is_owned_by_current_thread", None)
+        if not callable(checker):
+            return False
+        try:
+            return bool(checker())
+        except Exception:  # noqa: BLE001
+            return False
+
+    @staticmethod
+    def _last_known_frame_report(payload, *, error: str | None = None) -> dict:
+        report = {}
+        if isinstance(payload, dict):
+            report = dict(payload.get("frame_debug_report") or {})
+        if report:
+            return report
+        fallback: dict = {"total_frames": 0, "frames": []}
+        if error:
+            fallback["error"] = error
+        else:
+            fallback["note"] = (
+                "Sin captura en vivo: el navegador pertenece al hilo del proceso. "
+                "Se usa el ultimo estado capturado durante la corrida."
+            )
+        return fallback
+
+    def _collect_session_debug_payload(self, session) -> tuple[dict | None, str | None]:
+        """Extension debug for a session, never driving Playwright from the UI thread."""
+
+        if not self._session_is_usable_here(session):
+            payload = session.get_last_extension_debug() or BrowserManager.get_latest_extension_debug()
+            note = (
+                "Estado tomado del ultimo snapshot de la corrida: no se puede consultar "
+                "el navegador en vivo desde la interfaz (Playwright es de un solo hilo)."
+            )
+            if isinstance(payload, dict):
+                payload = {**payload, "live_capture": False, "live_capture_note": note}
+            return payload, None
+        try:
+            payload = (
+                session.capture_extension_debug(page=session.page, note="manual_process_export")
+                or session.get_last_extension_debug()
+            )
+            return payload, None
+        except Exception as exc:  # noqa: BLE001
+            fallback = session.get_last_extension_debug() or BrowserManager.get_latest_extension_debug()
+            return fallback, str(exc)
+
     def export_extension_state(self, slot_id: str) -> None:
         if self._is_closing:
             return
@@ -1458,14 +1786,7 @@ class MainAppWindow(ctk.CTk):
         payload = None
         browser_export_warning = None
         if session is not None:
-            try:
-                payload = (
-                    session.capture_extension_debug(page=session.page, note="manual_process_export")
-                    or session.get_last_extension_debug()
-                )
-            except Exception as exc:
-                browser_export_warning = str(exc)
-                payload = session.get_last_extension_debug() or BrowserManager.get_latest_extension_debug()
+            payload, browser_export_warning = self._collect_session_debug_payload(session)
         elif slot_id == self._latest_debug_slot_id:
             payload = BrowserManager.get_latest_extension_debug()
         else:
@@ -1477,22 +1798,23 @@ class MainAppWindow(ctk.CTk):
         current_url = ""
         frames_payload: dict | list = []
         if session is not None:
-            with contextlib.suppress(Exception):
-                current_url = session.page.url
-            with contextlib.suppress(Exception):
-                body_text = session.page.locator("body").first.inner_text(timeout=700).strip()
-            try:
-                frames_payload = session.debug_list_all_frames(page=session.page)
-            except Exception as exc:
-                if browser_export_warning is None:
-                    browser_export_warning = str(exc)
-                last_frame_report = {}
-                if isinstance(payload, dict):
-                    last_frame_report = dict(payload.get("frame_debug_report") or {})
-                frames_payload = last_frame_report or {"total_frames": 0, "frames": [], "error": str(exc)}
+            live = self._session_is_usable_here(session)
+            if live:
+                with contextlib.suppress(Exception):
+                    current_url = session.page.url
+                with contextlib.suppress(Exception):
+                    body_text = session.page.locator("body").first.inner_text(timeout=700).strip()
+                try:
+                    frames_payload = session.debug_list_all_frames(page=session.page)
+                except Exception as exc:
+                    if browser_export_warning is None:
+                        browser_export_warning = str(exc)
+                    frames_payload = self._last_known_frame_report(payload, error=str(exc))
+            else:
+                frames_payload = self._last_known_frame_report(payload)
 
         if not payload and not process_payload:
-            self._set_slot_status(slot_id, "No hay estado del proceso disponible para exportar.", color=ERROR)
+            self._set_slot_status(slot_id, "No hay estado del proceso para exportar. Ejecuta un proceso y vuelve a pulsar 'Exportar debug'.", color=ERROR)
             return
 
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -1530,7 +1852,7 @@ class MainAppWindow(ctk.CTk):
         try:
             Path(target).write_text(json.dumps(export_payload, indent=2, ensure_ascii=False), encoding="utf-8")
         except Exception as exc:
-            self._set_slot_status(slot_id, f"No se pudo exportar el estado del proceso: {exc}", color=ERROR)
+            self._set_slot_status(slot_id, f"No se pudo exportar el estado del proceso. Revisa que la carpeta de destino sea escribible. ({safe_error_summary(exc, context='export de estado')})", color=ERROR)
             return
 
         self._set_slot_status(slot_id, f"Estado del proceso exportado a {target}", color=SUCCESS)
@@ -1573,11 +1895,15 @@ class MainAppWindow(ctk.CTk):
         session_active = session is not None
         if session is not None:
             session_debug = session.get_last_extension_debug() or latest_debug
-            try:
-                frames_payload = session.debug_list_all_frames(page=session.page)
-            except Exception as exc:
-                browser_export_warning = str(exc)
-                frames_payload = dict(session_debug.get("frame_debug_report") or {}) or {"total_frames": 0, "frames": [], "error": str(exc)}
+            if self._session_is_usable_here(session):
+                try:
+                    frames_payload = session.debug_list_all_frames(page=session.page)
+                except Exception as exc:
+                    browser_export_warning = str(exc)
+                    frames_payload = self._last_known_frame_report(session_debug, error=str(exc))
+            else:
+                # Called from the Tk thread: the session belongs to the run worker.
+                frames_payload = self._last_known_frame_report(session_debug)
         elif not latest_debug:
             session_debug = {
                 "note": "Diagnostico limitado: BrowserManager latest_* solo refleja la sesion mas reciente.",
@@ -1760,88 +2086,30 @@ class MainAppWindow(ctk.CTk):
         if self._admin_uploader_dialog is not None and self._admin_uploader_dialog.winfo_exists():
             self._admin_uploader_dialog.set_test_log_busy(False)
             self._admin_uploader_dialog.set_test_log_feedback(
-                f"Error al insertar log de prueba: {exc}",
+                f"No se pudo insertar el log de prueba en Supabase. Revisa la conexión y las credenciales, luego reintenta. ({safe_error_summary(exc, context='log de prueba')})",
                 color=ERROR,
             )
-        self._broadcast_status_message(f"Error al insertar log de prueba: {exc}", color=ERROR)
-
-    def _set_extension_placeholder(self, slot_id: str, message: str) -> None:
-        panel = self._get_slot(slot_id).panel.extension_status_panel
-        panel.set_placeholder()
-        panel.subline.configure(text=message)
-        panel.message_label.configure(text=message)
-        panel._detail_values["Motor"].configure(
-            text="Extensión" if self._current_config.flow_engine == "extension" else "Tradicional"
-        )
-
-    def _schedule_extension_status_refresh(self, delay_ms: int = 1000) -> None:
-        if self._is_closing or getattr(self, "_extension_status_refresh_scheduled", False):
-            return
-        self._extension_status_refresh_scheduled = True
-        self._safe_after(delay_ms, self._run_scheduled_extension_status_refresh)
-
-    def _run_scheduled_extension_status_refresh(self) -> None:
-        self._extension_status_refresh_scheduled = False
-        self.refresh_extension_status()
+        self._broadcast_status_message(f"No se pudo insertar el log de prueba en Supabase. Revisa la conexión y las credenciales, luego reintenta. ({safe_error_summary(exc, context='log de prueba')})", color=ERROR)
 
     def refresh_extension_status(self) -> None:
+        """Marca el diagnostico del panel de administracion como desactualizado.
+
+        Antes esto construia un diccionario de debug completo y repintaba dos
+        ExtensionStatusPanel, y se reprogramaba a si misma cada segundo para
+        siempre. Pero esos dos paneles nunca se mostraban en pantalla ni los
+        leia nadie, asi que eran ~45 llamadas a configure() por segundo tiradas
+        a la basura, de forma permanente, hubiera o no una corrida activa.
+
+        El diagnostico que el operador si ve es el de admin_dialogs.py:948, que
+        se alimenta bajo demanda con su boton "Refrescar". Lo unico que esta
+        funcion aportaba era avisarle de que hay cambios, y para eso basta con
+        llamarla desde los eventos reales (inicio y fin de proceso, cambio de
+        configuracion, apertura de navegador), que es como se la llama ya.
+        """
+
         if self._is_closing:
             return
-        try:
-            # TODO(parallelism): latest_* only reflects the most recent run and is not safe for true parallel execution.
-            session = BrowserManager.get_latest_session()
-            latest_debug = BrowserManager.get_latest_extension_debug() or {}
-            session_debug = latest_debug
-            if session is not None:
-                session_debug = session.get_last_extension_debug() or {
-                    "note": "browser_session_opened",
-                    "extension_enabled": session.extension_enabled,
-                    "extension_loaded": session.extension_loaded,
-                    "extension_service_worker_url": session.extension_service_worker_url,
-                    "extension_path": session.extension_path,
-                    "extension_path_exists": bool(session.extension_path),
-                    "manifest_path": f"{session.extension_path}\\manifest.json" if session.extension_path else None,
-                    "manifest_exists": bool(session.extension_path),
-                    "state": None,
-                    "marker": None,
-                    "overlayPresent": False,
-                    "overlayFramePresent": False,
-                }
-                if latest_debug:
-                    session_debug = {
-                        **latest_debug,
-                        **session_debug,
-                        "browser_args": latest_debug.get("browser_args"),
-                        "browser_channel": latest_debug.get("browser_channel"),
-                        "browser_executable": latest_debug.get("browser_executable"),
-                        "extension_dir": latest_debug.get("extension_dir"),
-                        "extension_dir_is_absolute": latest_debug.get("extension_dir_is_absolute"),
-                        "manifest_exists": latest_debug.get("manifest_exists"),
-                        "manifest_path": latest_debug.get("manifest_path"),
-                        "load_extension_arg_present": latest_debug.get("load_extension_arg_present"),
-                        "disable_extensions_except_arg_present": latest_debug.get("disable_extensions_except_arg_present"),
-                    }
-
-            for slot_id, slot in self._slots.items():
-                if slot_id == self._latest_debug_slot_id:
-                    slot.panel.extension_status_panel.set_status(
-                        session_active=session is not None,
-                        extension_requested=self._current_config.flow_engine == "extension",
-                        flow_engine=self._current_config.flow_engine,
-                        session_debug=session_debug,
-                    )
-                else:
-                    self._set_extension_placeholder(
-                        slot_id,
-                        "Diagnostico limitado: BrowserManager latest_* solo refleja la sesion mas reciente.",
-                    )
-            self._refresh_admin_diagnostics_if_open()
-        except Exception as exc:
-            for slot_id in self._slots:
-                self._set_extension_placeholder(slot_id, "No se pudo actualizar el estado de extension.")
-            self._broadcast_status_message(f"No se pudo actualizar el estado de extension: {exc}", color=ERROR)
-        finally:
-            self._schedule_extension_status_refresh()
+        self._refresh_admin_diagnostics_if_open()
 
     def _safe_after(self, delay_ms: int, callback, *, allow_during_close: bool = False) -> None:
         if self._is_closing and not allow_during_close:
@@ -1851,11 +2119,43 @@ class MainAppWindow(ctk.CTk):
         except Exception:
             return
 
-    def _handle_app_close(self) -> None:
-        if self._is_closing:
+    # How long a cooperative close waits for the running automations to finish
+    # their own cleanup (release the photo, delete temp files, persist the result,
+    # close Playwright) before giving up and saying so.
+    SHUTDOWN_GRACE_SECONDS = 30.0
+
+    # Class-level default: Tk's __getattr__ recurses on a widget whose __init__ has
+    # not run, so this must resolve without falling through to it.
+    _close_prompt_open = False
+
+    def _handle_app_close(self, *, confirm: bool = True) -> None:
+        if self._is_closing or self._close_prompt_open:
+            return
+        active = self._active_process_count()
+        # askyesno pumps the Tk event loop, so a second WM_DELETE while it is open
+        # would re-enter here and stack another dialog.
+        self._close_prompt_open = True
+        try:
+            confirmed = not (confirm and active > 0) or messagebox.askyesno(
+                "Cerrar aplicación",
+                f"Hay {active} proceso(s) en ejecución.\n\n"
+                "Al cerrar se les pedirá que se detengan y se esperará hasta "
+                f"{int(self.SHUTDOWN_GRACE_SECONDS)} s a que liberen la foto reservada, "
+                "borren sus archivos temporales y cierren el navegador.\n\n"
+                "¿Cerrar la aplicación?",
+                parent=self,
+                default=messagebox.NO,
+            )
+        finally:
+            self._close_prompt_open = False
+        if not confirmed:
             return
         self._is_closing = True
         self._cleanup_owner_selfie_temp_files()
+        # 1) no new runs, and the ones in flight are asked to stop.
+        cancelled = 0
+        with contextlib.suppress(Exception):
+            cancelled = self._process_service.begin_shutdown()
         for slot_id, slot in self._slots.items():
             self._stop_process_timer(slot_id, prefix="Tiempo final")
             with contextlib.suppress(Exception):
@@ -1863,18 +2163,54 @@ class MainAppWindow(ctk.CTk):
             with contextlib.suppress(Exception):
                 slot.panel.clear_button.configure(state="disabled")
         with contextlib.suppress(Exception):
-            self._broadcast_status_message("Cerrando Playwright y recursos activos...")
-        threading.Thread(target=self._shutdown_and_destroy, daemon=True).start()
+            if cancelled:
+                self._broadcast_status_message(
+                    f"Cerrando: esperando a que {cancelled} proceso(s) liberen sus "
+                    f"recursos (hasta {int(self.SHUTDOWN_GRACE_SECONDS)} s)...",
+                    color=WARNING,
+                )
+            else:
+                self._broadcast_status_message("Cerrando Playwright y recursos activos...")
+        threading.Thread(
+            target=self._shutdown_and_destroy,
+            name="app-shutdown",
+            daemon=True,
+        ).start()
 
     def _shutdown_and_destroy(self) -> None:
+        """Cooperative, bounded close.
+
+        Order matters: the run threads own their Playwright sessions, so they must
+        finish their own finally blocks *first*. Tearing the browsers down before
+        joining them (the old order) guaranteed that every in-flight cleanup failed.
+        """
+
+        workers = [slot.thread for slot in self._slots.values() if slot.thread is not None]
+        deadline = monotonic() + self.SHUTDOWN_GRACE_SECONDS
+        for worker in workers:
+            remaining = deadline - monotonic()
+            if remaining <= 0:
+                break
+            if worker.is_alive():
+                worker.join(timeout=remaining)
+        pending = [worker for worker in workers if worker.is_alive()]
+        if pending:
+            # Say so instead of pretending the cleanup completed.
+            with contextlib.suppress(Exception):
+                self._safe_after(
+                    0,
+                    lambda count=len(pending): self._broadcast_status_message(
+                        f"{count} proceso(s) no respondieron a tiempo. Se cierra igualmente: "
+                        "puede quedar una foto reservada y un Chrome abierto.",
+                        color=ERROR,
+                    ),
+                    allow_during_close=True,
+                )
+        # Only now tear down whatever is left open.
         try:
             self._process_service.shutdown()
         except Exception:
             pass
-        workers = [slot.thread for slot in self._slots.values() if slot.thread is not None]
-        for worker in workers:
-            if worker.is_alive():
-                worker.join(timeout=5.0)
         self._safe_after(0, self._destroy_after_shutdown, allow_during_close=True)
 
     def _destroy_after_shutdown(self) -> None:
@@ -1925,6 +2261,11 @@ class MainAppWindow(ctk.CTk):
             agent_name=validate_non_empty_string(source["agent_name"], "agent_name"),
             agent_name_confirmed=True,
             flow_engine="extension" if source.get("flow_engine", "Tradicional") == "Extension" else "traditional",
+            automation_version=(
+                "v2"
+                if str(source.get("automation_version", "")).strip().lower().startswith("v2")
+                else "v1"
+            ),
             keep_browser_open=source.get("keep_browser_open", "si") == "si",
             enable_browser_extension=True,
             browser_extension_overlay=source.get("browser_extension_overlay", "si") == "si",

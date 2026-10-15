@@ -7,6 +7,7 @@ import customtkinter as ctk
 from core.models import LocalConfig
 from ui.theme import (
     ACCENT,
+    ON_ACCENT,
     ACCENT_HOVER,
     APP_BG,
     BORDER,
@@ -27,6 +28,9 @@ class SettingsDialog(ctk.CTkToplevel):
         self._initial_data = {
             "agent_name": config.agent_name,
             "flow_engine": "Extension" if config.flow_engine == "extension" else "Tradicional",
+            "automation_version": (
+                "v2 (optimizada)" if config.automation_version == "v2" else "v1 (estable)"
+            ),
             "keep_browser_open": "si" if config.keep_browser_open else "no",
             "browser_extension_overlay": "si" if config.browser_extension_overlay else "no",
             "page_timeout_seconds": str(config.page_timeout_seconds),
@@ -109,9 +113,19 @@ class SettingsDialog(ctk.CTkToplevel):
         )
         self.flow_engine_menu.set("Extension" if config.flow_engine == "extension" else "Tradicional")
 
-        self.browser_extension_overlay_menu = self._build_option_menu(
+        self.automation_version_menu = self._build_option_menu(
             body,
             row=8,
+            label="version de automatizaciones",
+            values=["v1 (estable)", "v2 (optimizada)"],
+        )
+        self.automation_version_menu.set(
+            "v2 (optimizada)" if config.automation_version == "v2" else "v1 (estable)"
+        )
+
+        self.browser_extension_overlay_menu = self._build_option_menu(
+            body,
+            row=10,
             label="overlay visual de extension",
             values=["si", "no"],
         )
@@ -119,7 +133,7 @@ class SettingsDialog(ctk.CTkToplevel):
 
         self.page_timeout_entry = self._build_entry(
             body,
-            row=10,
+            row=12,
             label="timeout de procesamiento de foto",
             placeholder="180",
         )
@@ -127,7 +141,7 @@ class SettingsDialog(ctk.CTkToplevel):
 
         self.action_timeout_entry = self._build_entry(
             body,
-            row=12,
+            row=14,
             label="timeout de respuesta final",
             placeholder="180",
         )
@@ -135,7 +149,7 @@ class SettingsDialog(ctk.CTkToplevel):
 
         self.max_selfie_retries_entry = self._build_entry(
             body,
-            row=14,
+            row=16,
             label="max_selfie_retries",
             placeholder="10, 0 o -1 para ilimitado",
         )
@@ -143,7 +157,7 @@ class SettingsDialog(ctk.CTkToplevel):
 
         self.last_result_filter_menu = self._build_option_menu(
             body,
-            row=16,
+            row=18,
             label="filtro por defecto de ultimo resultado",
             values=["general", "solo exitoso"],
         )
@@ -151,7 +165,7 @@ class SettingsDialog(ctk.CTkToplevel):
 
         self.theme_menu = self._build_option_menu(
             body,
-            row=18,
+            row=20,
             label="tema",
             values=THEME_OPTIONS,
         )
@@ -219,6 +233,7 @@ class SettingsDialog(ctk.CTkToplevel):
             height=36,
             corner_radius=12,
             fg_color=ACCENT,
+            text_color=ON_ACCENT,
             hover_color=ACCENT_HOVER,
             font=ctk.CTkFont(size=13, weight="bold"),
         )
@@ -287,6 +302,7 @@ class SettingsDialog(ctk.CTkToplevel):
         self.agent_entry.bind("<KeyRelease>", self._handle_dirty_state_change)
         self.keep_browser_open_menu.configure(command=self._handle_theme_change)
         self.flow_engine_menu.configure(command=self._handle_theme_change)
+        self.automation_version_menu.configure(command=self._handle_theme_change)
         self.browser_extension_overlay_menu.configure(command=self._handle_theme_change)
         self.page_timeout_entry.bind("<KeyRelease>", self._handle_dirty_state_change)
         self.action_timeout_entry.bind("<KeyRelease>", self._handle_dirty_state_change)
@@ -310,6 +326,7 @@ class SettingsDialog(ctk.CTkToplevel):
         return {
             "agent_name": self.agent_entry.get(),
             "flow_engine": self.flow_engine_menu.get(),
+            "automation_version": self.automation_version_menu.get(),
             "keep_browser_open": self.keep_browser_open_menu.get(),
             "browser_extension_overlay": self.browser_extension_overlay_menu.get(),
             "page_timeout_seconds": self.page_timeout_entry.get(),

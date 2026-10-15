@@ -1175,3 +1175,270 @@ def test_execute_preserves_owner_selfie_request_fields_for_site_run() -> None:
     assert request_used.slot_id == "slot_1"
     assert request_used.owner_selfie_enabled is True
     assert request_used.owner_selfie_path == "C:/tmp/owner-selfie.jpg"
+
+
+def test_failed_run_is_persisted_as_the_last_result() -> None:
+    """Regression: the exception path never called save_result, so the UI kept
+    showing the previous *successful* run after a crash."""
+
+    log_service = StubLogService()
+    last_result_service = StubLastResultService()
+
+    class ExplodingCompincheSite(StubCompincheSite):
+        def execute_traditional(self, request, *, local_config, progress_callback):
+            raise RuntimeError("fallo de automatizacion")
+
+        def execute_extension(self, request, *, local_config, progress_callback):
+            raise RuntimeError("fallo de automatizacion")
+
+    site = ExplodingCompincheSite(
+        SiteExecutionResult(
+            success=True,
+            message="unused",
+            final_status="success",
+            phase="final_result",
+        )
+    )
+    service = ProcessService(
+        log_service_factory=build_log_service_factory(log_service),
+        local_config_service=StubLocalConfigService(),
+        last_result_service=last_result_service,
+        compinche_site=site,
+        paripe_site=StubParipeSite(
+            SiteExecutionResult(
+                success=True,
+                message="unused",
+                final_status="success",
+                phase="final_result",
+            )
+        ),
+    )
+
+    result = service.execute(
+        ProcessExecutionRequest(
+            page_name="Compinche",
+            action_name="He llegado",
+            phone_number="+1 (809) 555-1234",
+            password="secret",
+            agent_name="Agente Local",
+            execution_mode="normal",
+        )
+    )
+
+    saved = last_result_service.saved_results
+
+    assert result.success is False
+    assert result.final_status == "failed"
+    assert len(saved) == 1
+    assert saved[0].success is False
+    assert saved[0].agent_name == result.agent_name
+    assert saved[0].completed_at is not None
+
+
+def test_a_late_log_update_cannot_overwrite_the_final_state() -> None:
+    """Regression: finish_log_updates() only *waited*; it did not close the window.
+
+    A log update still in flight when the wait timed out landed after
+    finish_process() and overwrote the final phase/status of the run.
+    """
+
+    import threading as _threading
+    import time as _time
+
+    from services.process_service import ProcessService
+
+    release = _threading.Event()
+    entered = _threading.Event()
+    order: list[str] = []
+    order_lock = _threading.Lock()
+
+    class SlowUpdateLogService(StubLogService):
+        def update_process(self, log_id, **kwargs):
+            entered.set()
+            release.wait(timeout=30)
+            with order_lock:
+                order.append("update")
+            return super().update_process(log_id, **kwargs)
+
+        def finish_process(self, log_id, **kwargs):
+            with order_lock:
+                order.append("finish")
+            return super().finish_process(log_id, **kwargs)
+
+    log_service = SlowUpdateLogService()
+    last_result_service = StubLastResultService()
+    service = ProcessService(
+        log_service_factory=build_log_service_factory(log_service),
+        local_config_service=StubLocalConfigService(),
+        last_result_service=last_result_service,
+        compinche_site=StubCompincheSite(
+            SiteExecutionResult(
+                success=True,
+                message="ok",
+                final_status="success",
+                phase="final_result",
+            )
+        ),
+        paripe_site=StubParipeSite(
+            SiteExecutionResult(
+                success=True, message="unused", final_status="success", phase="final_result"
+            )
+        ),
+    )
+    original_timeout = ProcessService._LOG_DRAIN_TIMEOUT_SECONDS
+    ProcessService._LOG_DRAIN_TIMEOUT_SECONDS = 0.2
+    try:
+        result = service.execute(
+            ProcessExecutionRequest(
+                page_name="Compinche",
+                action_name="He llegado",
+                phone_number="+1 (809) 555-1234",
+                password="secret",
+                agent_name="Agente Local",
+                execution_mode="normal",
+            )
+        )
+    finally:
+        ProcessService._LOG_DRAIN_TIMEOUT_SECONDS = original_timeout
+
+    # The run finished without waiting for the stuck update.
+    assert result.success is True
+    assert entered.is_set()
+
+    # Now let the worker recover and settle.
+    release.set()
+    _time.sleep(0.5)
+
+    # The invariant: the in-flight update may complete, but it can never land
+    # *after* the final write, because both go through the same lock and the
+    # window is closed before finish_process is attempted.
+    with order_lock:
+        settled = list(order)
+    if "finish" in settled:
+        assert "update" not in settled[settled.index("finish") :], (
+            "a late update landed after finish_process and overwrote the final state"
+        )
+    else:
+        # finish_process was skipped because the log client was still wedged; the
+        # run must say so instead of pretending the row was closed.
+        assert result.process_log_id is None
+
+    # The local result was persisted regardless of what the remote log did.
+    assert len(last_result_service.saved_results) == 1
+    assert last_result_service.saved_results[0].success is True
+    assert last_result_service.saved_results[0].final_status == "success"
+
+
+def test_normal_runs_still_write_updates_before_finish_process() -> None:
+    """The close-the-window guard must not drop updates on a healthy run."""
+
+    order: list[str] = []
+
+    class OrderedLogService(StubLogService):
+        def update_process(self, log_id, **kwargs):
+            order.append("update")
+            return super().update_process(log_id, **kwargs)
+
+        def finish_process(self, log_id, **kwargs):
+            order.append("finish")
+            return super().finish_process(log_id, **kwargs)
+
+    log_service = OrderedLogService()
+    service = ProcessService(
+        log_service_factory=build_log_service_factory(log_service),
+        local_config_service=StubLocalConfigService(),
+        last_result_service=StubLastResultService(),
+        compinche_site=StubCompincheSite(
+            SiteExecutionResult(
+                success=True, message="ok", final_status="success", phase="final_result"
+            )
+        ),
+        paripe_site=StubParipeSite(
+            SiteExecutionResult(
+                success=True, message="unused", final_status="success", phase="final_result"
+            )
+        ),
+    )
+
+    result = service.execute(
+        ProcessExecutionRequest(
+            page_name="Compinche",
+            action_name="He llegado",
+            phone_number="+1 (809) 555-1234",
+            password="secret",
+            agent_name="Agente Local",
+            execution_mode="normal",
+        )
+    )
+
+    assert result.success is True
+    assert order, "the healthy run should still have written log updates"
+    assert order[-1] == "finish", "finish_process must be the last process_logs write"
+    assert "update" in order
+
+
+def test_finish_log_updates_does_not_block_forever_when_a_log_write_hangs() -> None:
+    """Regression: finish_log_updates() used queue.join() with no timeout, so a
+    drain worker stuck on a network write blocked the whole run thread."""
+
+    import threading as _threading
+    import time as _time
+
+    from services.process_service import ProcessService
+
+    release = _threading.Event()
+    entered = _threading.Event()
+
+    class HangingLogService(StubLogService):
+        def update_process(self, log_id, **kwargs):
+            entered.set()
+            # Blocks until the test releases it: the drain worker never reaches
+            # task_done(), which is exactly the hang being guarded against.
+            release.wait(timeout=30)
+            return super().update_process(log_id, **kwargs)
+
+    log_service = HangingLogService()
+    service = ProcessService(
+        log_service_factory=build_log_service_factory(log_service),
+        local_config_service=StubLocalConfigService(),
+        last_result_service=StubLastResultService(),
+        compinche_site=StubCompincheSite(
+            SiteExecutionResult(
+                success=True,
+                message="ok",
+                final_status="success",
+                phase="final_result",
+            )
+        ),
+        paripe_site=StubParipeSite(
+            SiteExecutionResult(
+                success=True,
+                message="unused",
+                final_status="success",
+                phase="final_result",
+            )
+        ),
+    )
+    original_timeout = ProcessService._LOG_DRAIN_TIMEOUT_SECONDS
+    ProcessService._LOG_DRAIN_TIMEOUT_SECONDS = 0.3
+    started = _time.monotonic()
+    try:
+        result = service.execute(
+            ProcessExecutionRequest(
+                page_name="Compinche",
+                action_name="He llegado",
+                phone_number="+1 (809) 555-1234",
+                password="secret",
+                agent_name="Agente Local",
+                execution_mode="normal",
+            )
+        )
+    finally:
+        ProcessService._LOG_DRAIN_TIMEOUT_SECONDS = original_timeout
+        release.set()
+
+    elapsed = _time.monotonic() - started
+    assert entered.is_set(), "the drain worker should have started a log write"
+    # Without the bounded wait this call never returns while the write is blocked.
+    assert elapsed < 10.0
+    assert result.success is True

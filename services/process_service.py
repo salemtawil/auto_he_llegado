@@ -16,17 +16,31 @@ from automation.engine_router import FlowEngineRouter
 from automation.engines.common import RegisteredSiteRunner
 from automation.paripe_site import ParipeSite
 from automation.ready4drive_site import Ready4DriveSite
+from automation.v2 import (
+    CompincheSiteV2,
+    ParipeSiteV2,
+    Ready4DriveSiteV2,
+    normalize_automation_version,
+)
 from core.models import ProcessExecutionRequest, ProcessExecutionResult, SiteExecutionResult
 from core.validators import sanitize_phone_number
 from services.last_result_service import LastResultService
 from services.local_config_service import LocalConfigService
 from services.log_service import LogService
-from services.photo_source_tracker import get_photo_source_summary, reset_photo_source_counts
+from services.photo_source_tracker import (
+    clear_photo_source_counts,
+    get_photo_source_summary,
+    reset_photo_source_counts,
+)
 from services.process_run_context import ProcessRunContext
 
 
 class ProcessService:
     _LOG_UPDATE_MIN_INTERVAL_SECONDS = 0.5
+    # Intervalo para las fases importantes en v2. Mas corto que el general
+    # seria inutil; mas largo perderia el detalle de las fases criticas.
+    _V2_IMPORTANT_LOG_MIN_INTERVAL_SECONDS = 1.0
+    _LOG_DRAIN_TIMEOUT_SECONDS = 20.0
     _MAX_PROCESS_DEBUG_EXPORTS = 50
     _MAX_SLOT_DEBUG_EXPORTS = 50
     _IMPORTANT_LOG_PHASES = {
@@ -80,12 +94,109 @@ class ProcessService:
                 runner_factory=Ready4DriveSite,
             ),
         }
+        # Registro paralelo de las automatizaciones v2. Mismo contrato, misma
+        # forma: lo unico que cambia es la clase. Los runners inyectados por
+        # constructor son siempre v1, asi que la v2 se construye fresca.
+        self._site_runner_factories_v2 = {
+            "Compinche": self._build_registered_site_runner_factory(
+                site_label="Compinche",
+                site_host="compinche.io",
+                runner_template=None,
+                runner_factory=CompincheSiteV2,
+            ),
+            "Paripe": self._build_registered_site_runner_factory(
+                site_label="Paripe",
+                site_host="paripe.io",
+                runner_template=None,
+                runner_factory=ParipeSiteV2,
+            ),
+            "Ready4Drive": self._build_registered_site_runner_factory(
+                site_label="Ready4Drive",
+                site_host="ready4drive.com",
+                runner_template=None,
+                runner_factory=Ready4DriveSiteV2,
+            ),
+        }
         self._process_debug_exports: OrderedDict[str, dict] = OrderedDict()
         self._slot_debug_exports: OrderedDict[str, dict] = OrderedDict()
         self._process_slot_map: dict[str, str] = {}
         self._process_debug_lock = threading.Lock()
+        # Run contexts of the runs currently in flight, keyed by their worker thread.
+        # A run occupies exactly one thread, so the key is stable and the entry is
+        # always removed by that same thread's finally block.
+        self._active_runs: dict[int, ProcessRunContext] = {}
+        self._active_runs_lock = threading.Lock()
+        self._closing = threading.Event()
+
+    def begin_shutdown(self) -> int:
+        """Stop accepting new runs and ask every in-flight run to cancel.
+
+        Returns how many runs were asked to stop. This only *requests* the stop:
+        each run notices its cancel_event at the next checkpoint and then closes its
+        own browser session on its own thread, which is what Playwright's sync API
+        requires. The caller must wait for those threads before tearing anything down.
+        """
+
+        self._closing.set()
+        with self._active_runs_lock:
+            contexts = list(self._active_runs.values())
+        for context in contexts:
+            context.cancel_event.set()
+        return len(contexts)
+
+    def active_run_count(self) -> int:
+        with self._active_runs_lock:
+            return len(self._active_runs)
+
+    def is_closing(self) -> bool:
+        return self._closing.is_set()
+
+    def _register_active_run(self, run_context: ProcessRunContext) -> None:
+        with self._active_runs_lock:
+            self._active_runs[threading.get_ident()] = run_context
+
+    def request_cancel(self, slot_id: str) -> int:
+        """Pide a la corrida de un panel que se detenga. Devuelve cuantas lo recibieron.
+
+        Solo SENALIZA: la corrida lo nota en su siguiente punto de control
+        (base_site._raise_if_cancelled) y cierra su propia sesion de navegador
+        en su propio hilo, que es lo que la API sync de Playwright exige.
+
+        Es por panel a proposito: detener el Proceso 1 no puede tocar al 2.
+        """
+
+        normalized = str(slot_id or "").strip()
+        if not normalized:
+            return 0
+        notified = 0
+        with self._active_runs_lock:
+            contexts = list(self._active_runs.values())
+        for context in contexts:
+            if str(getattr(context, "slot_id", "") or "").strip() != normalized:
+                continue
+            context.cancel_event.set()
+            notified += 1
+        return notified
+
+    def is_cancel_requested(self, slot_id: str) -> bool:
+        normalized = str(slot_id or "").strip()
+        with self._active_runs_lock:
+            contexts = list(self._active_runs.values())
+        return any(
+            str(getattr(context, "slot_id", "") or "").strip() == normalized
+            and context.cancel_event.is_set()
+            for context in contexts
+        )
 
     def shutdown(self) -> None:
+        """Last-resort teardown of anything still open.
+
+        Call this only after the run threads have been joined: each run closes its
+        own session in its finally block, and yanking Playwright out from under a
+        live run makes that cleanup fail.
+        """
+
+        self._closing.set()
         BrowserManager.shutdown_all()
 
     def register_process_slot(self, process_id: str | None, slot_id: str | None) -> None:
@@ -111,6 +222,33 @@ class ProcessService:
         *,
         progress_callback: Callable[[str, str], None] | None = None,
     ) -> ProcessExecutionResult:
+        if self._closing.is_set():
+            raise RuntimeError(
+                "La aplicacion se esta cerrando: no se aceptan procesos nuevos."
+            )
+        # _execute_run genera un process_id de respaldo cuando la peticion no
+        # trae uno, y TODO el flujo (incluido record_photo_source) usa ese. Hay
+        # que purgar ese mismo id, no el original: purgar el original dejaba un
+        # Counter huerfano por cada corrida sin process_id.
+        resolved_process_id: list[str | None] = [getattr(request, "process_id", None)]
+        try:
+            return self._execute_run(
+                request,
+                progress_callback=progress_callback,
+                resolved_process_id=resolved_process_id,
+            )
+        finally:
+            with self._active_runs_lock:
+                self._active_runs.pop(threading.get_ident(), None)
+            clear_photo_source_counts(resolved_process_id[0])
+
+    def _execute_run(
+        self,
+        request: ProcessExecutionRequest,
+        *,
+        progress_callback: Callable[[str, str], None] | None = None,
+        resolved_process_id: list[str | None] | None = None,
+    ) -> ProcessExecutionResult:
         sanitized_phone = sanitize_phone_number(request.phone_number)
         local_config = self._local_config_service.load()
         canonical_action_name = self._canonicalize_action_name(request.action_name)
@@ -123,12 +261,18 @@ class ProcessService:
                 "execution_mode": resolved_engine,
             }
         )
+        if resolved_process_id is not None:
+            # Se lo devolvemos a execute() para que su finally purgue este id.
+            resolved_process_id[0] = normalized_request.process_id
         reset_photo_source_counts(normalized_request.process_id)
         initial_phase = "login"
         flow_engine = self._engine_router.resolve(resolved_engine)
 
         site_label = normalized_request.page_name.strip()
-        site_runner = self._build_site_runner(site_label)
+        automation_version = normalize_automation_version(
+            getattr(local_config, "automation_version", "v1")
+        )
+        site_runner = self._build_site_runner(site_label, automation_version)
         if site_runner is None:
             return self._execute_stub(normalized_request)
 
@@ -145,6 +289,10 @@ class ProcessService:
             log_service=self._create_run_log_service(),
             slot_id=resolved_slot_id,
         )
+        self._register_active_run(run_context)
+        if self._closing.is_set():
+            # begin_shutdown() ran while this run was being set up.
+            run_context.cancel_event.set()
         run_context.run_stats.record(
             "process_started",
             {
@@ -181,12 +329,43 @@ class ProcessService:
         log_update_queue: queue.Queue[tuple[str, str] | None] = queue.Queue()
         log_worker_started = False
         log_worker_lock = threading.Lock()
+        log_worker_thread: threading.Thread | None = None
+        # Every call into log_service goes through this lock: the drain worker and the
+        # run thread would otherwise use the same client concurrently.
+        log_service_lock = threading.Lock()
+        # Once set, no further update_process may run. Without it a late update that was
+        # still in flight when finish_log_updates() timed out would land *after*
+        # finish_process() and overwrite the final state of the run.
+        log_updates_closed = threading.Event()
 
         def should_write_log_update(phase: str, message: str) -> bool:
             signature = (phase, message)
             now = monotonic()
             if signature == run_context.last_log_update_signature:
                 return False
+            # En v2, las fases "importantes" dejan de saltarse el limitador.
+            #
+            # Medido en v1: de las 113 emisiones de log de una corrida de
+            # Paripe, ~84 pertenecen a fases exentas (photo_upload 34,
+            # block_read 16, final_submit 11...), asi que el limitador de
+            # 0,5 s practicamente no limitaba nada. Cada emision es un UPDATE
+            # individual a Supabase, sin agrupar: con 300 ms de latencia son
+            # 6-10 s por corrida, y ademas el cierre puede quedarse esperando
+            # hasta 20 s a que se vacie la cola.
+            #
+            # En v2 se aplica a todas un intervalo propio, mas largo que el
+            # general pero no cero, para no perder granularidad en las fases
+            # que de verdad importan. v1 se comporta EXACTAMENTE igual que
+            # siempre.
+            if phase in self._IMPORTANT_LOG_PHASES and automation_version == "v2":
+                last_important = run_context.last_log_update_at
+                if last_important is not None and (
+                    (now - last_important) < self._V2_IMPORTANT_LOG_MIN_INTERVAL_SECONDS
+                ):
+                    return False
+                run_context.last_log_update_at = now
+                run_context.last_log_update_signature = signature
+                return True
             if phase in self._IMPORTANT_LOG_PHASES or run_context.last_log_update_at is None:
                 run_context.last_log_update_at = now
                 run_context.last_log_update_signature = signature
@@ -206,37 +385,73 @@ class ProcessService:
                     phase, message = item
                     if run_context.log_record_id is None or not run_context.log_updates_enabled:
                         continue
-                    try:
-                        run_context.log_service.update_process(run_context.log_record_id, phase=phase, message=message)
-                    except Exception as exc:
-                        run_context.log_updates_enabled = False
-                        register_log_warning(
-                            f"process_logs no disponible para updates en esta ejecucion: {exc}"
-                        )
+                    if log_updates_closed.is_set():
+                        # The run already finished (or gave up waiting): a late update
+                        # would overwrite the final state written by finish_process().
+                        continue
+                    with log_service_lock:
+                        # Re-check under the lock: finish_log_updates() may have closed
+                        # the window while this item was waiting for it.
+                        if log_updates_closed.is_set():
+                            continue
+                        try:
+                            run_context.log_service.update_process(
+                                run_context.log_record_id, phase=phase, message=message
+                            )
+                        except Exception as exc:
+                            run_context.log_updates_enabled = False
+                            register_log_warning(
+                                f"process_logs no disponible para updates en esta ejecucion: {exc}"
+                            )
                 finally:
                     log_update_queue.task_done()
 
         def ensure_log_worker_started() -> None:
-            nonlocal log_worker_started
+            nonlocal log_worker_started, log_worker_thread
             with log_worker_lock:
                 if log_worker_started:
                     return
-                log_worker_started = True
-                threading.Thread(
+                worker = threading.Thread(
                     target=drain_log_updates,
                     name=f"process-log-updates-{normalized_request.process_id}",
                     daemon=True,
-                ).start()
+                )
+                # Only flag it as started once start() returned: if the thread
+                # cannot be created, finish_log_updates() must not silently join a
+                # thread that never ran and drop every queued update without a word.
+                worker.start()
+                log_worker_thread = worker
+                log_worker_started = True
 
         def queue_log_update(phase: str, message: str) -> None:
             ensure_log_worker_started()
             log_update_queue.put((phase, message))
 
         def finish_log_updates() -> None:
-            if not log_worker_started:
+            """Close the update window, bounded in time, and never reopen it.
+
+            Returns once the worker has drained or the budget is spent. In both
+            cases no further update_process can run, so a late write cannot
+            overwrite what finish_process() is about to store.
+            """
+
+            if log_updates_closed.is_set():
+                return
+            worker = log_worker_thread
+            if not log_worker_started or worker is None:
+                log_updates_closed.set()
                 return
             log_update_queue.put(None)
-            log_update_queue.join()
+            # Bounded: an unbounded join() blocked the run thread for good when the
+            # worker died inside its own except, or when a log write hung on the network.
+            worker.join(timeout=self._LOG_DRAIN_TIMEOUT_SECONDS)
+            log_updates_closed.set()
+            if worker.is_alive():
+                register_log_warning(
+                    "No se pudieron enviar todos los updates de process_logs "
+                    f"en {self._LOG_DRAIN_TIMEOUT_SECONDS:.0f}s; "
+                    "se descartan los pendientes y la ejecucion continua."
+                )
 
         def emit(phase: str, message: str) -> None:
             emit_progress(phase, message)
@@ -278,8 +493,9 @@ class ProcessService:
             )
             if run_context.log_record_id is not None:
                 try:
-                    finished_log = run_context.log_service.finish_process(
-                        run_context.log_record_id,
+                    finished_log = self._finish_process_log(
+                        run_context,
+                        log_service_lock,
                         phase="unexpected",
                         final_status="failed",
                         message=message,
@@ -294,7 +510,7 @@ class ProcessService:
                 site_runner.runner,
                 extras=self._build_run_context_debug_payload(run_context),
             )
-            return ProcessExecutionResult(
+            failed_result = ProcessExecutionResult(
                 process_log_id=finished_log.id if finished_log is not None else None,
                 process_id=normalized_request.process_id,
                 page_name=normalized_request.page_name,
@@ -305,7 +521,18 @@ class ProcessService:
                 message=message,
                 final_status="failed",
                 phase="unexpected",
+                agent_name=normalized_request.agent_name,
+                completed_at=self._utcnow(),
             )
+            # Persist the failure: otherwise the last-result panel keeps showing the
+            # previous *successful* run as if nothing had gone wrong.
+            try:
+                self._last_result_service.save_result(failed_result)
+            except Exception as save_exc:  # noqa: BLE001
+                register_log_warning(
+                    f"No se pudo guardar el resultado fallido en disco: {save_exc}"
+                )
+            return failed_result
 
         completed_at = self._utcnow()
         finished_log = None
@@ -319,8 +546,9 @@ class ProcessService:
         finish_log_updates()
         if run_context.log_record_id is not None:
             try:
-                finished_log = run_context.log_service.finish_process(
-                    run_context.log_record_id,
+                finished_log = self._finish_process_log(
+                    run_context,
+                    log_service_lock,
                     phase=site_result.phase,
                     final_status=site_result.final_status,
                     message=self._build_finish_message(
@@ -366,8 +594,39 @@ class ProcessService:
             deepfakescore_activated=site_result.deepfakescore_activated,
             completed_at=completed_at,
         )
-        self._last_result_service.save_result(result)
+        # Local persistence must not be able to fail the run: the remote log is
+        # best-effort, and so is this.
+        try:
+            self._last_result_service.save_result(result)
+        except Exception as save_exc:  # noqa: BLE001
+            register_log_warning(f"No se pudo guardar el ultimo resultado en disco: {save_exc}")
         return result
+
+    _LOG_FINISH_LOCK_TIMEOUT_SECONDS = 5.0
+
+    def _finish_process_log(
+        self,
+        run_context: ProcessRunContext,
+        log_service_lock: threading.Lock,
+        **fields,
+    ):
+        """Write the final process_logs row, serialised against the drain worker.
+
+        The lock is taken with a bound: if an update is still stuck inside the log
+        client we give up on the remote row rather than block the run thread. The
+        local result is persisted by the caller either way.
+        """
+
+        acquired = log_service_lock.acquire(timeout=self._LOG_FINISH_LOCK_TIMEOUT_SECONDS)
+        if not acquired:
+            raise TimeoutError(
+                "El cliente de process_logs sigue ocupado con un update anterior "
+                f"despues de {self._LOG_FINISH_LOCK_TIMEOUT_SECONDS:.0f}s."
+            )
+        try:
+            return run_context.log_service.finish_process(run_context.log_record_id, **fields)
+        finally:
+            log_service_lock.release()
 
     def _build_finish_message(
         self,
@@ -429,8 +688,23 @@ class ProcessService:
             phase="stub_validation",
         )
 
-    def _build_site_runner(self, site_label: str) -> RegisteredSiteRunner | None:
-        factory = self._site_runner_factories.get(site_label)
+    def _build_site_runner(
+        self,
+        site_label: str,
+        automation_version: str = "v1",
+    ) -> RegisteredSiteRunner | None:
+        """Elige la automatizacion segun la version configurada.
+
+        Cualquier valor que no sea exactamente v2 cae a v1: ante una config
+        corrupta se usa la version estable, nunca la nueva.
+        """
+
+        registry = (
+            self._site_runner_factories_v2
+            if normalize_automation_version(automation_version) == "v2"
+            else self._site_runner_factories
+        )
+        factory = registry.get(site_label)
         if factory is None:
             return None
         return factory()
