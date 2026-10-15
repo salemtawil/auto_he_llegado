@@ -424,20 +424,25 @@ class Ready4DriveSite(BaseSite):
         self.emit_progress(progress_callback, phase="photo_prepare", message="input selfie detectado: usando foto ya preparada")
         return preparation.reserved_photo
 
-    def _discard_background_photo(self, preparation: BackgroundPhotoPreparation | None) -> None:
-        if preparation is None or not preparation.ready_event.is_set() or preparation.consumed:
-            return
-        reserved_photo = preparation.reserved_photo
+    def _discard_background_photo(
+        self,
+        preparation: BackgroundPhotoPreparation | None,
+        *,
+        progress_callback: ProgressCallback | None = None,
+    ) -> None:
+        # Espera acotada al worker: antes se retornaba en seco cuando el ready_event
+        # todavia no estaba puesto, que es justo el caso de las salidas rapidas
+        # (no_block a ~1,5 s). El worker reservaba la foto despues y nadie volvia a
+        # verla: quedaba RESERVED para siempre.
+        reserved_photo = self._settle_background_photo(preparation)
         if reserved_photo is None:
             return
-        try:
-            self._photo_service.release_photo(reserved_photo.photo_id)
-        except Exception:
-            pass
-        try:
-            self._photo_service.delete_local_copy(reserved_photo.local_path)
-        except Exception:
-            pass
+        # Reservada en segundo plano y nunca subida: vuelve al pool.
+        self._cleanup_reserved_photo(
+            reserved_photo,
+            uploaded=False,
+            progress_callback=progress_callback,
+        )
 
     def _owner_selfie_upload_path(self, request: ProcessExecutionRequest) -> Path | None:
         if not request.owner_selfie_enabled:
@@ -633,6 +638,7 @@ class Ready4DriveSite(BaseSite):
 
     def _execute_pipeline(self, request: ProcessExecutionRequest, *, local_config: LocalConfig, progress_callback: ProgressCallback | None) -> SiteExecutionResult:
         self._reset_process_debug_state()
+        self._reset_photo_cleanup_registry()
         self._mark_phase_timing("process_started", process_id=getattr(request, "process_id", None))
         self._record_run_stat("process_started", process_id=getattr(request, "process_id", None))
         self._photo_service.validate_atomic_reservation_support()
@@ -701,10 +707,10 @@ class Ready4DriveSite(BaseSite):
             self._record_timeline_event("session_state_cleared", **cleanup_report)
             self.emit_progress(progress_callback, phase="login", message="estado de sesión limpiado")
             self.emit_progress(progress_callback, phase="login", message="login limpio confirmado")
-            session.capture_extension_debug(page=page, note="login_page_opened")
+            self._capture_extension_debug_if_useful(session, page=page, note="login_page_opened")
             page.set_default_timeout(max(page_timeout_ms, action_timeout_ms))
             login_result = self._perform_login(page, request=request, progress_callback=progress_callback, timeout_ms=max(page_timeout_ms, self._LOGIN_TIMEOUT_MS))
-            session.capture_extension_debug(page=page, note="login_completed")
+            self._capture_extension_debug_if_useful(session, page=page, note="login_completed")
             if login_result is not None:
                 self._mark_phase_timing("process_finished", success=login_result.success, final_status=login_result.final_status, phase=login_result.phase)
                 self._record_run_stat("process_finished", success=login_result.success, final_status=login_result.final_status, phase=login_result.phase)
@@ -735,7 +741,7 @@ class Ready4DriveSite(BaseSite):
             self._click_action_card(page, action_spec)
             self._mark_phase_timing("initial_action_clicked", action=action_spec.ui_name, url=page.url)
             self._record_run_stat("initial_action_clicked", action=action_spec.ui_name, url=page.url)
-            session.capture_extension_debug(page=page, note="initial_action_clicked")
+            self._capture_extension_debug_if_useful(session, page=page, note="initial_action_clicked")
             self.emit_progress(progress_callback, phase="initial_action", message="Accion inicial presionada.")
             self.emit_progress(progress_callback, phase="iframe_entry", message="Esperando carga del flujo He llegado dentro del iframe...")
             self._mark_phase_timing("iframe_wait_started", source="flow_root")
@@ -749,7 +755,7 @@ class Ready4DriveSite(BaseSite):
             )
             self._mark_phase_timing("iframe_detected", source="flow_root", url=page.url)
             self._record_run_stat("iframe_detected", source="flow_root", url=page.url)
-            session.capture_extension_debug(page=page, note="iframe_flow_detected")
+            self._capture_extension_debug_if_useful(session, page=page, note="iframe_flow_detected")
             primary_flow_root = self._resolve_primary_flow_root(page, flow_root)
             self._set_active_flow_context(primary_flow_root, page=page, source="flow_root_detected")
             self.emit_progress(progress_callback, phase="iframe_entry", message=flow_root.description)
@@ -805,10 +811,16 @@ class Ready4DriveSite(BaseSite):
                 with suppress(Exception):
                     cleanup_report = session.clear_auth_state(page=page)
                     self._record_timeline_event("session_state_cleared_on_finish", **cleanup_report)
-                self._discard_background_photo(prepared_photo)
+                # Limpieza final: idempotente y sin propagar. Antes consume_photo y
+                # delete_local_copy quedaban fuera del suppress, y una excepcion aqui
+                # sustituia el resultado de una corrida que si habia completado.
+                self._discard_background_photo(prepared_photo, progress_callback=progress_callback)
                 if reserved_photo is not None:
-                    self._photo_service.consume_photo(reserved_photo.photo_id)
-                    self._photo_service.delete_local_copy(reserved_photo.local_path)
+                    self._cleanup_reserved_photo(
+                        reserved_photo,
+                        uploaded=True,
+                        progress_callback=progress_callback,
+                    )
             finally:
                 session.close()
 
@@ -859,7 +871,7 @@ class Ready4DriveSite(BaseSite):
                 extension_assisted=extension_assisted,
             )
             if session is not None:
-                session.capture_extension_debug(page=page, note="block_ready_after_selfie")
+                self._capture_extension_debug_if_useful(session, page=page, note="block_ready_after_selfie")
             self._set_active_flow_context(block_context, page=page, source="block_context_ready")
             self._observe_flow_state(block_context, page, "block_context_ready")
             active_context = self._get_active_flow_context(
@@ -902,7 +914,7 @@ class Ready4DriveSite(BaseSite):
                     extension_assisted=extension_assisted,
                 )
             if session is not None:
-                session.capture_extension_debug(page=page, note="final_submit_clicked")
+                self._capture_extension_debug_if_useful(session, page=page, note="final_submit_clicked")
             self.emit_progress(progress_callback, phase="final_submit", message="Boton final He llegado presionado y validado.")
             self.emit_progress(progress_callback, phase="final_result", message="Esperando resultado final en iframe...")
             self._mark_phase_timing("final_result_started", url=page.url)
@@ -925,7 +937,7 @@ class Ready4DriveSite(BaseSite):
             self._mark_phase_timing("final_result_done", success=result.success, final_status=result.final_status, url=page.url)
             self._record_run_stat("final_result_done", success=result.success, final_status=result.final_status, url=page.url)
             if session is not None:
-                session.capture_extension_debug(page=page, note="final_result_detected")
+                self._capture_extension_debug_if_useful(session, page=page, note="final_result_detected")
             self._observe_flow_state(final_context, page, "final_result_detected")
             self._last_process_debug_export = {
                 "last_url": page.url,
@@ -944,8 +956,13 @@ class Ready4DriveSite(BaseSite):
             return SiteExecutionResult(success=False, message=f"Fallo en flujo real de ready4drive.com: {exc}", final_status="failed", phase="unexpected", selfie_retry_count=selfie_retry_count, deepfakescore_activated=deepfakescore_activated, reserved_photo_id=reserved_photo.photo_id if reserved_photo else None)
         finally:
             if reserved_photo is not None:
-                self._photo_service.consume_photo(reserved_photo.photo_id)
-                self._photo_service.delete_local_copy(reserved_photo.local_path)
+                # Idempotente: si el bucle ya la cerro, esto no repite nada, y nunca
+                # propaga una excepcion que sustituya al resultado de la corrida.
+                self._cleanup_reserved_photo(
+                    reserved_photo,
+                    uploaded=True,
+                    progress_callback=progress_callback,
+                )
 
     def _perform_login(self, page: Page, *, request: ProcessExecutionRequest, progress_callback: ProgressCallback | None, timeout_ms: int) -> SiteExecutionResult | None:
         self.emit_progress(progress_callback, phase="login", message="Pagina de login cargada.")
@@ -1508,7 +1525,7 @@ class Ready4DriveSite(BaseSite):
                     self.emit_progress(
                         progress_callback,
                         phase="processing_loading_after_continue" if phase_action == "loading" else "block_read",
-                        message=f"ExtensiÃ³n reporta fase actual {extension_phase}. Se omiten fases anteriores.",
+                        message=f"Extensión reporta fase actual {extension_phase}. Se omiten fases anteriores.",
                     )
                     if phase_action == "loading":
                         block_context = self._wait_for_block_context(
@@ -1545,6 +1562,8 @@ class Ready4DriveSite(BaseSite):
             self._record_run_stat("selfie_input_detected", attempt=attempt, url=page.url)
             selfie_input_detected_at = monotonic()
             reserved_photo = None
+            # Frontera entre "reservada sin subir" y "pudo llegar al sitio".
+            photo_uploaded = False
             upload_path: Path
             upload_name: str
             if owner_selfie_path is not None:
@@ -1574,6 +1593,8 @@ class Ready4DriveSite(BaseSite):
                 self._record_timeline_event("selfie_input_to_upload_ms", attempt=attempt, value=selfie_input_to_upload_ms)
                 self._record_run_stat("selfie_input_to_upload_ms", attempt=attempt, value=selfie_input_to_upload_ms)
                 if reserved_photo is not None:
+                    # A partir de aqui la foto pudo haber llegado al sitio.
+                    photo_uploaded = True
                     self._upload_photo(current_root, reserved_photo=reserved_photo, timeout_ms=action_timeout_ms, file_input=file_input)
                 else:
                     self._upload_photo_file(current_root, local_path=upload_path, original_filename=upload_name, timeout_ms=action_timeout_ms, file_input=file_input)
@@ -1642,8 +1663,9 @@ class Ready4DriveSite(BaseSite):
                         self.emit_progress(progress_callback, phase="selfie_retry_if_needed", message=f"deepfakescore activado | reintentos: {attempt}")
                     self.emit_progress(progress_callback, phase="selfie_retry_if_needed", message=exc.message)
                     self.emit_progress(progress_callback, phase="selfie_retry_if_needed", message="Reintentando con nueva foto.")
-                    self._finalize_reserved_photo(reserved_photo)
+                    self._finalize_reserved_photo(reserved_photo, progress_callback=progress_callback)
                     reserved_photo = None
+                    photo_uploaded = False
                     if self._retry_limit_reached(attempt, max_selfie_retries):
                         self.emit_progress(progress_callback, phase="selfie_retry_if_needed", message="Maximo de intentos de selfie agotado.")
                         raise Ready4DriveFlowError(
@@ -1660,10 +1682,23 @@ class Ready4DriveSite(BaseSite):
                     attempt += 1
                     continue
                 raise
+            except Ready4DriveFlowError:
+                # Antes este `raise` desnudo salia sin liberar nada, y el llamador
+                # tampoco podia: su reserved_photo solo se liga al retorno exitoso.
+                self._cleanup_after_failed_attempt(
+                    reserved_photo,
+                    prepared_photo,
+                    uploaded=photo_uploaded,
+                    progress_callback=progress_callback,
+                )
+                raise
             except Exception:
-                if reserved_photo is not None:
-                    self._finalize_reserved_photo(reserved_photo)
-                self._discard_background_photo(prepared_photo)
+                self._cleanup_after_failed_attempt(
+                    reserved_photo,
+                    prepared_photo,
+                    uploaded=photo_uploaded,
+                    progress_callback=progress_callback,
+                )
                 raise
 
     def _complete_pre_selfie_account_step(
@@ -1782,9 +1817,51 @@ class Ready4DriveSite(BaseSite):
         textual_confirmation = signals["selfie_text"] or signals["account_options"]
         return structural_ready and textual_confirmation
 
-    def _finalize_reserved_photo(self, reserved_photo: ReservedPhoto) -> None:
-        self._photo_service.consume_photo(reserved_photo.photo_id)
-        self._photo_service.delete_local_copy(reserved_photo.local_path)
+    def _finalize_reserved_photo(
+        self,
+        reserved_photo: ReservedPhoto,
+        *,
+        progress_callback: ProgressCallback | None = None,
+    ) -> None:
+        """La foto pudo llegar al sitio: se consume y no se reutiliza."""
+
+        self._cleanup_reserved_photo(
+            reserved_photo,
+            uploaded=True,
+            progress_callback=progress_callback,
+        )
+
+    def _release_reserved_photo(
+        self,
+        reserved_photo: ReservedPhoto,
+        *,
+        progress_callback: ProgressCallback | None = None,
+    ) -> None:
+        """Reservada pero aun sin subir: vuelve al pool."""
+
+        self._cleanup_reserved_photo(
+            reserved_photo,
+            uploaded=False,
+            progress_callback=progress_callback,
+        )
+
+    def _cleanup_after_failed_attempt(
+        self,
+        reserved_photo: ReservedPhoto | None,
+        prepared_photo: BackgroundPhotoPreparation | None,
+        *,
+        uploaded: bool,
+        progress_callback: ProgressCallback | None = None,
+    ) -> None:
+        """Cierra reserva y preparacion en cualquier ruta de salida del intento."""
+
+        if reserved_photo is not None:
+            self._cleanup_reserved_photo(
+                reserved_photo,
+                uploaded=uploaded,
+                progress_callback=progress_callback,
+            )
+        self._discard_background_photo(prepared_photo, progress_callback=progress_callback)
 
     def _wait_for_block_context(
         self,
@@ -1815,7 +1892,7 @@ class Ready4DriveSite(BaseSite):
                     self.emit_progress(
                         progress_callback,
                         phase="block_read",
-                        message="ExtensiÃ³n detectÃ³ block_read_ready. Se usa como fuente primaria.",
+                        message="Extensión detectó block_read_ready. Se usa como fuente primaria.",
                     )
                 elif extension_phase == "return_to_selfie":
                     extension_return_hint = True
@@ -2348,7 +2425,7 @@ class Ready4DriveSite(BaseSite):
         session=None,
         extension_assisted: bool = False,
     ) -> Page | Frame | Locator:
-        if bool(getattr(self, "_final_submit_already_clicked", False)):
+        if self._final_submit_resolved():
             return root
         last_error = "El boton final 'He llegado' fue detectado, pero no respondio despues de varios intentos."
         resolution_reported = False
@@ -2401,24 +2478,84 @@ class Ready4DriveSite(BaseSite):
                     resolution_reported = True
                 iframe_root = self._resolve_iframe_final_context(page, current_root)
                 baseline_signature = self._result_signature(iframe_root)
-                self._click_locator_resilient(
+
+                # UNA SOLA ACTIVACION POR CORRIDA.
+                #
+                # El flag se marca ANTES de despachar: un timeout de Playwright, o una
+                # confirmacion que tarda, no prueban que el click no llegara al sitio.
+                # Antes este bloque reintentaba hasta 3 veces y _click_locator_resilient
+                # escalaba a force=True, Space y Enter, de modo que una sola corrida podia
+                # activar "He llegado" hasta 12 veces y aceptar el bloque por duplicado.
+                self._mark_final_submit_clicked()
+                dispatch_error = self._dispatch_final_click_once(
                     button,
-                    phase="final_submit",
-                    error_message="El boton final 'He llegado' fue detectado, pero no respondio al click.",
+                    progress_callback=progress_callback,
                 )
-                validated_root = self._validate_final_submit_reaction(
+                dispatch_error_name = (
+                    type(dispatch_error).__name__ if dispatch_error is not None else None
+                )
+                self._mark_phase_timing(
+                    "final_click_done",
+                    source="_submit_final_single_dispatch",
+                    url=page_url,
+                    dispatch_error=dispatch_error_name,
+                )
+                self._record_run_stat(
+                    "final_click_done",
+                    source="_submit_final_single_dispatch",
+                    url=page_url,
+                    dispatch_error=dispatch_error_name,
+                )
+                # La reaccion se verifica, pero su ausencia ya NO provoca otro click:
+                # devuelve el contexto que haya para que _detect_final_result decida.
+                return self._observe_final_submit_reaction(
                     iframe_root,
                     page=page,
                     baseline_signature=baseline_signature,
                     progress_callback=progress_callback,
                 )
-                self._mark_phase_timing("final_click_done", source=f"_submit_final_attempt_{attempt}", url=page_url)
-                self._record_run_stat("final_click_done", source=f"_submit_final_attempt_{attempt}", url=page_url)
-                return validated_root
             except Ready4DriveFlowError as exc:
                 last_error = exc.message
+                if self._final_submit_resolved():
+                    # Ya se despacho: no se vuelve a intentar bajo ningun concepto.
+                    raise
                 self._wait_interval(page, self._POLL_MS)
         raise Ready4DriveFlowError("final_submit", last_error)
+
+    def _observe_final_submit_reaction(
+        self,
+        root: Page | Frame | Locator,
+        *,
+        page: Page,
+        baseline_signature: str,
+        progress_callback: ProgressCallback | None,
+    ) -> Page | Frame | Locator:
+        """Observa la reaccion al click final SIN volver a pulsar ni abortar.
+
+        Sustituye a _validate_final_submit_reaction en la ruta de envio: alli su
+        excepcion hacia que el bucle reintentara el click. Ahora la ausencia de
+        reaccion solo se informa; la decision de exito o "no confirmado" es de
+        _detect_final_result, que es quien puede leer la confirmacion real del sitio.
+        """
+
+        try:
+            return self._validate_final_submit_reaction(
+                root,
+                page=page,
+                baseline_signature=baseline_signature,
+                progress_callback=progress_callback,
+            )
+        except Ready4DriveFlowError as exc:
+            self.emit_progress(
+                progress_callback,
+                phase="final_submit",
+                message=(
+                    "Sin reaccion confirmable tras el click final "
+                    f"({exc.message}). No se reintenta el click: se espera la "
+                    "confirmacion del sitio."
+                ),
+            )
+            return self._resolve_iframe_final_context(page, root)
 
     def _validate_final_submit_reaction(
         self,
@@ -2490,7 +2627,7 @@ class Ready4DriveSite(BaseSite):
                     self.emit_progress(
                         progress_callback,
                         phase="final_result",
-                        message="ExtensiÃ³n detectÃ³ final_result_ready. Se usa como fuente primaria.",
+                        message="Extensión detectó final_result_ready. Se usa como fuente primaria.",
                     )
                 elif extension_phase != "unknown":
                     fallback_reason = f"phase_{extension_phase}"
@@ -2544,6 +2681,14 @@ class Ready4DriveSite(BaseSite):
             current_root = self._resolve_iframe_final_context(page, iframe_root)
             root_text = self._normalized_root_text(current_root)
             reaction = self._collect_final_iframe_state(current_root, baseline_signature=baseline_signature)
+            # Primero el error explicito del sitio: es la unica senal que no admite
+            # interpretacion, y evaluarla despues permitia que una inferencia de
+            # progreso ganara a un fallo declarado.
+            if self._contains_any(root_text, self._selectors.final_failure_texts):
+                raise Ready4DriveFlowError(
+                    "final_result",
+                    "Se presiono el boton final, pero ready4drive.com devolvio un error dentro del mismo iframe antes del resultado final.",
+                )
             if reaction["signal"] == "success_text":
                 self._record_engine_resolution(
                     session,
@@ -2594,48 +2739,30 @@ class Ready4DriveSite(BaseSite):
                 ),
             )
             if reaction["signal"] in {"button_missing", "button_disabled", "block_replaced"}:
+                # SENAL DE PROGRESO, NO DE EXITO.
+                #
+                # Que el boton desaparezca o se deshabilite, o que el DOM cambie,
+                # significa que el sitio esta procesando: no que haya aceptado la
+                # operacion. Antes bastaba con que la senal se sostuviera 1,5 s para
+                # devolver success=True, asi que un bloque que se perdio (lo tomo
+                # otro, fallo de red) quedaba registrado como completado con los
+                # datos previos al click. Ahora se sigue esperando la confirmacion
+                # positiva de final_success_texts hasta el deadline.
                 if inferred_success_since is None:
                     inferred_success_since = monotonic()
-                    self.emit_progress(progress_callback, phase="final_result", message=f"Cambio final detectado dentro del iframe. Senal usada: {reaction['signal']}. Verificando resultado final...")
-                elif monotonic() - inferred_success_since >= 1.5:
-                    self._record_engine_resolution(
-                        session,
-                        None,
-                        phase="final_result_ready",
-                        source="extension_fallback_polling",
-                        note=f"final_result:{fallback_reason}",
-                    )
-                    self.emit_progress(
-                        progress_callback,
-                        phase="final_result",
-                        message="final_result_ready resuelto por fallback tradicional",
-                    )
-                    self.emit_progress(progress_callback, phase="final_result", message="Resultado final detectado en iframe.")
-                    return SiteExecutionResult(
-                        success=True,
-                        message=(
-                            "Proceso completado correctamente en ready4drive.com. "
-                            f"Precio: {block_price}. Estacion: {station_name}. "
-                            f"Horario: {block_time}. Duracion: {block_duration}."
-                        ),
-                        final_status="success",
-                        phase="final_result",
-                        station_name=station_name,
-                        block_price=block_price,
-                        block_time=block_time,
-                        block_duration=block_duration,
-                        selfie_retry_count=selfie_retry_count,
-                        deepfakescore_retries=selfie_retry_count,
-                        deepfakescore_activated=deepfakescore_activated,
-                        reserved_photo_id=reserved_photo.photo_id if reserved_photo else None,
-                    )
+                    self.emit_progress(progress_callback, phase="final_result", message=f"Cambio final detectado dentro del iframe. Senal usada: {reaction['signal']}. Esperando confirmacion del sitio...")
             else:
                 inferred_success_since = None
             self._wait_interval(page, self._POLL_MS)
+        # Ambiguo hasta el deadline: el click se despacho, el sitio no confirmo ni
+        # rechazo. No se declara exito y no se vuelve a pulsar el boton. El operador
+        # debe comprobar el bloque manualmente.
         raise Ready4DriveFlowError(
             "final_result",
-            "Se presiono el boton final 'He llegado', pero no aparecio una confirmacion positiva dentro del timeout esperado.",
-            final_status="timeout",
+            "Resultado no confirmado: se presiono 'He llegado' en ready4drive.com y no aparecio "
+            "ni una confirmacion positiva ni un error del sitio dentro del tiempo de espera. "
+            "El bloque PUEDE haberse tomado: revisalo en el sitio antes de reintentar.",
+            final_status="unconfirmed",
         )
 
     def _collect_final_iframe_state(
@@ -2645,7 +2772,9 @@ class Ready4DriveSite(BaseSite):
         baseline_signature: str,
     ) -> dict[str, bool | str | None]:
         root_text = self._normalized_root_text(root)
-        final_button = self._find_final_submit_button(root)
+        # Buscador SIN la guarda de "ya despachado": aqui solo se observa el DOM, no
+        # se va a pulsar nada, y con la guarda button_present seria siempre False.
+        final_button = self._find_final_submit_button_unguarded(root)
         button_present = final_button is not None
         button_enabled = final_button is not None and self._locator_is_enabled(final_button)
         modal_still_open = self._has_strong_block_signal(root) and self._root_looks_like_block(root_text, root)
@@ -2772,6 +2901,15 @@ class Ready4DriveSite(BaseSite):
             locator.scroll_into_view_if_needed(timeout=1_000)
         except Exception:
             pass
+        if phase == "final_submit":
+            # El click final no escala nunca: force=True, Space y Enter tambien activan
+            # el boton, asi que la escalada convertia un click no confirmado en varios
+            # envios reales. Un unico intento, y el resultado lo decide la verificacion.
+            try:
+                locator.click(timeout=self.FINAL_CLICK_DISPATCH_TIMEOUT_MS)
+            except Exception as exc:
+                raise Ready4DriveFlowError(phase, error_message) from exc
+            return
         try:
             locator.click(timeout=1_500)
             return
@@ -3876,6 +4014,19 @@ class Ready4DriveSite(BaseSite):
         return candidates
 
     def _find_final_submit_button(self, root: Page | Frame | Locator) -> Locator | None:
+        # Tras despachar el click final nunca se devuelve otro boton: es la guarda de
+        # raiz contra un segundo envio, la misma que ya tenia Paripe.
+        if self._final_submit_resolved():
+            return None
+        return self._find_final_submit_button_unguarded(root)
+
+    def _find_final_submit_button_unguarded(self, root: Page | Frame | Locator) -> Locator | None:
+        """Localiza el boton final para OBSERVARLO, sin la guarda de un solo click.
+
+        Solo debe usarse para leer el estado del DOM; para pulsar se usa siempre
+        _find_final_submit_button.
+        """
+
         candidates = root.locator("button, [role='button'], a")
         try:
             count = candidates.count()

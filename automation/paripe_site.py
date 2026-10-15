@@ -175,12 +175,6 @@ class ParipeSelectors:
         "estoy aquí exitoso",
         "proceso exitoso",
         "he llegado exitoso",
-    )
-    success_markers: tuple[str, ...] = (
-        "estoy aqui exitoso",
-        "estoy aquÃ­ exitoso",
-        "proceso exitoso",
-        "he llegado exitoso",
         "i'm here successful",
         "i've arrived successful",
         "eu cheguei com sucesso",
@@ -220,6 +214,14 @@ class BackgroundPhotoPreparation:
 
 
 class ParipeSite(BaseSite):
+    #: Espera de cortesia tras pulsar "continuar", mientras se procesa la selfie.
+    #: Valor historico de la v1. La v2 lo baja (automation/v2/paripe_site_v2.py).
+    POST_CONTINUE_GRACE_SECONDS = 0.8
+
+    #: Pausa tras despachar el click final, antes de la contabilidad.
+    #: Valor historico de la v1. La v2 lo pone a 0.
+    POST_FINAL_CLICK_SETTLE_MS = 500
+
     site_name = "paripe.io"
     _ENTRY_URL = "https://paripe.io/login"
     _SHORT_WAIT_MS = 75
@@ -578,16 +580,24 @@ class ParipeSite(BaseSite):
         preparation.consumed = True
         return preparation.reserved_photo, ready_before_input
 
-    def _discard_background_photo(self, preparation: BackgroundPhotoPreparation | None) -> None:
-        if preparation is None or not preparation.ready_event.is_set() or preparation.consumed:
-            return
-        reserved_photo = preparation.reserved_photo
+    def _discard_background_photo(
+        self,
+        preparation: BackgroundPhotoPreparation | None,
+        *,
+        progress_callback: ProgressCallback | None = None,
+    ) -> None:
+        # Espera acotada al worker: antes se retornaba en seco cuando el ready_event
+        # todavia no estaba puesto, que es justo el caso de las salidas rapidas. El
+        # worker reservaba la foto despues y nadie volvia a verla.
+        reserved_photo = self._settle_background_photo(preparation)
         if reserved_photo is None:
             return
-        with suppress(Exception):
-            self._photo_service.release_photo(reserved_photo.photo_id)
-        with suppress(Exception):
-            self._photo_service.delete_local_copy(reserved_photo.local_path)
+        # Reservada en segundo plano y nunca subida: vuelve al pool.
+        self._cleanup_reserved_photo(
+            reserved_photo,
+            uploaded=False,
+            progress_callback=progress_callback,
+        )
 
     def _owner_selfie_upload_path(self, request: ProcessExecutionRequest) -> Path | None:
         if not request.owner_selfie_enabled:
@@ -844,6 +854,7 @@ class ParipeSite(BaseSite):
         progress_callback: ProgressCallback | None = None,
     ) -> SiteExecutionResult:
         self._reset_process_debug_state()
+        self._reset_photo_cleanup_registry()
         self._mark_phase_timing("process_started", process_id=getattr(request, "process_id", None))
         self._record_run_stat("process_started", process_id=getattr(request, "process_id", None))
         self._photo_service.validate_atomic_reservation_support()
@@ -913,7 +924,7 @@ class ParipeSite(BaseSite):
             self._record_timeline_event("session_state_cleared", **cleanup_report)
             self.emit_progress(progress_callback, phase="login", message="estado de sesión limpiado")
             self.emit_progress(progress_callback, phase="login", message="login limpio confirmado")
-            session.capture_extension_debug(page=page, note="login_page_opened")
+            self._capture_extension_debug_if_useful(session, page=page, note="login_page_opened")
             self._perform_login(
                 page,
                 request=request,
@@ -922,13 +933,13 @@ class ParipeSite(BaseSite):
             )
             self._mark_phase_timing("login_done", url=page.url)
             self._record_run_stat("login_done", url=page.url)
-            session.capture_extension_debug(page=page, note="login_completed")
+            self._capture_extension_debug_if_useful(session, page=page, note="login_completed")
             self.emit_progress(
                 progress_callback,
                 phase="account_selection",
                 message="Validacion de cuenta omitida. Continuando directo al flujo.",
             )
-            session.capture_extension_debug(page=page, note="account_selection_skipped")
+            self._capture_extension_debug_if_useful(session, page=page, note="account_selection_skipped")
             owner_selfie_path = self._owner_selfie_upload_path(request)
             prepared_photo = None
             if owner_selfie_path is None:
@@ -948,7 +959,7 @@ class ParipeSite(BaseSite):
             self._click_initial_action(page, request.action_name, timeout_ms=action_timeout_ms)
             self._mark_phase_timing("initial_action_clicked", action=action_spec.ui_name, url=page.url)
             self._record_run_stat("initial_action_clicked", action=action_spec.ui_name, url=page.url)
-            session.capture_extension_debug(page=page, note="initial_action_clicked")
+            self._capture_extension_debug_if_useful(session, page=page, note="initial_action_clicked")
             self.emit_progress(progress_callback, phase="initial_action", message="Accion inicial presionada.")
             self._mark_phase_timing("iframe_wait_started", source="photo_phase")
             selfie_dialog = self._wait_for_photo_phase(
@@ -962,7 +973,7 @@ class ParipeSite(BaseSite):
             self._set_active_flow_context(selfie_dialog, page=page, source="photo_phase_detected")
             self._mark_phase_timing("iframe_detected", source="photo_phase", url=page.url)
             self._record_run_stat("iframe_detected", source="photo_phase", url=page.url)
-            session.capture_extension_debug(page=page, note="photo_phase_detected")
+            self._capture_extension_debug_if_useful(session, page=page, note="photo_phase_detected")
             self._record_timeline_event("photo_phase_detected", url=page.url)
             details_context, reserved_photo, selfie_retry_count, deepfakescore_activated = self._complete_selfie_until_block(
                 page,
@@ -993,7 +1004,7 @@ class ParipeSite(BaseSite):
                 self._set_active_flow_context(details_context, page=page, source="block_context_ready")
                 if not self._final_submit_resolved():
                     self._observe_flow_state(details_context, page, "block_context_ready")
-                    session.capture_extension_debug(page=page, note="block_ready_after_selfie")
+                    self._capture_extension_debug_if_useful(session, page=page, note="block_ready_after_selfie")
                     self._record_timeline_event("block_read_ready", url=page.url)
                 active_context = self._get_active_flow_context(page)
                 fast_snapshot = (
@@ -1091,7 +1102,7 @@ class ParipeSite(BaseSite):
                 phase="final_submit",
                 message=f"Tiempo block_read -> click final: {click_elapsed_ms} ms",
             )
-            session.capture_extension_debug(page=page, note="final_submit_clicked")
+            self._capture_extension_debug_if_useful(session, page=page, note="final_submit_clicked")
             self.emit_progress(progress_callback, phase="final_submit", message="Boton final He llegado presionado.")
             self.emit_progress(progress_callback, phase="final_result", message="Esperando confirmacion final...")
             self._ensure_final_result_started(page=page)
@@ -1137,7 +1148,7 @@ class ParipeSite(BaseSite):
                 self._record_run_stat("process_finished", success=result.success, final_status=result.final_status)
                 self._emit_timing_summary(progress_callback)
                 return result
-            session.capture_extension_debug(page=page, note="final_result_detected")
+            self._capture_extension_debug_if_useful(session, page=page, note="final_result_detected")
             self._observe_flow_state(details_context, page, "final_result_detected")
             self._record_timeline_event(
                 "final_result_detected",
@@ -1202,10 +1213,18 @@ class ParipeSite(BaseSite):
                 with suppress(Exception):
                     cleanup_report = session.clear_auth_state(page=page)
                     self._record_timeline_event("session_state_cleared_on_finish", **cleanup_report)
-                self._discard_background_photo(prepared_photo)
+                # Limpieza final: idempotente (no repite lo que ya cerro el bucle) y
+                # sin propagar. Antes consume_photo/delete_local_copy quedaban fuera
+                # del suppress, y una excepcion aqui sustituia el `return result` de
+                # una corrida que si habia completado el bloque.
+                self._discard_background_photo(prepared_photo, progress_callback=progress_callback)
                 if reserved_photo is not None:
-                    self._photo_service.consume_photo(reserved_photo.photo_id)
-                    self._photo_service.delete_local_copy(reserved_photo.local_path)
+                    # Llego hasta el final del pipeline: la foto se uso.
+                    self._cleanup_reserved_photo(
+                        reserved_photo,
+                        uploaded=True,
+                        progress_callback=progress_callback,
+                    )
             finally:
                 session.close()
 
@@ -1598,7 +1617,7 @@ class ParipeSite(BaseSite):
                     self.emit_progress(
                         progress_callback,
                         phase="photo_upload",
-                        message=f"ExtensiÃ³n reporta fase actual {extension_phase}. Se evita esperar selfie_stage de forma rÃ­gida.",
+                        message=f"Extensión reporta fase actual {extension_phase}. Se evita esperar selfie_stage de forma rígida.",
                     )
                     return dialog or page.locator("body").first
             dom_signature = self._dom_signature(page)
@@ -1950,7 +1969,7 @@ class ParipeSite(BaseSite):
                     self.emit_progress(
                         progress_callback,
                         phase="processing_after_continue" if phase_action == "loading" else "block_read",
-                        message=f"ExtensiÃ³n reporta fase actual {extension_phase}. Se omiten fases anteriores.",
+                        message=f"Extensión reporta fase actual {extension_phase}. Se omiten fases anteriores.",
                     )
                     if phase_action == "loading":
                         details_context = self._wait_for_details_dialog(
@@ -1988,6 +2007,8 @@ class ParipeSite(BaseSite):
             self._record_run_stat("selfie_input_detected", attempt=attempt, url=page.url)
             selfie_input_detected_at = monotonic()
             reserved_photo = None
+            # Frontera entre "reservada sin subir" y "pudo llegar al sitio".
+            photo_uploaded = False
             photo_ready_before_input = False
             upload_path: Path
             upload_name: str
@@ -2029,6 +2050,10 @@ class ParipeSite(BaseSite):
                     value=int(max(monotonic() - selfie_input_detected_at, 0.0) * 1000),
                 )
                 if reserved_photo is not None:
+                    # A partir de aqui la foto pudo haber llegado al sitio: el flag se
+                    # marca ANTES de la llamada, porque un fallo a medias tampoco
+                    # permite reutilizarla.
+                    photo_uploaded = True
                     self._upload_photo(current_dialog, reserved_photo, timeout_ms=action_timeout_ms)
                 else:
                     self._upload_photo_file(current_dialog, local_path=upload_path, original_filename=upload_name, timeout_ms=action_timeout_ms)
@@ -2110,8 +2135,9 @@ class ParipeSite(BaseSite):
                         self.emit_progress(progress_callback, phase="photo_upload", message=f"deepfakescore activado | reintentos: {attempt}")
                     self.emit_progress(progress_callback, phase="photo_upload", message=exc.message)
                     self.emit_progress(progress_callback, phase="photo_upload", message="Reintentando con nueva foto.")
-                    self._finalize_reserved_photo(reserved_photo)
+                    self._finalize_reserved_photo(reserved_photo, progress_callback=progress_callback)
                     reserved_photo = None
+                    photo_uploaded = False
                     if self._retry_limit_reached(attempt, max_selfie_retries):
                         self.emit_progress(progress_callback, phase="photo_upload", message="Maximo de intentos de selfie agotado.")
                         raise ParipeFlowError(
@@ -2130,11 +2156,47 @@ class ParipeSite(BaseSite):
                     attempt += 1
                     continue
                 raise
-            except Exception:
-                if reserved_photo is not None:
-                    self._finalize_reserved_photo(reserved_photo)
-                self._discard_background_photo(prepared_photo)
+            except ParipeFlowError:
+                # Antes este `raise` desnudo salia sin liberar nada, y el llamador
+                # tampoco podia: su reserved_photo seguia en None. La fila quedaba
+                # RESERVED para siempre y el temporal en disco.
+                self._cleanup_after_failed_attempt(
+                    reserved_photo,
+                    prepared_photo,
+                    uploaded=photo_uploaded,
+                    progress_callback=progress_callback,
+                )
                 raise
+            except Exception:
+                self._cleanup_after_failed_attempt(
+                    reserved_photo,
+                    prepared_photo,
+                    uploaded=photo_uploaded,
+                    progress_callback=progress_callback,
+                )
+                raise
+
+    def _cleanup_after_failed_attempt(
+        self,
+        reserved_photo: ReservedPhoto | None,
+        prepared_photo: BackgroundPhotoPreparation | None,
+        *,
+        uploaded: bool,
+        progress_callback: ProgressCallback | None = None,
+    ) -> None:
+        """Cierra reserva y preparacion en cualquier ruta de salida del intento.
+
+        `uploaded` decide la politica: consumir si la foto pudo llegar al sitio,
+        liberar si todavia no se habia subido. Nunca lanza.
+        """
+
+        if reserved_photo is not None:
+            self._cleanup_reserved_photo(
+                reserved_photo,
+                uploaded=uploaded,
+                progress_callback=progress_callback,
+            )
+        self._discard_background_photo(prepared_photo, progress_callback=progress_callback)
 
     def _selfie_phase_visible(self, page: Page, dialog: Locator | None) -> bool:
         if dialog is None:
@@ -2152,9 +2214,33 @@ class ParipeSite(BaseSite):
         textual_confirmation = signals["selfie_text"] or signals["account_options"]
         return structural_ready and textual_confirmation
 
-    def _finalize_reserved_photo(self, reserved_photo: ReservedPhoto) -> None:
-        self._photo_service.consume_photo(reserved_photo.photo_id)
-        self._photo_service.delete_local_copy(reserved_photo.local_path)
+    def _finalize_reserved_photo(
+        self,
+        reserved_photo: ReservedPhoto,
+        *,
+        progress_callback: ProgressCallback | None = None,
+    ) -> None:
+        """La foto pudo llegar al sitio: se consume y no se reutiliza."""
+
+        self._cleanup_reserved_photo(
+            reserved_photo,
+            uploaded=True,
+            progress_callback=progress_callback,
+        )
+
+    def _release_reserved_photo(
+        self,
+        reserved_photo: ReservedPhoto,
+        *,
+        progress_callback: ProgressCallback | None = None,
+    ) -> None:
+        """Reservada pero aun sin subir: vuelve al pool."""
+
+        self._cleanup_reserved_photo(
+            reserved_photo,
+            uploaded=False,
+            progress_callback=progress_callback,
+        )
     def _fast_mark_block_context_from_button(self, page: Page) -> Locator | None:
         if not hasattr(page, "evaluate") or not hasattr(page, "locator"):
             return None
@@ -2299,7 +2385,7 @@ class ParipeSite(BaseSite):
         extension_strict: bool = False,
     ) -> Locator:
         method_started_at = monotonic()
-        grace_seconds = 0.8
+        grace_seconds = self.POST_CONTINUE_GRACE_SECONDS
         deadline = monotonic() + (timeout_ms / 1000)
         self._set_active_flow_context(flow_context, page=page, source="wait_for_details_dialog_start")
         waiting_reported = False
@@ -2337,7 +2423,7 @@ class ParipeSite(BaseSite):
                     self.emit_progress(
                         progress_callback,
                         phase="processing_after_continue",
-                        message="ExtensiÃ³n detectÃ³ block_read_ready. Se usa como fuente primaria.",
+                        message="Extensión detectó block_read_ready. Se usa como fuente primaria.",
                     )
                 elif extension_phase == "return_to_selfie":
                     extension_return_hint = True
@@ -2841,6 +2927,15 @@ class ParipeSite(BaseSite):
         return float(box.get("width") or 0) >= 2 and float(box.get("height") or 0) >= 2
 
     def _click_locator_resilient(self, locator: Locator, *, phase: str, error_message: str) -> None:
+        if phase == "final_submit":
+            # Defensa en profundidad: hoy ninguna ruta del click final llega aqui
+            # (usa un despacho unico propio), pero si alguna lo hiciera, la escalada
+            # a force=True / Space / Enter enviaria el bloque varias veces.
+            try:
+                locator.click(timeout=self.FINAL_CLICK_DISPATCH_TIMEOUT_MS)
+            except Exception as exc:
+                raise ParipeFlowError(phase, error_message) from exc
+            return
         try:
             locator.wait_for(state="visible", timeout=1_000)
             locator.scroll_into_view_if_needed(timeout=1_000)
@@ -3533,6 +3628,9 @@ class ParipeSite(BaseSite):
                     state=extension_state,
                 )
 
+        # FASE 1 (previa al despacho): localizar y esperar el boton. Aqui si es
+        # seguro reintentar, porque todavia no se envio nada al sitio.
+        button: Locator | None = None
         for attempt in range(1, 4):
             button = self._find_final_submit_button(dialog, page=page)
 
@@ -3550,58 +3648,96 @@ class ParipeSite(BaseSite):
                 )
 
             try:
-                button.wait_for(state="visible", timeout=min(timeout_ms, 400))
-
-                if not button_detected_reported:
-                    button_detected_reported = True
-                    self.emit_progress(progress_callback, phase="final_submit", message="final_submit block button found")
-
-                self._remember_final_button_candidate(
-                    context=dialog,
-                    button=button,
-                    page=page,
-                    source="_submit_final",
+                button.wait_for(
+                    state="visible",
+                    timeout=min(timeout_ms, self.FINAL_CLICK_READY_TIMEOUT_MS),
                 )
-
-                if not resolution_reported:
-                    self._record_engine_resolution(session, None, phase="final_submit_ready", source="polling tradicional", note="final_submit")
-                    self.emit_progress(
-                        progress_callback,
-                        phase="final_submit",
-                        message="final_submit_ready resuelto por polling tradicional",
-                    )
-                    resolution_reported = True
-
-                if attempt == 1:
-                    button.click(timeout=400)
-                elif attempt == 2:
-                    button.click(timeout=700, force=True)
-                else:
-                    button.evaluate("node => node.click()")
-
-                self._record_timeline_event("final_button_clicked", source=f"locator_attempt_{attempt}", url=page_url)
-                self._mark_phase_timing("final_click_done", source=f"_submit_final_attempt_{attempt}", url=page_url)
-                self._record_run_stat("final_click_done", source=f"_submit_final_attempt_{attempt}", url=page_url)
-                self._after_final_click_done(page=page)
-                page.wait_for_timeout(500)
-
-                self.emit_progress(
-                    progress_callback,
-                    phase="final_submit",
-                    message=f"final_submit clicked after {int((monotonic() - started_at) * 1000)} ms",
-                )
-                return
-
-            except ParipeFlowError:
-                raise
             except Exception:
                 if attempt == 3:
                     raise ParipeFlowError(
                         "final_submit",
-                        "El boton final 'He llegado' fue detectado, pero no respondio despues de varios intentos.",
+                        "El boton final 'He llegado' fue detectado, pero nunca quedo visible.",
                     )
                 sleep(min(self._SHORT_WAIT_MS, 150) / 1000)
                 continue
+            break
+
+        if button is None:  # pragma: no cover - cubierto por los raise de arriba
+            raise ParipeFlowError(
+                "final_submit",
+                "Se leyo el bloque, pero no aparecio el boton final 'He llegado' en el mismo contexto.",
+            )
+
+        if not button_detected_reported:
+            button_detected_reported = True
+            self.emit_progress(progress_callback, phase="final_submit", message="final_submit block button found")
+
+        self._remember_final_button_candidate(
+            context=dialog,
+            button=button,
+            page=page,
+            source="_submit_final",
+        )
+
+        if not resolution_reported:
+            self._record_engine_resolution(session, None, phase="final_submit_ready", source="polling tradicional", note="final_submit")
+            self.emit_progress(
+                progress_callback,
+                phase="final_submit",
+                message="final_submit_ready resuelto por polling tradicional",
+            )
+            resolution_reported = True
+
+        # FASE 2: UNA SOLA ACTIVACION. El flag se marca antes de despachar, porque un
+        # timeout de Playwright no prueba que el click no llegara al sitio. Si el
+        # despacho falla no se reintenta con force=True ni con evaluate(): se deja que
+        # _detect_final_result decida, y si no hay confirmacion el resultado sera
+        # "no confirmado", nunca un segundo envio.
+        self._record_timeline_event("final_button_clicked", source="locator_single_dispatch", url=page_url)
+        self._after_final_click_done(page=page)
+
+        dispatch_error: Exception | None = None
+        try:
+            button.click(timeout=self.FINAL_CLICK_DISPATCH_TIMEOUT_MS)
+        except Exception as exc:  # noqa: BLE001 - puede haber llegado igualmente
+            dispatch_error = exc
+
+        dispatch_error_name = type(dispatch_error).__name__ if dispatch_error is not None else None
+        self._mark_phase_timing(
+            "final_click_done",
+            source="_submit_final_single_dispatch",
+            url=page_url,
+            dispatch_error=dispatch_error_name,
+        )
+        self._record_run_stat(
+            "final_click_done",
+            source="_submit_final_single_dispatch",
+            url=page_url,
+            dispatch_error=dispatch_error_name,
+        )
+
+        # La contabilidad posterior nunca puede convertir un click ya despachado en
+        # un fallo de _submit_final.
+        if self.POST_FINAL_CLICK_SETTLE_MS > 0:
+            with suppress(Exception):
+                page.wait_for_timeout(self.POST_FINAL_CLICK_SETTLE_MS)
+
+        if dispatch_error is None:
+            self.emit_progress(
+                progress_callback,
+                phase="final_submit",
+                message=f"final_submit clicked after {int((monotonic() - started_at) * 1000)} ms",
+            )
+        else:
+            self.emit_progress(
+                progress_callback,
+                phase="final_submit",
+                message=(
+                    "El click final se despacho pero Playwright no lo confirmo "
+                    f"({dispatch_error_name}). No se reintenta: se verifica el resultado."
+                ),
+            )
+        return
 
     def _detect_final_result(
         self,
@@ -3640,7 +3776,7 @@ class ParipeSite(BaseSite):
                     self.emit_progress(
                         progress_callback,
                         phase="final_result",
-                        message="ExtensiÃ³n detectÃ³ final_result_ready. Se usa como fuente primaria.",
+                        message="Extensión detectó final_result_ready. Se usa como fuente primaria.",
                     )
                 elif extension_phase != "unknown":
                     fallback_reason = f"phase_{extension_phase}"
@@ -3753,59 +3889,33 @@ class ParipeSite(BaseSite):
                         button_disabled = False
             signature_changed = self._result_signature(dialog, page) != baseline_signature
             if (button_missing or button_disabled) and signature_changed:
+                # SENAL DE PROGRESO, NO DE EXITO.
+                #
+                # Tras el click `button_missing` es siempre True (se lee el flag, no
+                # el DOM), asi que la condicion se reducia a "la firma del DOM cambio
+                # durante 1,5 s" — y _result_signature son los primeros 400 caracteres
+                # del dialogo y del body. Cualquier spinner, reloj o re-render bastaba
+                # para declarar exito sin ninguna confirmacion del sitio. Ahora se
+                # sigue esperando _count_success_messages hasta el deadline.
                 if inferred_success_since is None:
                     inferred_success_since = monotonic()
                     self.emit_progress(
                         progress_callback,
                         phase="final_result",
-                        message="Cambio final de DOM detectado despues del click. Verificando confirmacion final...",
+                        message="Cambio final de DOM detectado despues del click. Esperando confirmacion del sitio...",
                     )
-                elif monotonic() - inferred_success_since >= 1.5:
-                    if extension_strict:
-                        raise self._build_extension_strict_error(
-                            phase="final_result_ready",
-                            reason=fallback_reason,
-                            state=extension_state,
-                        )
-                    self._record_engine_resolution(
-                        session,
-                        None,
-                        phase="final_result_ready",
-                        source="extension_fallback_polling",
-                        note=f"final_result:{fallback_reason}",
-                    )
-                    self.emit_progress(
-                        progress_callback,
-                        phase="final_result",
-                        message="final_result_ready resuelto por fallback tradicional",
-                    )
-                    self.emit_progress(
-                        progress_callback,
-                        phase="final_result",
-                        message="Confirmacion final detectada por cambio de estado del flujo.",
-                    )
-                    self._ensure_final_result_started(page=page)
-                    self._final_result_already_detected = True
-                    result = self._build_final_success_result(
-                        station_name=station_name,
-                        block_price=block_price,
-                        block_time=block_time,
-                        block_duration=block_duration,
-                        selfie_retry_count=selfie_retry_count,
-                        deepfakescore_activated=deepfakescore_activated,
-                        reserved_photo_id=reserved_photo_id,
-                    )
-                    self._record_final_result_flow_state(page=page, source="final_result:dom_change")
-                    self._ensure_final_result_done(result=result, page=page)
-                    return result
             else:
                 inferred_success_since = None
             page.wait_for_timeout(self._SHORT_WAIT_MS)
+        # Ambiguo hasta el deadline: el click se despacho, el sitio no confirmo ni
+        # rechazo. No se declara exito y no se vuelve a pulsar el boton.
         raise ParipeFlowError(
             "final_result",
-            "Se presiono 'He llegado', pero no aparecio una confirmacion final de exito dentro del timeout esperado. "
+            "Resultado no confirmado: se presiono 'He llegado' en paripe.io y no aparecio "
+            "ni una confirmacion positiva ni un error del sitio dentro del tiempo de espera. "
+            "El bloque PUEDE haberse tomado: revisalo en el sitio antes de reintentar. "
             f"Ultimo paso exitoso: {last_successful_step}.",
-            final_status="timeout",
+            final_status="unconfirmed",
         )
 
     def _resolve_block_context(self, flow_context: Locator, page: Page) -> Locator | None:
