@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -165,7 +166,98 @@ def _chunked(values: list[str], size: int):
         yield values[index : index + size]
 
 
-def _mark_database_reset(*, supabase_url: str, service_role_key: str) -> None:
+_SAFE_PREFIX_RE = re.compile(r"^[A-Za-z0-9._\-/]+$")
+
+
+def normalize_prefix(prefix: str) -> str:
+    """A storage prefix, without leading/trailing slashes.
+
+    An empty result would mean "the whole bucket", which this script must never
+    silently expand to: _iter_storage_objects walking from "" enumerates every
+    object in the bucket.
+
+    The value also lands inside a PostgREST ``like()`` filter that runs with the
+    service-role key, so characters that could alter that filter (``,``, ``%``,
+    ``(``, ``)``, ``.``-operators) are rejected outright rather than escaped.
+    """
+
+    normalized = str(prefix or "").strip().strip("/").strip()
+    if normalized and not _SAFE_PREFIX_RE.match(normalized):
+        raise ValueError(
+            f"Prefijo no valido: {prefix!r}. Solo se permiten letras, numeros, "
+            '".", "_", "-" y "/".'
+        )
+    return normalized
+
+
+def build_path_filter(prefix: str) -> str:
+    """PostgREST LIKE pattern for the rows stored under ``prefix``."""
+
+    normalized = normalize_prefix(prefix)
+    if not normalized:
+        raise ValueError(
+            "Un prefijo vacio afectaria a todo el bucket. Indica un prefijo explicito."
+        )
+    return f"{normalized}/%"
+
+
+def _scoped_photo_query(query, *, bucket_name: str, prefix: str, scope_bucket: bool):
+    """Apply the same --bucket/--prefix scope the Storage pass used.
+
+    The database pass used to be hardcoded to ``file_path LIKE 'available/%'``
+    with no bucket filter at all, so ``--prefix candidates`` deleted only the
+    candidate objects but still marked every ``available/`` row as discarded.
+    """
+
+    query = query.like("file_path", build_path_filter(prefix))
+    if scope_bucket:
+        query = query.eq("storage_bucket", bucket_name)
+    return query
+
+
+def count_photo_rows_in_scope(
+    client,
+    *,
+    photos_table: str,
+    bucket_name: str,
+    prefix: str,
+    scope_bucket: bool,
+) -> int:
+    """How many rows the DB pass would touch. Printed before anything changes."""
+
+    query = client.table(photos_table).select("id", count="exact")
+    query = _scoped_photo_query(
+        query, bucket_name=bucket_name, prefix=prefix, scope_bucket=scope_bucket
+    )
+    response = query.is_("storage_deleted_at", "null").execute()
+    count = getattr(response, "count", None)
+    if count is not None:
+        return int(count)
+    return len(getattr(response, "data", None) or [])
+
+
+def count_candidate_rows_in_scope(
+    client, *, candidates_table: str, bucket_name: str, prefix: str, scope_bucket: bool
+) -> int:
+    query = client.table(candidates_table).select("id", count="exact").eq("status", "pending")
+    query = query.like("storage_path", build_path_filter(prefix))
+    if scope_bucket:
+        query = query.eq("storage_bucket", bucket_name)
+    response = query.execute()
+    count = getattr(response, "count", None)
+    if count is not None:
+        return int(count)
+    return len(getattr(response, "data", None) or [])
+
+
+def _mark_database_reset(
+    *,
+    supabase_url: str,
+    service_role_key: str,
+    buckets: tuple[str, ...],
+    prefixes: tuple[str, ...],
+    scope_bucket: bool,
+) -> None:
     client = create_client(supabase_url, service_role_key)
     now = datetime.now(timezone.utc).isoformat()
     photos_table = os.getenv("SUPABASE_PHOTOS_TABLE") or "photos"
@@ -177,15 +269,6 @@ def _mark_database_reset(*, supabase_url: str, service_role_key: str) -> None:
         "cleanup_error": None,
         "cleaned_by": "admin_reset",
     }
-    (
-        client.table(photos_table)
-        .update(consumed_payload)
-        .eq("status", "consumed")
-        .like("file_path", "available/%")
-        .is_("storage_deleted_at", "null")
-        .execute()
-    )
-
     discarded_payload = {
         "status": "discarded",
         "reserved_at": None,
@@ -195,27 +278,40 @@ def _mark_database_reset(*, supabase_url: str, service_role_key: str) -> None:
         "cleanup_error": None,
         "cleaned_by": "admin_reset",
     }
-    (
-        client.table(photos_table)
-        .update(discarded_payload)
-        .neq("status", "consumed")
-        .like("file_path", "available/%")
-        .is_("storage_deleted_at", "null")
-        .execute()
-    )
-
     candidate_payload = {
         "status": "deleted",
         "reviewed_at": now,
         "rejection_reason": "reset_pool_cleanup",
         "updated_at": now,
     }
-    (
-        client.table(candidates_table)
-        .update(candidate_payload)
-        .eq("status", "pending")
-        .execute()
-    )
+
+    for bucket_name in buckets:
+        for prefix in prefixes:
+            consumed = _scoped_photo_query(
+                client.table(photos_table).update(consumed_payload).eq("status", "consumed"),
+                bucket_name=bucket_name,
+                prefix=prefix,
+                scope_bucket=scope_bucket,
+            )
+            consumed.is_("storage_deleted_at", "null").execute()
+
+            discarded = _scoped_photo_query(
+                client.table(photos_table).update(discarded_payload).neq("status", "consumed"),
+                bucket_name=bucket_name,
+                prefix=prefix,
+                scope_bucket=scope_bucket,
+            )
+            discarded.is_("storage_deleted_at", "null").execute()
+
+            candidates = (
+                client.table(candidates_table)
+                .update(candidate_payload)
+                .eq("status", "pending")
+                .like("storage_path", build_path_filter(prefix))
+            )
+            if scope_bucket:
+                candidates = candidates.eq("storage_bucket", bucket_name)
+            candidates.execute()
 
 
 def main() -> int:
@@ -234,6 +330,17 @@ def main() -> int:
     except RuntimeError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 2
+
+    try:
+        for prefix in prefixes:
+            build_path_filter(prefix)
+    except ValueError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 2
+
+    # Only scope by storage_bucket when the caller actually named buckets; the
+    # default run covers the legacy bucket too, where rows may carry a NULL bucket.
+    scope_bucket = bool(args.buckets)
 
     paths_by_bucket: dict[str, list[str]] = {}
     print("Escaneando Storage...")
@@ -255,7 +362,48 @@ def main() -> int:
     total_paths = sum(len(paths) for paths in paths_by_bucket.values())
     mode = "APPLY" if args.apply else "DRY-RUN"
     print(f"Modo: {mode}")
+    print(f"Buckets: {', '.join(buckets)} | Prefijos: {', '.join(prefixes)}")
     print(f"Total a borrar de Storage: {total_paths}")
+
+    # Show the DB blast radius BEFORE changing anything, in both modes.
+    if not args.skip_db:
+        try:
+            db_client = create_client(supabase_url, service_role_key)
+            photos_table = os.getenv("SUPABASE_PHOTOS_TABLE") or "photos"
+            candidates_table = (
+                os.getenv("SUPABASE_PHOTO_CANDIDATES_TABLE") or "photo_candidates"
+            )
+            total_rows = 0
+            total_candidates = 0
+            for bucket_name in buckets:
+                for prefix in prefixes:
+                    rows = count_photo_rows_in_scope(
+                        db_client,
+                        photos_table=photos_table,
+                        bucket_name=bucket_name,
+                        prefix=prefix,
+                        scope_bucket=scope_bucket,
+                    )
+                    candidates = count_candidate_rows_in_scope(
+                        db_client,
+                        candidates_table=candidates_table,
+                        bucket_name=bucket_name,
+                        prefix=prefix,
+                        scope_bucket=scope_bucket,
+                    )
+                    print(
+                        f"  - DB {bucket_name}/{prefix}: {rows} filas en photos, "
+                        f"{candidates} candidatos pendientes"
+                    )
+                    total_rows += rows
+                    total_candidates += candidates
+            print(
+                f"Total filas de photos en alcance: {total_rows} | "
+                f"candidatos pendientes en alcance: {total_candidates}"
+            )
+        except Exception as exc:  # noqa: BLE001 - counting must never block a dry run
+            print(f"AVISO: no se pudo contar el alcance en DB: {exc}", file=sys.stderr)
+
     if not args.apply:
         print(f"No se borro nada. Para aplicar: --apply --confirm {CONFIRMATION}")
         return 0
@@ -278,7 +426,13 @@ def main() -> int:
         return 0
 
     print("Marcando DB como descartada/limpia...")
-    _mark_database_reset(supabase_url=supabase_url, service_role_key=service_role_key)
+    _mark_database_reset(
+        supabase_url=supabase_url,
+        service_role_key=service_role_key,
+        buckets=buckets,
+        prefixes=prefixes,
+        scope_bucket=scope_bucket,
+    )
     print("Reset del pool completado.")
     return 0
 

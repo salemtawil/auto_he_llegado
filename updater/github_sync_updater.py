@@ -4,11 +4,12 @@ import argparse
 import fnmatch
 import hashlib
 import json
+import re
 import shutil
 import sys
 from dataclasses import dataclass, field
 from datetime import datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Callable
 from urllib.request import Request, urlopen
 
@@ -122,8 +123,54 @@ class ApplyResult:
     warnings: list[str] = field(default_factory=list)
 
 
+_LEADING_CURDIR_RE = re.compile(r"^(?:\./)+")
+
+
 def normalize_relpath(value: str) -> str:
-    return value.replace("\\", "/").lstrip("./")
+    """Normalise separators and drop leading "./" segments.
+
+    Deliberately NOT ``lstrip("./")``: lstrip strips a character *set*, so it ate
+    the leading dot of every dotfile (".env" -> "env", ".github/ci.yml" ->
+    "github/ci.yml"). That silently defeated both the protected-path list and
+    BUILTIN_EXCLUDED_PREFIXES, and relocated dotfiles on disk.
+    """
+
+    normalized = str(value).replace("\\", "/")
+    normalized = _LEADING_CURDIR_RE.sub("", normalized)
+    return normalized
+
+
+def is_path_traversal(value: str) -> bool:
+    """True when a manifest path could escape the install directory.
+
+    ``normalize_relpath`` only strips a leading ``./``; it keeps ``..`` segments
+    and absolute paths, so it must never be used on its own to decide whether a
+    remote-supplied path is safe to write.
+    """
+
+    raw = str(value).replace("\\", "/")
+    if not raw.strip():
+        return True
+    if raw.startswith("//"):  # UNC (\\host\share) once backslashes are normalised
+        return True
+    if raw.startswith("/") or raw == "~" or raw.startswith("~/"):
+        return True
+    head = raw.split("/", 1)[0]
+    if len(head) == 2 and head[1] == ":":
+        return True
+    return any(part == ".." for part in raw.split("/"))
+
+
+def resolve_inside(root: Path, relative_path: str) -> Path:
+    """Resolve ``relative_path`` under ``root``, refusing anything that escapes it."""
+
+    if is_path_traversal(relative_path):
+        raise ValueError(f"Ruta de actualizacion no permitida: {relative_path!r}")
+    root_resolved = root.resolve()
+    target = (root_resolved / normalize_relpath(relative_path)).resolve()
+    if target != root_resolved and root_resolved not in target.parents:
+        raise ValueError(f"Ruta de actualizacion no permitida: {relative_path!r}")
+    return target
 
 
 def sha256_bytes(content: bytes) -> str:
@@ -230,10 +277,23 @@ def _validate_install_dir_by_layout(install_dir: Path, app_entrypoints: list[str
 validate_install_dir = _validate_install_dir_by_layout
 
 
+def fold_relpath(value: str) -> str:
+    """Case-folded form used ONLY to compare paths, never to build one.
+
+    Windows and macOS resolve ``.ENV`` and ``.env`` to the same file, so a
+    case-sensitive comparison would let a protected path through under a
+    different spelling.
+    """
+
+    return value.casefold()
+
+
 def is_path_allowed(path: str, allowed_roots: list[str]) -> bool:
-    normalized = normalize_relpath(path)
+    if is_path_traversal(path):
+        return False
+    normalized = fold_relpath(normalize_relpath(path))
     for root in allowed_roots:
-        current = normalize_relpath(root)
+        current = fold_relpath(normalize_relpath(root))
         if current.endswith("/"):
             if normalized.startswith(current):
                 return True
@@ -243,11 +303,15 @@ def is_path_allowed(path: str, allowed_roots: list[str]) -> bool:
 
 
 def is_path_protected(path: str, protected_paths: list[str]) -> bool:
-    normalized = normalize_relpath(path)
+    if is_path_traversal(path):
+        return True
+    normalized = fold_relpath(normalize_relpath(path))
     for pattern in protected_paths:
-        current = normalize_relpath(pattern)
+        current = fold_relpath(normalize_relpath(pattern))
         if "*" in current or "?" in current:
-            if fnmatch.fnmatch(normalized, current) or fnmatch.fnmatch(Path(normalized).name, current):
+            if fnmatch.fnmatchcase(normalized, current) or fnmatch.fnmatchcase(
+                fold_relpath(PurePosixPath(normalized).name), current
+            ):
                 return True
             continue
         if current.endswith("/"):
@@ -255,14 +319,16 @@ def is_path_protected(path: str, protected_paths: list[str]) -> bool:
             if normalized.startswith(prefix):
                 return True
             continue
-        if normalized == current or Path(normalized).name == current:
+        if normalized == current or fold_relpath(PurePosixPath(normalized).name) == current:
             return True
     return False
 
 
 def is_builtin_ignored(path: str) -> bool:
-    normalized = normalize_relpath(path)
-    return any(normalized.startswith(prefix) for prefix in BUILTIN_EXCLUDED_PREFIXES)
+    normalized = fold_relpath(normalize_relpath(path))
+    return any(
+        normalized.startswith(fold_relpath(prefix)) for prefix in BUILTIN_EXCLUDED_PREFIXES
+    )
 
 
 def github_tree_url(owner: str, repo: str, branch: str) -> str:
@@ -381,7 +447,9 @@ class GitHubSyncUpdater:
         backup_dir.mkdir(parents=True, exist_ok=True)
 
         for decision in changed:
-            staged_target = staging_dir / decision.path
+            # SECURITY: decision.path comes from the remote tree API; resolve it
+            # under staging_dir so a "../" entry cannot write outside the sandbox.
+            staged_target = resolve_inside(staging_dir, decision.path)
             staged_target.parent.mkdir(parents=True, exist_ok=True)
             content = analysis.download_payloads[decision.path]
             staged_target.write_bytes(content)
@@ -389,8 +457,8 @@ class GitHubSyncUpdater:
                 raise RemoteSyncError(f"Hash inválido en staging para {decision.path}")
 
         for decision in analysis.modified_files:
-            source = self.install_dir / decision.path
-            backup_target = backup_dir / decision.path
+            source = resolve_inside(self.install_dir, decision.path)
+            backup_target = resolve_inside(backup_dir, decision.path)
             backup_target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(source, backup_target)
 
@@ -399,8 +467,8 @@ class GitHubSyncUpdater:
         rolled_back = False
         try:
             for decision in changed:
-                source = staging_dir / decision.path
-                target = self.install_dir / decision.path
+                source = resolve_inside(staging_dir, decision.path)
+                target = resolve_inside(self.install_dir, decision.path)
                 target.parent.mkdir(parents=True, exist_ok=True)
                 self._copy_file(source, target)
                 if decision.status == "NEW":

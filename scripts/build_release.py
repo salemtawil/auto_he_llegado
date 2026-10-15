@@ -87,11 +87,25 @@ def _copy_env_files() -> None:
     env_example = PROJECT_ROOT / ".env.example"
     if env_example.exists():
         shutil.copy2(env_example, WINDOWS_RELEASE_DIR / ".env.example")
-    env_file = PROJECT_ROOT / ".env"
-    if env_file.exists():
-        shutil.copy2(env_file, WINDOWS_RELEASE_DIR / ".env")
-    elif env_example.exists():
-        shutil.copy2(env_example, WINDOWS_RELEASE_DIR / ".env")
+    # This script builds the CREDENTIAL-FREE package: it ships .env.example only,
+    # and the operator fills it in on the target machine.
+    #
+    # The internal packagers are deliberately different and must stay that way:
+    # packaging/windows/build_portable_windows.ps1,
+    # packaging/windows/build_installer_windows.ps1,
+    # packaging/macos/build_portable_macos.sh and
+    # packaging/macos/build_installer_macos.sh embed the operational .env on
+    # purpose, and validate that it exists before building, because the app is
+    # distributed internally and must work the moment it is installed. Their
+    # artifacts are confidential and go out through private channels only.
+    #
+    # Drop anything a previous build left behind in this (public) release dir.
+    (WINDOWS_RELEASE_DIR / ".env").unlink(missing_ok=True)
+    if not env_example.exists():
+        raise RuntimeError(
+            "Falta .env.example: no se construye un release sin plantilla de credenciales."
+        )
+    shutil.copy2(env_example, WINDOWS_RELEASE_DIR / ".env")
 
 
 def _copy_runtime_resources() -> None:

@@ -10,7 +10,7 @@ import time
 import zipfile
 from dataclasses import dataclass, field
 from datetime import datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Callable
 
 
@@ -39,24 +39,69 @@ class ApplyHelperResult:
     error: str | None = None
 
 
+class UnsafeUpdatePathError(ValueError):
+    """Raised when an update package carries a path that escapes the install dir."""
+
+
 def normalize_relpath(value: str | Path) -> str:
-    return str(value).replace("\\", "/").lstrip("./")
+    raw = str(value).replace("\\", "/")
+    if raw.startswith("//"):
+        raise UnsafeUpdatePathError(f"Ruta de actualizacion no permitida: {value!r}")
+    parts: list[str] = []
+    for part in raw.split("/"):
+        if part in ("", "."):
+            continue
+        if part == "..":
+            raise UnsafeUpdatePathError(f"Ruta de actualizacion no permitida: {value!r}")
+        parts.append(part)
+    # Windows drive letters / absolute POSIX paths must never survive normalization.
+    if PurePosixPath(raw).is_absolute() or (
+        parts and len(parts[0]) == 2 and parts[0][1] == ":"
+    ):
+        raise UnsafeUpdatePathError(f"Ruta de actualizacion no permitida: {value!r}")
+    normalized = "/".join(parts)
+    if not normalized:
+        return ""
+    # Keep a trailing slash: protected patterns such as "config/" rely on it to
+    # match a whole directory rather than a single file name.
+    if raw.endswith("/"):
+        normalized += "/"
+    return normalized
+
+
+def fold_relpath(value: str) -> str:
+    """Case-folded form used ONLY to compare paths, never to build one.
+
+    Windows and macOS resolve ``.ENV`` and ``.env`` to the same file, so a
+    case-sensitive comparison would let ``config/Settings.json`` or ``.Env``
+    slip past the protected list. ``casefold`` is used rather than ``lower``
+    so non-ASCII names fold correctly too.
+    """
+
+    return value.casefold()
 
 
 def is_protected_path(relative_path: str) -> bool:
-    normalized = normalize_relpath(relative_path)
+    try:
+        normalized = normalize_relpath(relative_path)
+    except UnsafeUpdatePathError:
+        # A traversal path is never safe to write: treat it as protected.
+        return True
+    folded = fold_relpath(normalized)
     for pattern in PROTECTED_PATH_PATTERNS:
-        current = normalize_relpath(pattern)
+        current = fold_relpath(normalize_relpath(pattern))
         if "*" in current or "?" in current:
-            if fnmatch.fnmatch(normalized, current) or fnmatch.fnmatch(Path(normalized).name, current):
+            if fnmatch.fnmatchcase(folded, current) or fnmatch.fnmatchcase(
+                fold_relpath(PurePosixPath(normalized).name), current
+            ):
                 return True
             continue
         if current.endswith("/"):
             prefix = current.rstrip("/") + "/"
-            if normalized.startswith(prefix):
+            if folded.startswith(prefix):
                 return True
             continue
-        if normalized == current:
+        if folded == current:
             return True
     return False
 
@@ -94,6 +139,17 @@ def extract_package_zip(package_zip: Path, target_root: Path) -> Path:
     extract_dir = target_root / f"extracted_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
     extract_dir.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(package_zip, "r") as archive:
+        # SECURITY: guard against Zip Slip. extractall() honours "../" and
+        # absolute member names, which would let a package write anywhere the
+        # user can write (autorun locations included).
+        safe_root = extract_dir.resolve()
+        for member in archive.infolist():
+            normalize_relpath(member.filename)
+            destination = (extract_dir / member.filename).resolve()
+            if destination != safe_root and safe_root not in destination.parents:
+                raise UnsafeUpdatePathError(
+                    f"El paquete de actualizacion contiene una ruta fuera del destino: {member.filename!r}"
+                )
         archive.extractall(extract_dir)
     children = [item for item in extract_dir.iterdir()]
     if len(children) == 1 and children[0].is_dir():
