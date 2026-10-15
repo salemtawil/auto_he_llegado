@@ -42,9 +42,15 @@ class UploaderService:
         self,
         file_paths: list[str | Path],
         *,
+        target_bucket: str,
         delete_local_on_success: bool = False,
         progress_callback: Callable[[UploadBatchProgress], None] | None = None,
     ) -> list[UploadItemResult]:
+        # El destino se resuelve y valida UNA sola vez, antes de subir nada, y
+        # se usa igual para todo el lote: subida, photos.storage_bucket,
+        # conteo de resultados y rollback. Si otro administrador cambia el pool
+        # activo mientras el lote corre, este lote no se entera.
+        batch_bucket = self._resolve_target_bucket(target_bucket)
         total_files = len(file_paths)
         results: list[UploadItemResult] = []
         pending_db_batch: list[tuple[int, Path, UploadItemResult, PhotoCreate]] = []
@@ -71,6 +77,7 @@ class UploaderService:
             )
             result, photo_create = self._upload_storage_stage(
                 path,
+                target_bucket=batch_bucket,
                 progress_callback=item_progress_callback,
             )
             if photo_create is None:
@@ -89,6 +96,7 @@ class UploaderService:
             if len(pending_db_batch) >= self._DB_BATCH_SIZE:
                 self._flush_pending_database_batch(
                     pending_db_batch,
+                    target_bucket=batch_bucket,
                     delete_local_on_success=delete_local_on_success,
                     progress_callback=progress_callback,
                     total_files=total_files,
@@ -99,6 +107,7 @@ class UploaderService:
         if pending_db_batch:
             self._flush_pending_database_batch(
                 pending_db_batch,
+                target_bucket=batch_bucket,
                 delete_local_on_success=delete_local_on_success,
                 progress_callback=progress_callback,
                 total_files=total_files,
@@ -125,12 +134,15 @@ class UploaderService:
         self,
         file_path: str | Path,
         *,
+        target_bucket: str,
         delete_local_on_success: bool = False,
         progress_callback: Callable[[UploadItemResult, str, str], None] | None = None,
     ) -> UploadItemResult:
+        batch_bucket = self._resolve_target_bucket(target_bucket)
         path = Path(file_path)
         result, photo_create = self._upload_storage_stage(
             path,
+            target_bucket=batch_bucket,
             progress_callback=progress_callback,
         )
         if photo_create is None:
@@ -142,6 +154,7 @@ class UploaderService:
                 result,
                 path,
                 exc,
+                target_bucket=batch_bucket,
                 progress_callback=progress_callback,
             )
         return self._finalize_database_success(
@@ -151,6 +164,32 @@ class UploaderService:
             photo_record,
             delete_local_on_success=delete_local_on_success,
         )
+
+    def _resolve_target_bucket(self, target_bucket: str | None) -> str:
+        """Valida el destino elegido contra la lista blanca de pools.
+
+        Se llama antes de tocar Storage: un destino ausente o no permitido
+        aborta el lote completo sin haber subido ningun archivo.
+        """
+
+        normalized = str(target_bucket or "").strip().strip("/")
+        if not normalized:
+            raise ValueError(
+                "Elige el pool de destino antes de iniciar la carga."
+            )
+        try:
+            allowed = self._pool_policy_service.list_allowed_buckets()
+        except Exception as exc:  # noqa: BLE001 - sin lista blanca no se sube
+            raise RuntimeError(
+                "No se pudo obtener la lista de pools permitidos: "
+                f"{exc}"
+            ) from exc
+        if normalized not in allowed:
+            raise ValueError(
+                f"El pool '{normalized}' no esta permitido como destino de carga. "
+                f"Permitidos: {', '.join(allowed) or 'ninguno'}."
+            )
+        return normalized
 
     def _create_photo_record(
         self,
@@ -162,10 +201,13 @@ class UploaderService:
         self,
         path: Path,
         *,
+        target_bucket: str,
         progress_callback: Callable[[UploadItemResult, str, str], None] | None = None,
     ) -> tuple[UploadItemResult, PhotoCreate | None]:
         pool_policy = self._pool_policy_service.get_policy()
-        storage_bucket = pool_policy.bucket
+        # El bucket viene congelado desde el inicio del lote; de la politica
+        # solo se toma el prefijo de carpeta.
+        storage_bucket = target_bucket
         photo_id = str(uuid4())
         storage_path = f"{pool_policy.available_prefix}/{photo_id}.jpg"
         result = UploadItemResult(
@@ -173,6 +215,7 @@ class UploaderService:
             original_filename=path.name,
             photo_id=photo_id,
             storage_path=storage_path,
+            storage_bucket=storage_bucket,
             success=False,
             message="Proceso no iniciado.",
         )
@@ -274,6 +317,7 @@ class UploaderService:
         self,
         pending_db_batch: list[tuple[int, Path, UploadItemResult, PhotoCreate]],
         *,
+        target_bucket: str,
         delete_local_on_success: bool,
         progress_callback: Callable[[UploadBatchProgress], None] | None,
         total_files: int,
@@ -330,6 +374,7 @@ class UploaderService:
                         result,
                         path,
                         exc,
+                        target_bucket=target_bucket,
                         progress_callback=item_progress_callback,
                     )
                 finalized_items.append((index, finalized))
@@ -411,10 +456,14 @@ class UploaderService:
         path: Path,
         exc: Exception,
         *,
+        target_bucket: str,
         progress_callback: Callable[[UploadItemResult, str, str], None] | None = None,
     ) -> UploadItemResult:
         result.database_error = str(exc)
-        rollback_error = self._rollback_storage_file(result.storage_path or "")
+        rollback_error = self._rollback_storage_file(
+            result.storage_path or "",
+            bucket_name=target_bucket,
+        )
         self._apply_failed_upload_local_cleanup(result, path)
         result.message = (
             "Storage upload completado, pero fallo el registro en base de datos: "
@@ -475,10 +524,13 @@ class UploaderService:
                 return candidate
             counter += 1
 
-    def _rollback_storage_file(self, storage_path: str) -> str | None:
+    def _rollback_storage_file(self, storage_path: str, *, bucket_name: str) -> str | None:
+        # Se revierte en el bucket al que realmente se subio el archivo, no en
+        # el pool activo: si otro administrador lo cambio durante el lote,
+        # releerlo aqui borraria del bucket equivocado.
         try:
             self._client_provider.remove_file(
-                bucket_name=self._pool_policy_service.get_policy().bucket,
+                bucket_name=bucket_name,
                 storage_path=storage_path,
             )
         except Exception as exc:

@@ -35,6 +35,35 @@ class StubClientProvider:
             raise self.remove_error
 
 
+class StubPoolPolicyService:
+    """Politica de pools con bucket activo mutable.
+
+    ``allowed`` son los buckets REALES de Storage aptos como destino; el bucket
+    activo no restringe esa lista.
+    """
+
+    def __init__(self, *, active: str = "photo-pool", allowed=None) -> None:
+        self.active = active
+        self.allowed = list(["photo-pool", "photo-pool-v2"] if allowed is None else allowed)
+
+    def get_policy(self):
+        active = self.active
+
+        class _Policy:
+            bucket = active
+            available_prefix = "available"
+            candidates_prefix = "candidates"
+            source = "supabase"
+
+        return _Policy()
+
+    def list_allowed_buckets(self):
+        return list(self.allowed)
+
+    def is_allowed_bucket(self, bucket: str) -> bool:
+        return bucket in self.allowed
+
+
 class StubPhotoRecord:
     def __init__(self, *, photo_id: str, storage_path: str) -> None:
         self.id = photo_id
@@ -95,10 +124,11 @@ def test_upload_failure_reports_storage_phase_and_moves_file(tmp_path) -> None:
     service = UploaderService(
         photos_repository=StubPhotosRepository(),
         client_provider=client_provider,
+        pool_policy_service=StubPoolPolicyService(),
         settings=settings,
     )
 
-    result = service.upload_file(source)
+    result = service.upload_file(source, target_bucket="photo-pool")
 
     assert result.success is False
     assert result.storage_uploaded is False
@@ -120,11 +150,12 @@ def test_transient_upload_failure_retries_and_keeps_local_file(tmp_path, monkeyp
     service = UploaderService(
         photos_repository=StubPhotosRepository(),
         client_provider=client_provider,
+        pool_policy_service=StubPoolPolicyService(),
         settings=settings,
     )
     monkeypatch.setattr("services.uploader_service.sleep", lambda _seconds: None)
 
-    result = service.upload_file(source)
+    result = service.upload_file(source, target_bucket="photo-pool")
 
     assert result.success is False
     assert result.storage_uploaded is False
@@ -145,10 +176,11 @@ def test_database_failure_reports_insert_phase_and_not_storage_phase(tmp_path) -
             create_error=RuntimeError("new row violates row-level security policy")
         ),
         client_provider=client_provider,
+        pool_policy_service=StubPoolPolicyService(),
         settings=settings,
     )
 
-    result = service.upload_file(source)
+    result = service.upload_file(source, target_bucket="photo-pool")
 
     assert result.success is False
     assert result.storage_uploaded is True
@@ -171,6 +203,7 @@ def test_local_cleanup_failure_is_reported_as_warning_after_success(
     service = UploaderService(
         photos_repository=StubPhotosRepository(),
         client_provider=StubClientProvider(),
+        pool_policy_service=StubPoolPolicyService(),
         settings=settings,
     )
 
@@ -179,7 +212,7 @@ def test_local_cleanup_failure_is_reported_as_warning_after_success(
 
     monkeypatch.setattr(Path, "unlink", fail_unlink)
 
-    result = service.upload_file(source, delete_local_on_success=True)
+    result = service.upload_file(source, target_bucket="photo-pool", delete_local_on_success=True)
 
     assert result.success is True
     assert result.storage_uploaded is True
@@ -199,11 +232,12 @@ def test_upload_files_emits_live_progress_updates(tmp_path) -> None:
     service = UploaderService(
         photos_repository=StubPhotosRepository(),
         client_provider=StubClientProvider(),
+        pool_policy_service=StubPoolPolicyService(),
         settings=settings,
     )
     events = []
 
-    results = service.upload_files([source], progress_callback=events.append)
+    results = service.upload_files([source], target_bucket="photo-pool", progress_callback=events.append)
 
     assert len(results) == 1
     assert events[0].status_text == "Preparando archivos..."
@@ -229,10 +263,11 @@ def test_upload_file_does_not_depend_on_unconfirmed_photo_columns(tmp_path) -> N
     service = UploaderService(
         photos_repository=repository,
         client_provider=StubClientProvider(),
+        pool_policy_service=StubPoolPolicyService(),
         settings=settings,
     )
 
-    result = service.upload_file(source)
+    result = service.upload_file(source, target_bucket="photo-pool")
 
     assert result.success is True
     assert len(repository.created_photos) == 1
