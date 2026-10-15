@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+
 import contextlib
 from datetime import datetime, timezone
 
@@ -7,6 +8,7 @@ from config.settings import Settings, get_settings
 from core.enums import PhotoStatus
 from core.exceptions import RepositoryError
 from core.models import PhotoUpdate, ReservedPhoto
+from core.storage_errors import is_storage_object_missing
 from services.photo_source_tracker import record_photo_source
 from services.photo_pool_policy_service import PhotoPoolPolicyService
 from services.temp_file_service import TempFileService
@@ -111,6 +113,7 @@ class ProcessPhotoService:
             if not reserved_photo.id or not reserved_photo.storage_path or not reserved_photo.original_filename:
                 raise RuntimeError("La reserva atomica devolvio una foto invalida.")
 
+            local_path = None
             try:
                 content, storage_bucket = self._download_reserved_photo(
                     reserved_photo.storage_path,
@@ -132,6 +135,13 @@ class ProcessPhotoService:
                     active_bucket=self._active_bucket(),
                 )
             except Exception as exc:
+                # The temp copy is written before the bookkeeping calls below it;
+                # if any of those fail the file would otherwise stay in
+                # local_data/temp_photos forever.
+                if local_path is not None:
+                    with contextlib.suppress(Exception):
+                        self.delete_local_copy(str(local_path))
+                    local_path = None
                 if self._is_storage_missing_error(exc):
                     last_missing_error = exc
                     missing_count += 1
@@ -255,24 +265,15 @@ class ProcessPhotoService:
 
     @staticmethod
     def _is_storage_missing_error(exc: Exception) -> bool:
-        normalized = str(exc or "").strip().lower()
-        if "failed to download file from supabase storage" in normalized and (
-            "404" in normalized or "not_found" in normalized or "not found" in normalized
-        ):
-            return True
-        return any(
-            token in normalized
-            for token in (
-                "not_found",
-                "not found",
-                "object not found",
-                "no such object",
-                "missing object",
-                "does not exist",
-                "statuscode': 404",
-                'statuscode": 404',
-            )
-        )
+        """Only an unambiguous, object-level "missing" may discard a pool row.
+
+        A bucket that does not exist, an RLS denial, a 401/403, a timeout or a
+        5xx must never reach _discard_missing_storage_photo: they used to match
+        the bare tokens "not found" / "does not exist" and discarded healthy
+        photos in bulk. See core/storage_errors.
+        """
+
+        return is_storage_object_missing(exc)
 
     @staticmethod
     def _utcnow() -> datetime:

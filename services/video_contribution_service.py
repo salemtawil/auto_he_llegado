@@ -77,9 +77,14 @@ class VideoContributionService:
         fingerprint = self._fingerprint_service.build(source)
         self._validate_min_duration(fingerprint.duration_seconds)
         existing_batches = self._review_service.list_video_fingerprint_candidates()
+        # A failed upload still has a fingerprint, but must not block its retry.
+        delivered_batches = [
+            row for row in existing_batches
+            if str(row.get("delivery_file_id") or "").strip()
+        ]
         duplicate = self._fingerprint_service.find_duplicate(
             fingerprint,
-            existing_batches,
+            delivered_batches,
             similarity_threshold=self._settings.video_duplicate_similarity_threshold,
             hamming_threshold=self._settings.video_duplicate_hamming_threshold,
         )

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -67,6 +69,8 @@ class PhotoReviewSnapshot:
     batches: list[PhotoBatchRecord]
     candidates: list[PhotoCandidateRecord]
 
+
+_LOGGER = logging.getLogger(__name__)
 
 class PhotoReviewService:
     _BULK_ACTION_CHUNK_SIZE = 100
@@ -321,14 +325,18 @@ class PhotoReviewService:
         candidate = self.get_candidate(candidate_id)
         if candidate.status == "approved":
             return candidate
+        # Un solo RPC para toda la operacion. Ademas de ahorrar dos viajes,
+        # evita descargar de un bucket y subir a otro si el pool activo cambia
+        # entre llamada y llamada.
+        active_bucket = self._active_bucket()
         content = self._client_provider.download_binary(
-            bucket_name=self._active_bucket(),
+            bucket_name=active_bucket,
             storage_path=candidate.storage_path,
         )
         photo_id = str(uuid4())
         storage_path = f"available/{photo_id}.jpg"
         self._client_provider.upload_binary(
-            bucket_name=self._active_bucket(),
+            bucket_name=active_bucket,
             storage_path=storage_path,
             content=content,
             content_type="image/jpeg",
@@ -338,7 +346,7 @@ class PhotoReviewService:
                 id=photo_id,
                 original_filename=candidate.original_name,
                 storage_path=storage_path,
-                storage_bucket=self._active_bucket(),
+                storage_bucket=active_bucket,
                 status=PhotoStatus.AVAILABLE,
                 source="reviewed_video_frame",
             )
@@ -376,11 +384,16 @@ class PhotoReviewService:
         batch_ids: set[str] = set()
         updated_count = 0
         reviewed_at = self._utcnow()
+        # _active_bucket() hace un RPC a Supabase. Estaba DENTRO del bucle y
+        # dos veces por foto: aprobar 180 fotos eran 360 peticiones de mas.
+        # Ademas, congelarlo aqui evita que el lote se parta en dos buckets si
+        # otro administrador cambia el pool activo a media aprobacion.
+        active_bucket = self._active_bucket()
         for candidate in pending_candidates:
             photo_id = str(uuid4())
             available_path = f"available/{photo_id}.jpg"
             self._client_provider.move_file(
-                bucket_name=self._active_bucket(),
+                bucket_name=active_bucket,
                 from_path=self._normalize_storage_path(candidate.storage_path),
                 to_path=available_path,
             )
@@ -389,7 +402,7 @@ class PhotoReviewService:
                     id=photo_id,
                     original_filename=candidate.original_name,
                     storage_path=available_path,
-                    storage_bucket=self._active_bucket(),
+                    storage_bucket=active_bucket,
                     status=PhotoStatus.AVAILABLE,
                     source="reviewed_video_frame",
                 )
@@ -465,9 +478,11 @@ class PhotoReviewService:
                 for candidate in pending_candidates
                 if candidate.storage_path
             ]
+            # Un RPC, no uno por trozo.
+            delete_bucket = self._active_bucket()
             for chunk in self._chunks(storage_paths, self._BULK_ACTION_CHUNK_SIZE):
                 self._client_provider.remove_files(
-                    bucket_name=self._active_bucket(),
+                    bucket_name=delete_bucket,
                     storage_paths=chunk,
                 )
 
@@ -502,8 +517,16 @@ class PhotoReviewService:
                 bucket_name=self._active_bucket(),
                 storage_path=self._normalize_storage_path(candidate.storage_path),
             )
-        except Exception:
-            pass
+        except Exception as exc:  # noqa: BLE001
+            # No se propaga a proposito: es limpieza de un archivo que ya no
+            # hace falta y no debe tumbar la operacion del operador. Pero antes
+            # se tragaba en silencio con un `pass`, asi que un bucket mal
+            # configurado dejaba basura sin que nadie se enterase nunca.
+            _LOGGER.warning(
+                "No se pudo borrar el archivo del candidato %s: %s",
+                getattr(candidate, "id", "?"),
+                exc,
+            )
 
     def get_candidate(self, candidate_id: str) -> PhotoCandidateRecord:
         rows = self._client_provider.execute(

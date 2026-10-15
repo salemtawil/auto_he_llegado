@@ -1,5 +1,7 @@
 from pathlib import Path
 
+import pytest
+
 from config.settings import Settings
 from core.enums import PhotoStatus
 from core.exceptions import RepositoryError
@@ -409,3 +411,33 @@ def test_consumed_legacy_bucket_photo_is_removed_from_bucket_it_came_from(tmp_pa
     assert repository.update_calls[0][1].status == PhotoStatus.CONSUMED
     assert repository.update_calls[0][1].cleanup_reason == "consumed_after_use"
     assert repository.update_calls[0][1].storage_deleted_at is not None
+
+
+def test_reserve_photo_deletes_the_temp_copy_when_bookkeeping_fails(tmp_path, monkeypatch) -> None:
+    """Regression: the local JPEG was written before the bookkeeping calls and
+    stayed in local_data/temp_photos forever when one of them raised."""
+
+    repository = StubPhotosRepository()
+    client_provider = StubClientProvider()
+    temp_file_service = StubTempFileService(tmp_path)
+    service = ProcessPhotoService(
+        photos_repository=repository,
+        client_provider=client_provider,
+        temp_file_service=temp_file_service,
+        settings=build_settings(tmp_path),
+    )
+
+    def explode(*_args, **_kwargs):
+        raise RuntimeError("no se pudo registrar el origen de la foto")
+
+    monkeypatch.setattr(
+        "services.process_photo_service.record_photo_source", explode
+    )
+
+    with pytest.raises(RuntimeError):
+        service.reserve_photo()
+
+    assert temp_file_service.deleted, "the temp copy must be removed on the error path"
+    assert not any(Path(path).exists() for path in temp_file_service.deleted)
+    # the reservation is released too, so the pool row does not stay RESERVED
+    assert repository.update_calls[0][1].status == PhotoStatus.AVAILABLE

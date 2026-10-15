@@ -1,13 +1,18 @@
 from __future__ import annotations
 
+import contextlib
+
 import threading
 import tkinter as tk
 
 import customtkinter as ctk
 
 from services.photo_review_service import PhotoCandidateRecord, PhotoReviewService, PhotoReviewSnapshot
+from ui.shared.dialogs import confirm_destructive_action
+from ui.shared.errors import safe_error_summary
 from ui.theme import (
     ACCENT,
+    ON_ACCENT,
     ACCENT_HOVER,
     BORDER,
     CARD_ALT_BG,
@@ -36,6 +41,8 @@ class PhotoReviewPanel(ctk.CTkFrame):
         super().__init__(master, fg_color="transparent", **kwargs)
         self._review_service = review_service or PhotoReviewService()
         self._snapshot: PhotoReviewSnapshot | None = None
+        self._cards_by_id: dict[str, ctk.CTkFrame] = {}
+        self._selection_vars: dict[str, tk.BooleanVar] = {}
         self._images: list[tk.PhotoImage] = []
         self._selected_candidate_ids: set[str] = set()
         self._is_loading = False
@@ -133,6 +140,7 @@ class PhotoReviewPanel(ctk.CTkFrame):
             height=32,
             corner_radius=10,
             fg_color=ACCENT,
+            text_color=ON_ACCENT,
             hover_color=ACCENT_HOVER,
             state="disabled",
         )
@@ -278,6 +286,8 @@ class PhotoReviewPanel(ctk.CTkFrame):
         generation = self._render_generation
         for child in self.scroll.winfo_children():
             child.destroy()
+        self._cards_by_id.clear()
+        self._selection_vars.clear()
         self._images.clear()
         visible_candidates = candidates[: self._display_limit]
         self._rendered_candidates = list(visible_candidates)
@@ -294,7 +304,9 @@ class PhotoReviewPanel(ctk.CTkFrame):
         for index, candidate in enumerate(visible_candidates):
             row = index // 3
             column = index % 3
-            self._candidate_card(candidate).grid(
+            card = self._candidate_card(candidate)
+            self._cards_by_id[candidate.id] = card
+            card.grid(
                 row=row,
                 column=column,
                 padx=8,
@@ -321,6 +333,9 @@ class PhotoReviewPanel(ctk.CTkFrame):
         card.grid_columnconfigure(0, weight=1)
         card._candidate_id = candidate.id
         selected_var = tk.BooleanVar(value=candidate.id in self._selected_candidate_ids)
+        if candidate.status == "pending":
+            # Guardada para poder marcar/desmarcar sin re-renderizar.
+            self._selection_vars[candidate.id] = selected_var
 
         image_label = ctk.CTkLabel(card, text="Cargando miniatura...", text_color=TEXT_MUTED, height=150)
         image_label.grid(row=0, column=0, padx=10, pady=(10, 8), sticky="ew")
@@ -362,6 +377,7 @@ class PhotoReviewPanel(ctk.CTkFrame):
             height=32,
             corner_radius=10,
             fg_color=ACCENT,
+            text_color=ON_ACCENT,
             hover_color=ACCENT_HOVER,
             state=enabled_state,
         ).grid(row=0, column=0, padx=(0, 6), sticky="ew")
@@ -424,12 +440,17 @@ class PhotoReviewPanel(ctk.CTkFrame):
             return
 
     def _find_candidate_card(self, candidate_id: str):
-        for child in self.scroll.winfo_children():
-            if getattr(child, "_candidate_id", None) == candidate_id:
-                return child
-        return None
+        # Antes esto recorria winfo_children() entero por CADA miniatura: con
+        # 180 tarjetas eran 32.400 recorridos y otras tantas llamadas a Tcl.
+        return self._cards_by_id.get(candidate_id)
 
     def _run_action(self, action: str, candidate: PhotoCandidateRecord) -> None:
+        if action == "delete" and not confirm_destructive_action(
+            title="Eliminar foto",
+            what=f"Se eliminara de Storage la foto {candidate.original_name}.",
+            parent=self,
+        ):
+            return
         self.status_box.configure(text="Procesando")
         threading.Thread(
             target=lambda: self._action_worker(action, candidate),
@@ -455,12 +476,20 @@ class PhotoReviewPanel(ctk.CTkFrame):
             for candidate in self._rendered_candidates
             if candidate.status == "pending"
         }
-        self._render_candidates(snapshot.candidates)
+        # Marcar casillas no necesita reconstruir nada: antes esto destruia y
+        # recreaba las 180 tarjetas (~1.260 widgets) solo para esto.
+        self._apply_selection_to_checkboxes()
 
     def _clear_selection(self) -> None:
         self._selected_candidate_ids.clear()
-        if self._snapshot is not None:
-            self._render_candidates(self._snapshot.candidates)
+        self._apply_selection_to_checkboxes()
+
+    def _apply_selection_to_checkboxes(self) -> None:
+        """Refleja la seleccion en las casillas ya dibujadas. O(n) sin tocar widgets."""
+
+        for candidate_id, variable in self._selection_vars.items():
+            with contextlib.suppress(Exception):
+                variable.set(candidate_id in self._selected_candidate_ids)
         self._sync_bulk_buttons()
 
     def _sync_bulk_buttons(self) -> None:
@@ -478,6 +507,12 @@ class PhotoReviewPanel(ctk.CTkFrame):
     def _run_bulk_action(self, action: str) -> None:
         candidate_ids = list(self._selected_candidate_ids)
         if not candidate_ids:
+            return
+        if action == "delete" and not confirm_destructive_action(
+            title="Eliminar fotos seleccionadas",
+            what=f"Se eliminaran de Storage las {len(candidate_ids)} fotos seleccionadas.",
+            parent=self,
+        ):
             return
         self._apply_bulk_progress(0, len(candidate_ids), action)
         self.approve_selected_button.configure(state="disabled")
@@ -529,7 +564,7 @@ class PhotoReviewPanel(ctk.CTkFrame):
             child.destroy()
         ctk.CTkLabel(
             self.scroll,
-            text=f"No se pudo cargar la revision: {exc}",
+            text=f"No se pudieron cargar las fotos. Revisa tu conexión y pulsa Refrescar. ({safe_error_summary(exc, context='revision de fotos')})",
             text_color=ERROR,
             justify="left",
             wraplength=720,

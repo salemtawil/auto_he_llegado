@@ -180,7 +180,7 @@ class StubFingerprintService:
 
     def find_duplicate(self, fingerprint, existing_batches, *, similarity_threshold, hamming_threshold):
         self.find_calls.append((fingerprint, existing_batches, similarity_threshold, hamming_threshold))
-        return self.duplicate
+        return self.duplicate if existing_batches else None
 
 
 def test_current_week_start_uses_monday_utc() -> None:
@@ -283,7 +283,13 @@ def test_video_submission_rejects_visual_duplicate_before_drive_upload(tmp_path)
     settings = build_settings(tmp_path)
     settings = Settings(**{**settings.__dict__, "video_submission_mode": "drive"})
     review_service = StubReviewService()
-    review_service.fingerprint_candidates = [{"id": "old-batch", "video_fingerprint": {"hashes": ["a" * 16]}}]
+    review_service.fingerprint_candidates = [
+        {
+            "id": "old-batch",
+            "video_fingerprint": {"hashes": ["a" * 16]},
+            "delivery_file_id": "drive-file-old",
+        }
+    ]
     duplicate = SimpleNamespace(batch_id="old-batch", score=0.83)
     delivery_service = StubDeliveryService()
     service = VideoContributionService(
@@ -312,6 +318,57 @@ def test_video_submission_rejects_visual_duplicate_before_drive_upload(tmp_path)
     assert review_service.batches[0].duplicate_of_batch_id == "old-batch"
     assert review_service.failed[0][0] == "batch-1"
     assert delivery_service.calls == []
+
+
+def test_failed_or_undelivered_batches_do_not_block_video_retry(tmp_path) -> None:
+    video = tmp_path / "weekly.mp4"
+    video.write_bytes(b"video-data")
+    settings = build_settings(tmp_path)
+    settings = Settings(**{**settings.__dict__, "video_submission_mode": "drive"})
+    review_service = StubReviewService()
+    review_service.fingerprint_candidates = [
+        {
+            "id": "failed-original",
+            "status": "rejected",
+            "video_fingerprint": {"hashes": ["a" * 16]},
+            "delivery_file_id": None,
+        },
+        {
+            "id": "failed-duplicate",
+            "status": "rejected",
+            "video_fingerprint": {"hashes": ["a" * 16]},
+            "delivery_file_id": "",
+        },
+        {
+            "id": "delivered",
+            "status": "pending_review",
+            "video_fingerprint": {"hashes": ["b" * 16]},
+            "delivery_file_id": "drive-file-1",
+        },
+    ]
+    fingerprint_service = StubFingerprintService()
+    delivery_service = StubDeliveryService()
+    service = VideoContributionService(
+        review_service=review_service,
+        extractor=StubExtractor(tmp_path),
+        delivery_service=delivery_service,
+        notification_service=StubNotificationService(),
+        fingerprint_service=fingerprint_service,
+        settings=settings,
+    )
+    session = AuthSession(
+        user_id="user-1",
+        email="member@example.com",
+        access_token="access",
+        refresh_token="refresh",
+        approved=True,
+    )
+
+    service.submit_video(video, session=session)
+
+    assert [row["id"] for row in fingerprint_service.find_calls[0][1]] == ["delivered"]
+    assert len(delivery_service.calls) == 1
+    assert review_service.failed == []
 
 
 def test_video_submission_rejects_short_video_before_batch_and_drive_upload(tmp_path) -> None:

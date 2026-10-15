@@ -17,6 +17,19 @@ def reset_photo_source_counts(process_id: str | None) -> None:
         _counts_by_process.pop(process_id, None)
 
 
+def clear_photo_source_counts(process_id: str | None) -> None:
+    """Olvida los contadores de una corrida ya terminada.
+
+    Se llama desde el finally de ProcessService.execute. Sin esto el
+    diccionario crecia un Counter por corrida indefinidamente.
+    """
+
+    if not process_id:
+        return
+    with _lock:
+        _counts_by_process.pop(process_id, None)
+
+
 def record_photo_source(
     process_id: str | None,
     bucket_name: str,

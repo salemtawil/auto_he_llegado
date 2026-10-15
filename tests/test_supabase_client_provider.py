@@ -4,6 +4,8 @@ import base64
 import json
 from types import SimpleNamespace
 
+import supabase
+
 from services.auth_context import AuthSession, get_current_session, set_current_session
 from storage.supabase_client import SupabaseClientProvider
 
@@ -82,7 +84,7 @@ def test_provider_uses_access_token_header_without_consuming_refresh_token(monke
             refresh_token="refresh-token",
         )
     )
-    monkeypatch.setattr("storage.supabase_client.create_client", fake_create_client)
+    monkeypatch.setattr("supabase.create_client", fake_create_client)
 
     try:
         client = SupabaseClientProvider(_Settings()).client
@@ -156,7 +158,7 @@ def test_execute_response_refreshes_expired_jwt_and_retries(monkeypatch) -> None
             role="admin",
         )
     )
-    monkeypatch.setattr("storage.supabase_client.create_client", fake_create_client)
+    monkeypatch.setattr("supabase.create_client", fake_create_client)
 
     try:
         provider = SupabaseClientProvider(_Settings())
@@ -195,7 +197,7 @@ def test_execute_response_factory_rebuilds_operation_after_refresh(monkeypatch) 
             role="admin",
         )
     )
-    monkeypatch.setattr("storage.supabase_client.create_client", fake_create_client)
+    monkeypatch.setattr("supabase.create_client", fake_create_client)
 
     try:
         provider = SupabaseClientProvider(_Settings())
@@ -230,7 +232,7 @@ def test_storage_upload_refreshes_expired_jwt_and_retries(monkeypatch) -> None:
             role="admin",
         )
     )
-    monkeypatch.setattr("storage.supabase_client.create_client", fake_create_client)
+    monkeypatch.setattr("supabase.create_client", fake_create_client)
 
     try:
         provider = SupabaseClientProvider(_Settings())
@@ -282,7 +284,7 @@ def test_storage_upload_refreshes_nearly_expired_jwt_before_upload(monkeypatch) 
             role="admin",
         )
     )
-    monkeypatch.setattr("storage.supabase_client.create_client", fake_create_client)
+    monkeypatch.setattr("supabase.create_client", fake_create_client)
 
     try:
         provider = SupabaseClientProvider(_Settings())

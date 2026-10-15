@@ -3,6 +3,7 @@ from __future__ import annotations
 from time import monotonic
 
 from config.settings import Settings, get_settings
+from core.storage_errors import is_storage_object_missing
 from core.enums import PhotoStatus
 from core.models import PhotoCleanupAudit, PhotoCleanupBatchProgress, PhotoCleanupResult, PhotoRecord
 from services.photo_pool_policy_service import PhotoPoolPolicyService
@@ -858,17 +859,14 @@ class PhotoCleanupService:
 
     @staticmethod
     def _is_storage_missing_error(message: str) -> bool:
-        normalized = str(message or "").strip().lower()
-        return any(
-            token in normalized
-            for token in (
-                "not found",
-                "404",
-                "no such object",
-                "missing object",
-                "does not exist",
-            )
-        )
+        """Only an unambiguous, object-level "missing" may mark a row as cleaned.
+
+        Treating a bucket/auth/RLS/timeout error as "already deleted" wrote
+        storage_deleted_at on rows whose objects were still live, and those rows
+        then never appeared in a pending-cleanup query again. See core/storage_errors.
+        """
+
+        return is_storage_object_missing(message)
 
     @staticmethod
     def _normalize_storage_path(storage_path: str | None) -> str:

@@ -141,33 +141,55 @@ class MaintenanceService:
         screenshots_days: int = 14,
         debug_days: int = 7,
         browser_profiles_days: int = 3,
+        review_thumbnails_days: int = 30,
+        collect_items: bool = True,
     ) -> dict:
+        """Purga local_data por antiguedad.
+
+        ``collect_items=False`` devuelve solo los totales. La limpieza
+        automatica del arranque lo usa asi: con miles de archivos, construir el
+        detalle de cada uno no aporta nada y solo gasta memoria.
+        """
+
         return {
             "dry_run": dry_run,
             "temp_photos": self._cleanup_files(
                 self._local_data_dir / "temp_photos",
                 older_than=timedelta(hours=max(temp_photos_hours, 1)),
                 dry_run=dry_run,
+                collect_items=collect_items,
             ),
             "failed_uploads": self._cleanup_files(
                 self._local_data_dir / "failed_uploads",
                 older_than=timedelta(days=max(failed_uploads_days, 1)),
                 dry_run=dry_run,
+                collect_items=collect_items,
             ),
             "results_screenshots": self._cleanup_files(
                 self._local_data_dir / "results" / "screenshots",
                 older_than=timedelta(days=max(screenshots_days, 1)),
                 dry_run=dry_run,
+                collect_items=collect_items,
             ),
             "debug": self._cleanup_directories(
                 self._local_data_dir / "debug",
                 older_than=timedelta(days=max(debug_days, 1)),
                 dry_run=dry_run,
+                collect_items=collect_items,
             ),
             "browser_profiles": self._cleanup_directories(
                 self._local_data_dir / "browser_profiles",
                 older_than=timedelta(days=max(browser_profiles_days, 1)),
                 dry_run=dry_run,
+                collect_items=collect_items,
+            ),
+            # Cache puro: si se borra, se vuelve a descargar al abrir la
+            # revision. Nunca se purgaba, y era lo segundo que mas ocupaba.
+            "review_thumbnails": self._cleanup_files(
+                self._local_data_dir / "review_thumbnails",
+                older_than=timedelta(days=max(review_thumbnails_days, 1)),
+                dry_run=dry_run,
+                collect_items=collect_items,
             ),
         }
 
@@ -254,7 +276,7 @@ class MaintenanceService:
             paths.append(f"{folder}/{name}")
         return paths
 
-    def _cleanup_files(self, root: Path, *, older_than: timedelta, dry_run: bool) -> dict:
+    def _cleanup_files(self, root: Path, *, older_than: timedelta, dry_run: bool, collect_items: bool = True) -> dict:
         if not root.exists():
             return {"removed": 0, "bytes_freed": 0, "items": []}
         cutoff = self._utcnow() - older_than
@@ -270,13 +292,14 @@ class MaintenanceService:
             if modified_at > cutoff:
                 continue
             size = path.stat().st_size
-            items.append(
-                {
-                    "path": str(path),
-                    "size_bytes": size,
-                    "modified_at": modified_at.isoformat(),
-                }
-            )
+            if collect_items:
+                items.append(
+                    {
+                        "path": str(path),
+                        "size_bytes": size,
+                        "modified_at": modified_at.isoformat(),
+                    }
+                )
             if dry_run:
                 continue
             with suppress(OSError):
@@ -289,7 +312,7 @@ class MaintenanceService:
             "items": items,
         }
 
-    def _cleanup_directories(self, root: Path, *, older_than: timedelta, dry_run: bool) -> dict:
+    def _cleanup_directories(self, root: Path, *, older_than: timedelta, dry_run: bool, collect_items: bool = True) -> dict:
         if not root.exists():
             return {"removed": 0, "bytes_freed": 0, "items": []}
         cutoff = self._utcnow() - older_than
@@ -305,13 +328,14 @@ class MaintenanceService:
             if modified_at > cutoff:
                 continue
             size = self._measure_path_size(path)
-            items.append(
-                {
-                    "path": str(path),
-                    "size_bytes": size,
-                    "modified_at": modified_at.isoformat(),
-                }
-            )
+            if collect_items:
+                items.append(
+                    {
+                        "path": str(path),
+                        "size_bytes": size,
+                        "modified_at": modified_at.isoformat(),
+                    }
+                )
             if dry_run:
                 continue
             with suppress(OSError):

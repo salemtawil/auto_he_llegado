@@ -71,6 +71,46 @@ def make_candidate(candidate_id: str, *, batch_id: str = "batch-1") -> PhotoCand
     )
 
 
+def test_fingerprint_candidates_query_excludes_undelivered_batches(tmp_path) -> None:
+    class RecordingQuery:
+        def __init__(self) -> None:
+            self.calls = []
+
+        @property
+        def not_(self):
+            return self
+
+        def __getattr__(self, name):
+            def record(*args, **kwargs):
+                self.calls.append((name, args, kwargs))
+                return self
+
+            return record
+
+    class RecordingProvider:
+        def __init__(self) -> None:
+            self.query = RecordingQuery()
+            self.client = self
+
+        def table(self, _name):
+            return self.query
+
+        def execute(self, _query):
+            return []
+
+    provider = RecordingProvider()
+    service = PhotoReviewService(
+        client_provider=provider,
+        photos_repository=StubPhotosRepository(),
+        settings=build_settings(tmp_path),
+    )
+
+    assert service.list_video_fingerprint_candidates() == []
+
+    assert ("is_", ("delivery_file_id", "null"), {}) in provider.query.calls
+    assert ("neq", ("delivery_file_id", ""), {}) in provider.query.calls
+
+
 def test_approve_candidates_moves_storage_and_bulk_creates_photos(tmp_path, monkeypatch) -> None:
     client_provider = StubClientProvider()
     repository = StubPhotosRepository()

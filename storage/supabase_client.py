@@ -5,9 +5,15 @@ import base64
 import json
 import time
 from threading import RLock
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from supabase import Client, ClientOptions, create_client
+# Importar supabase aqui costaba ~330 ms y se pagaba ANTES de que apareciera la
+# pantalla de login, aunque no se use hasta que el operador pulsa "Entrar".
+# Como el modulo tiene `from __future__ import annotations`, las anotaciones no
+# se evaluan en tiempo de ejecucion y basta con TYPE_CHECKING; los dos simbolos
+# que si se usan de verdad se importan dentro de su funcion.
+if TYPE_CHECKING:  # pragma: no cover - solo para anotaciones
+    from supabase import Client, ClientOptions
 
 from config.settings import Settings, get_settings
 from core.exceptions import RepositoryError, SupabaseClientError
@@ -32,6 +38,8 @@ class SupabaseClientProvider:
         return self._client
 
     def _create_client(self) -> Client:
+        from supabase import create_client
+
         self._settings.require_supabase()
         try:
             options = self._client_options_for_current_session()
@@ -47,10 +55,39 @@ class SupabaseClientProvider:
             ) from exc
 
     def reset_client(self) -> None:
+        # El cliente anterior se descarta porque esta caduco. Antes se soltaba
+        # la referencia sin mas y su pool de conexiones httpx quedaba huerfano.
+        previous = self._client
         self._client = None
+        if previous is not None:
+            self._close_client(previous)
+
+    @staticmethod
+    def _close_client(client: object) -> None:
+        """Cierra los pools httpx de un cliente que ya se va a descartar.
+
+        supabase-py 2.x no expone un close() publico, asi que se recorre una
+        lista corta de rutas conocidas. Todo va suprimido: si una version mueve
+        estos atributos, simplemente no se cierra nada y la app sigue igual.
+        Solo debe llamarse con un cliente que ya no se vaya a usar.
+        """
+
+        for attribute in ("postgrest", "storage", "auth", "functions"):
+            sub_client = getattr(client, attribute, None)
+            if sub_client is None:
+                continue
+            for session_attribute in ("session", "_session", "client", "_client"):
+                session = getattr(sub_client, session_attribute, None)
+                close = getattr(session, "close", None)
+                if callable(close):
+                    with contextlib.suppress(Exception):
+                        close()
+                    break
 
     @staticmethod
     def _client_options_for_current_session() -> ClientOptions | None:
+        from supabase import ClientOptions
+
         current_session = get_current_session()
         if current_session is None or not current_session.access_token:
             return None
