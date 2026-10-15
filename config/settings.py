@@ -202,7 +202,7 @@ def get_settings() -> Settings:
         ),
         supabase_timeout_seconds=_get_int_env("SUPABASE_TIMEOUT_SECONDS", 30),
         supabase_storage_limit_mb=_get_int_env("SUPABASE_STORAGE_LIMIT_MB", 0),
-        admin_access_password=_get_env("ADMIN_ACCESS_PASSWORD", "123456987") or "123456987",
+        admin_access_password=_get_env("ADMIN_ACCESS_PASSWORD", "") or "",
         weekly_min_approved_photos=_get_int_env("WEEKLY_MIN_APPROVED_PHOTOS", 20),
         video_requirement_days=_get_int_env("VIDEO_REQUIREMENT_DAYS", 7),
         video_frame_interval_seconds=_get_float_env("VIDEO_FRAME_INTERVAL_SECONDS", 0.0),

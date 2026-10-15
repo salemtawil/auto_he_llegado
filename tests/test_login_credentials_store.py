@@ -21,7 +21,7 @@ def test_save_uses_macos_keychain_for_password(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr("services.login_credentials_store.subprocess.run", fake_run)
 
     store = LoginCredentialsStore(settings=_settings(tmp_path))
-    store.save(identifier="alvaro", password="Compi123.")
+    store.save(identifier="alvaro", password="PLACEHOLDER-NOT-A-REAL-PASSWORD")
 
     data = json.loads((tmp_path / "remembered_login.json").read_text(encoding="utf-8"))
     assert data == {"identifier": "alvaro", "password_keychain": True}
@@ -34,7 +34,7 @@ def test_save_uses_macos_keychain_for_password(tmp_path, monkeypatch) -> None:
         "-a",
         "alvaro",
         "-w",
-        "Compi123.",
+        "PLACEHOLDER-NOT-A-REAL-PASSWORD",
     ]
 
 
@@ -54,7 +54,7 @@ def test_load_uses_macos_keychain_for_password(tmp_path, monkeypatch) -> None:
             "alvaro",
             "-w",
         ]
-        return SimpleNamespace(returncode=0, stdout="Compi123.\n")
+        return SimpleNamespace(returncode=0, stdout="PLACEHOLDER-NOT-A-REAL-PASSWORD\n")
 
     monkeypatch.setattr("services.login_credentials_store.sys.platform", "darwin")
     monkeypatch.setattr("services.login_credentials_store.subprocess.run", fake_run)
@@ -62,7 +62,7 @@ def test_load_uses_macos_keychain_for_password(tmp_path, monkeypatch) -> None:
     remembered = LoginCredentialsStore(settings=_settings(tmp_path)).load()
 
     assert remembered.identifier == "alvaro"
-    assert remembered.password == "Compi123."
+    assert remembered.password == "PLACEHOLDER-NOT-A-REAL-PASSWORD"
 
 
 def test_clear_removes_macos_keychain_password(tmp_path, monkeypatch) -> None:
@@ -75,7 +75,7 @@ def test_clear_removes_macos_keychain_password(tmp_path, monkeypatch) -> None:
     def fake_run(args, **kwargs):
         calls.append(args)
         if "find-generic-password" in args:
-            return SimpleNamespace(returncode=0, stdout="Compi123.\n")
+            return SimpleNamespace(returncode=0, stdout="PLACEHOLDER-NOT-A-REAL-PASSWORD\n")
         return SimpleNamespace(returncode=0, stdout="")
 
     monkeypatch.setattr("services.login_credentials_store.sys.platform", "darwin")

@@ -151,3 +151,4 @@ def test_app_debug_inspector_does_not_request_admin_if_user_is_not_admin(monkeyp
     app_debug_inspector.main()
 
     assert calls == ["theme"]
+

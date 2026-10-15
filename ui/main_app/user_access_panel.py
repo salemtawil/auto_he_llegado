@@ -8,8 +8,11 @@ import customtkinter as ctk
 from services.user_access_admin_service import UserAccessAdminService, UserAccessRecord
 from services.access_service import VideoRequirementPolicy
 from services.photo_pool_policy_service import PhotoPoolPolicy
+from ui.shared.dialogs import confirm_destructive_action
+from ui.shared.errors import safe_error_summary
 from ui.theme import (
     ACCENT,
+    ON_ACCENT,
     ACCENT_HOVER,
     BORDER,
     CARD_ALT_BG,
@@ -207,6 +210,7 @@ class UserAccessPanel(ctk.CTkFrame):
             corner_radius=9,
             font=ctk.CTkFont(size=12),
             fg_color=ACCENT,
+            text_color=ON_ACCENT,
             hover_color=ACCENT_HOVER,
         )
         self.save_policy_button.grid(row=2, column=6, rowspan=2, padx=14, pady=(0, 12), sticky="e")
@@ -267,6 +271,7 @@ class UserAccessPanel(ctk.CTkFrame):
             corner_radius=9,
             font=ctk.CTkFont(size=12),
             fg_color=ACCENT,
+            text_color=ON_ACCENT,
             hover_color=ACCENT_HOVER,
         )
         self.save_pool_policy_button.grid(row=2, column=2, padx=14, pady=(0, 12), sticky="e")
@@ -458,6 +463,7 @@ class UserAccessPanel(ctk.CTkFrame):
             corner_radius=9,
             font=ctk.CTkFont(size=12),
             fg_color=ACCENT,
+            text_color=ON_ACCENT,
             hover_color=ACCENT_HOVER,
             state="disabled" if user.approved and not user.disabled else "normal",
         ).grid(row=0, column=0, padx=(0, 8))
@@ -485,6 +491,7 @@ class UserAccessPanel(ctk.CTkFrame):
             corner_radius=9,
             font=ctk.CTkFont(size=12),
             fg_color=ACCENT,
+            text_color=ON_ACCENT,
             hover_color=ACCENT_HOVER,
             state="disabled" if not has_video or video_accepted else "normal",
         ).grid(row=1, column=0, padx=(0, 8), pady=(8, 0))
@@ -533,7 +540,34 @@ class UserAccessPanel(ctk.CTkFrame):
         except Exception as exc:
             self.after(0, lambda error=exc: self._show_error(error))
 
+    # Both of these are reversible from this same panel, so the dialog must not
+    # claim otherwise.
+    _CONFIRMATIONS = {
+        "disable": (
+            "Deshabilitar usuario",
+            "{who} perdera el acceso a la aplicacion de inmediato.",
+            "Puedes volver a habilitarlo con 'Aprobar' en esta misma lista.",
+        ),
+        "reject_video": (
+            "Rechazar video",
+            "Se rechazara el video de {who}; quedara sin acceso hasta que suba otro.",
+            "Puedes aprobar el siguiente video que suba, o eximirlo del requisito.",
+        ),
+    }
+
     def _run_action(self, action: str, user: UserAccessRecord) -> None:
+        confirmation = self._CONFIRMATIONS.get(action)
+        if confirmation is not None:
+            title, template, undo_hint = confirmation
+            who = user.login_id or user.email or user.id
+            if not confirm_destructive_action(
+                title=title,
+                what=template.format(who=who),
+                reversible=True,
+                undo_hint=undo_hint,
+                parent=self,
+            ):
+                return
         self.status_label.configure(text="Actualizando usuario...", text_color=TEXT_MUTED)
         threading.Thread(target=lambda: self._action_worker(action, user), daemon=True).start()
 
@@ -604,7 +638,7 @@ class UserAccessPanel(ctk.CTkFrame):
 
     def _finish_video_policy_error(self, exc: Exception) -> None:
         self.save_policy_button.configure(state="normal", text="Guardar")
-        self.policy_status_label.configure(text=f"No se pudo guardar la politica: {exc}", text_color=ERROR)
+        self.policy_status_label.configure(text=f"No se pudo guardar la política. Revisa tu conexión y vuelve a pulsar Guardar. ({safe_error_summary(exc, context='politica de video')})", text_color=ERROR)
 
     def _sync_duration_policy_controls(self) -> None:
         state = "normal" if bool(self.video_duration_based_var.get()) else "disabled"
@@ -634,12 +668,12 @@ class UserAccessPanel(ctk.CTkFrame):
 
     def _finish_pool_policy_error(self, exc: Exception) -> None:
         self.save_pool_policy_button.configure(state="normal", text="Guardar")
-        self.pool_policy_status_label.configure(text=f"No se pudo guardar el pool: {exc}", text_color=ERROR)
+        self.pool_policy_status_label.configure(text=f"No se pudo guardar la política del pool. Revisa tu conexión y vuelve a pulsar Guardar. ({safe_error_summary(exc, context='politica del pool')})", text_color=ERROR)
 
     def _show_error(self, exc: Exception) -> None:
         self._is_loading = False
         self.refresh_button.configure(state="normal", text="Refrescar")
-        self.status_label.configure(text=f"No se pudo cargar usuarios: {exc}", text_color=ERROR)
+        self.status_label.configure(text=f"No se pudo cargar la lista de usuarios. Revisa tu conexión y pulsa Refrescar. ({safe_error_summary(exc, context='lista de usuarios')})", text_color=ERROR)
 
     @staticmethod
     def _bucket_menu_values(active_bucket: str, buckets: list[str]) -> list[str]:

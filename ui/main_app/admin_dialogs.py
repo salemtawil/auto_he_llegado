@@ -11,8 +11,11 @@ from ui.main_app.current_result_panel import CurrentResultPanel
 from ui.main_app.extension_status_panel import ExtensionStatusPanel
 from ui.main_app.photo_review_panel import PhotoReviewPanel
 from ui.main_app.user_access_panel import UserAccessPanel
+from ui.shared.dialogs import confirm_destructive_action
+from ui.shared.errors import safe_error_summary
 from ui.theme import (
     ACCENT,
+    ON_ACCENT,
     ACCENT_HOVER,
     APP_BG,
     BORDER,
@@ -27,6 +30,11 @@ from ui.theme import (
     TEXT_MUTED,
     TEXT_PRIMARY,
     WARNING,
+)
+from config.features import (
+    PHOTO_REVIEW_DISABLED_MESSAGE,
+    PHOTO_REVIEW_DISABLED_TITLE,
+    PHOTO_REVIEW_ENABLED,
 )
 from ui.uploader.panel import UploaderPanel
 
@@ -114,6 +122,7 @@ class AdminPasswordDialog(ctk.CTkToplevel):
             height=42,
             corner_radius=14,
             fg_color=ACCENT,
+            text_color=ON_ACCENT,
             hover_color=ACCENT_HOVER,
         )
         submit_button.grid(row=0, column=1, padx=(8, 0), sticky="ew")
@@ -308,8 +317,50 @@ class AdminUploaderDialog(ctk.CTkToplevel):
         )
         panel.grid(row=1, column=0, sticky="nsew")
 
+    def _build_disabled_notice(self, master, *, title: str, message: str) -> None:
+        """La pestaña sigue visible, pero explica por que no se puede usar.
+
+        Se eligio mostrarla en vez de esconderla para que un administrador que
+        antes la usaba entienda que paso, en vez de buscarla.
+        """
+
+        master.grid_rowconfigure(0, weight=1)
+        card = ctk.CTkFrame(
+            master,
+            fg_color=CARD_BG,
+            corner_radius=18,
+            border_width=1,
+            border_color=BORDER,
+        )
+        card.grid(row=0, column=0, padx=8, pady=8, sticky="new")
+        card.grid_columnconfigure(0, weight=1)
+
+        ctk.CTkLabel(
+            card,
+            text=title,
+            font=ctk.CTkFont(size=18, weight="bold"),
+            text_color=TEXT_PRIMARY,
+            anchor="w",
+        ).grid(row=0, column=0, padx=18, pady=(18, 6), sticky="w")
+
+        ctk.CTkLabel(
+            card,
+            text=message,
+            text_color=TEXT_MUTED,
+            anchor="w",
+            justify="left",
+            wraplength=640,
+        ).grid(row=1, column=0, padx=18, pady=(0, 18), sticky="w")
+
     def _build_photo_review_tab(self, master) -> None:
         master.grid_columnconfigure(0, weight=1)
+        if not PHOTO_REVIEW_ENABLED:
+            self._build_disabled_notice(
+                master,
+                title=PHOTO_REVIEW_DISABLED_TITLE,
+                message=PHOTO_REVIEW_DISABLED_MESSAGE,
+            )
+            return
         master.grid_rowconfigure(0, weight=1)
         panel = PhotoReviewPanel(master)
         panel.grid(row=0, column=0, sticky="nsew")
@@ -487,6 +538,7 @@ class AdminUploaderDialog(ctk.CTkToplevel):
             height=32,
             corner_radius=12,
             fg_color=ACCENT,
+            text_color=ON_ACCENT,
             hover_color=ACCENT_HOVER,
         )
         self.cleanup_consumed_button.grid(row=2, column=0, padx=12, pady=(0, 6), sticky="ew")
@@ -559,6 +611,7 @@ class AdminUploaderDialog(ctk.CTkToplevel):
             height=32,
             corner_radius=12,
             fg_color=ACCENT,
+            text_color=ON_ACCENT,
             hover_color=ACCENT_HOVER,
         )
         self.cleanup_all_consumed_button.grid(row=2, column=0, padx=12, pady=(0, 6), sticky="ew")
@@ -582,8 +635,8 @@ class AdminUploaderDialog(ctk.CTkToplevel):
             height=32,
             corner_radius=12,
             fg_color=WARNING,
+            text_color=ON_ACCENT,
             hover_color=ACCENT_HOVER,
-            text_color=TEXT_PRIMARY,
         )
         self.cleanup_all_orphan_available_button.grid(row=4, column=0, padx=12, pady=(0, 12), sticky="ew")
 
@@ -594,8 +647,8 @@ class AdminUploaderDialog(ctk.CTkToplevel):
             height=32,
             corner_radius=12,
             fg_color=WARNING,
+            text_color=ON_ACCENT,
             hover_color=ACCENT_HOVER,
-            text_color=TEXT_PRIMARY,
         )
         self.discard_all_missing_available_button.grid(row=5, column=0, padx=12, pady=(0, 12), sticky="ew")
 
@@ -850,6 +903,19 @@ class AdminUploaderDialog(ctk.CTkToplevel):
 
     def _build_diagnostics_tab(self, master) -> None:
         master.grid_columnconfigure(0, weight=1)
+        master.grid_rowconfigure(0, weight=1)
+
+        # El contenido (resultado + estado de extension + payload tecnico) es mas
+        # alto que la pestaña, y sin contenedor con scroll la parte de abajo
+        # quedaba inalcanzable. Mismo patron que "Limpieza fotos".
+        scroll = ctk.CTkScrollableFrame(
+            master,
+            fg_color="transparent",
+            corner_radius=0,
+        )
+        scroll.grid(row=0, column=0, sticky="nsew")
+        scroll.grid_columnconfigure(0, weight=1)
+        master = scroll
         master.grid_rowconfigure(2, weight=1)
 
         header = ctk.CTkFrame(
@@ -1012,7 +1078,7 @@ class AdminUploaderDialog(ctk.CTkToplevel):
     def _finish_refresh_diagnostics_error(self, exc: Exception) -> None:
         self._diagnostics_loading = False
         self.refresh_diag_button.configure(state="normal", text="Refrescar diagnóstico")
-        self._set_diagnostics_idle_state(f"Error cargando diagnóstico: {exc}")
+        self._set_diagnostics_idle_state(f"No se pudo cargar el diagnóstico. Revisa tu conexión y pulsa Refrescar. ({safe_error_summary(exc, context='diagnostico')})")
 
     def _set_diagnostics_idle_state(self, summary_text: str = "Diagnóstico no cargado. Presiona Refrescar.") -> None:
         self._diagnostics_payloads = {}
@@ -1140,6 +1206,13 @@ class AdminUploaderDialog(ctk.CTkToplevel):
         )
 
     def _handle_cleanup_consumed(self) -> None:
+        if not confirm_destructive_action(
+            title="Limpiar fotos consumidas",
+            what="Se borraran de Storage hasta 100 fotos ya consumidas.",
+            scope="El historico en la tabla photos se conserva.",
+            parent=self,
+        ):
+            return
         self._run_photo_cleanup_task(
             busy_text="Limpiando consumidas...",
             success_text="Limpieza de consumidas completada.",
@@ -1147,6 +1220,13 @@ class AdminUploaderDialog(ctk.CTkToplevel):
         )
 
     def _handle_cleanup_stale_reserved(self) -> None:
+        if not confirm_destructive_action(
+            title="Limpiar reservadas viejas",
+            what="Se borraran de Storage hasta 100 fotos reservadas que quedaron colgadas.",
+            scope="El historico en la tabla photos se conserva.",
+            parent=self,
+        ):
+            return
         self._run_photo_cleanup_task(
             busy_text="Limpiando reservadas viejas...",
             success_text="Limpieza de reservadas viejas completada.",
@@ -1154,6 +1234,12 @@ class AdminUploaderDialog(ctk.CTkToplevel):
         )
 
     def _handle_cleanup_available_orphans(self) -> None:
+        if not confirm_destructive_action(
+            title="Limpiar huerfanas de available",
+            what="Se borraran de Storage hasta 1000 objetos huerfanos de available/ que no tienen fila en photos.",
+            parent=self,
+        ):
+            return
         self._run_photo_cleanup_task(
             busy_text="Limpiando huerfanas available...",
             success_text="Limpieza de huerfanas completada.",
@@ -1161,6 +1247,15 @@ class AdminUploaderDialog(ctk.CTkToplevel):
         )
 
     def _handle_discard_missing_available(self) -> None:
+        if not confirm_destructive_action(
+            title="Descartar fotos rotas",
+            what="Se marcaran como descartadas hasta 1000 filas available/ cuyo objeto ya no existe en Storage.",
+            scope="No se borra nada de Storage: solo se corrige la base de datos.",
+            reversible=True,
+            undo_hint="Las filas se pueden reactivar en la base de datos si hiciera falta.",
+            parent=self,
+        ):
+            return
         self._run_photo_cleanup_task(
             busy_text="Descartando rotas available...",
             success_text="Fotos rotas descartadas.",
@@ -1168,15 +1263,45 @@ class AdminUploaderDialog(ctk.CTkToplevel):
         )
 
     def _start_cleanup_all_consumed(self) -> None:
+        if not confirm_destructive_action(
+            title="Limpiar TODAS las consumidas",
+            what="Se borraran de Storage, por lotes, todas las fotos consumidas pendientes de limpieza.",
+            scope="Ejecuta primero 'Auditar' si quieres saber cuantas son.",
+            parent=self,
+        ):
+            return
         self._start_cleanup_batches(kind="consumed")
 
     def _start_cleanup_all_stale_reserved(self) -> None:
+        if not confirm_destructive_action(
+            title="Limpiar TODAS las reservadas viejas",
+            what="Se borraran de Storage, por lotes, todas las fotos reservadas colgadas.",
+            scope="Ejecuta primero 'Auditar' si quieres saber cuantas son.",
+            parent=self,
+        ):
+            return
         self._start_cleanup_batches(kind="stale_reserved")
 
     def _start_cleanup_all_available_orphans(self) -> None:
+        if not confirm_destructive_action(
+            title="Limpiar TODAS las huerfanas",
+            what="Se borraran de Storage, por lotes, todos los objetos huerfanos de available/.",
+            scope="Ejecuta primero 'Auditar' si quieres saber cuantas son.",
+            parent=self,
+        ):
+            return
         self._start_cleanup_batches(kind="available_orphans")
 
     def _start_discard_all_missing_available(self) -> None:
+        if not confirm_destructive_action(
+            title="Descartar TODAS las rotas",
+            what="Se marcaran como descartadas, por lotes, todas las filas available/ sin objeto en Storage.",
+            scope="No se borra nada de Storage. Ejecuta primero 'Auditar' si quieres saber cuantas son.",
+            reversible=True,
+            undo_hint="Las filas se pueden reactivar en la base de datos si hiciera falta.",
+            parent=self,
+        ):
+            return
         self._start_cleanup_batches(kind="missing_available")
 
     def _start_cleanup_batches(self, *, kind: str) -> None:

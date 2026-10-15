@@ -19,6 +19,12 @@ TEXT_SOFT = ("#8A7461", "#737d87")
 ACCENT = ("#D97A2B", "#ff8800")
 ACCENT_HOVER = ("#C8671B", "#ff9b2f")
 ACCENT_SOFT = ("#F3DEC8", "#2d1d0f")
+# Text colour for anything painted on ACCENT / WARNING, as (light mode, dark mode).
+# White fails WCAG AA on both accents: 3.10:1 on #D97A2B (light) and 2.39:1 on
+# #ff8800 (dark), against a 4.5:1 minimum. Measured ratios for the pair below:
+#   light  #2A1B08 on ACCENT  #D97A2B -> 5.38:1   on WARNING #C7832A -> 5.33:1
+#   dark   #1a1205 on ACCENT  #ff8800 -> 7.75:1   on WARNING #e6a451 -> 8.65:1
+ON_ACCENT = ("#2A1B08", "#1a1205")
 SECONDARY_BUTTON = ("#E8D8C5", "#222830")
 SECONDARY_BUTTON_HOVER = ("#DDC9B2", "#2a3139")
 NEUTRAL_BUTTON = ("#EDE1D2", "#1f252c")

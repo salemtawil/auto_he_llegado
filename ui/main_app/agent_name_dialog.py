@@ -3,7 +3,9 @@ from __future__ import annotations
 import customtkinter as ctk
 
 from ui.theme import (
+    ERROR,
     ACCENT,
+    ON_ACCENT,
     ACCENT_HOVER,
     APP_BG,
     BORDER,
@@ -66,7 +68,7 @@ class AgentNameDialog(ctk.CTkToplevel):
             self.name_entry.select_range(0, "end")
         self.name_entry.bind("<Return>", self._handle_submit)
 
-        self.feedback_label = ctk.CTkLabel(container, text="", text_color="#b44545", justify="left", wraplength=320)
+        self.feedback_label = ctk.CTkLabel(container, text="", text_color=ERROR, justify="left", wraplength=320)
         self.feedback_label.grid(row=3, column=0, padx=22, pady=(10, 0), sticky="ew")
 
         actions = ctk.CTkFrame(container, fg_color="transparent")
@@ -93,6 +95,7 @@ class AgentNameDialog(ctk.CTkToplevel):
             height=42,
             corner_radius=14,
             fg_color=ACCENT,
+            text_color=ON_ACCENT,
             hover_color=ACCENT_HOVER,
         )
         submit_button.grid(row=0, column=1, padx=(8, 0), sticky="ew")

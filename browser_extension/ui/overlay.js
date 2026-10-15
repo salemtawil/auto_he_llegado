@@ -51,12 +51,22 @@
   }
 
   function renderRows(root, rows) {
-    root.innerHTML = rows
-      .map(
-        ([label, value]) =>
-          `<div class="auto-he-llegado-row"><div class="auto-he-llegado-label">${label}</div><div class="auto-he-llegado-value">${value}</div></div>`
-      )
-      .join("");
+    // Build with textContent: row values come from page-derived state, so string
+    // interpolation into innerHTML would be a DOM-XSS sink.
+    root.textContent = "";
+    for (const [label, value] of rows) {
+      const row = document.createElement("div");
+      row.className = "auto-he-llegado-row";
+      const labelNode = document.createElement("div");
+      labelNode.className = "auto-he-llegado-label";
+      labelNode.textContent = String(label);
+      const valueNode = document.createElement("div");
+      valueNode.className = "auto-he-llegado-value";
+      valueNode.textContent = String(value);
+      row.appendChild(labelNode);
+      row.appendChild(valueNode);
+      root.appendChild(row);
+    }
   }
 
   function renderOverlay(state) {

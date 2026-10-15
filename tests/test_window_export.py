@@ -62,6 +62,13 @@ class _FakeSession:
         raise RuntimeError("Cannot switch to a different thread")
 
 
+class _OwnedFakeSession(_FakeSession):
+    """Same session, but owned by the calling thread (as during a run)."""
+
+    def is_owned_by_current_thread(self) -> bool:
+        return True
+
+
 class _FakeTileLabel:
     def __init__(self, text: str = "") -> None:
         self.text = text
@@ -145,7 +152,14 @@ def test_window_export_keeps_process_debug_when_frame_debug_fails(monkeypatch, t
     assert payload["timeline"] == [{"event": "flow_detector_state"}]
     assert payload["last_final_button_candidate"] == {"text": "He llegado"}
     assert payload["frames"]["frames"][0]["frame_url"] == "cached-frame"
-    assert payload["browser_export_warning"] == "Cannot switch to a different thread"
+    # The session belongs to the run worker, so the UI thread must not even attempt
+    # the live Playwright call that used to raise "Cannot switch to a different
+    # thread": it falls back to the snapshot captured during the run and says so.
+    assert payload["browser_export_warning"] is None
+    assert payload["browser_state"]["live_capture"] is False
+    assert "un solo hilo" in payload["browser_state"]["live_capture_note"]
+    assert payload["current_url"] == ""
+    assert payload["body_text"] == ""
 
 
 def test_set_slot_summary_uses_panel_method_when_summary_label_missing() -> None:
@@ -200,7 +214,7 @@ def test_handle_app_close_continues_when_status_broadcast_fails(monkeypatch) -> 
     started: list[bool] = []
 
     class _FakeThread:
-        def __init__(self, target=None, daemon=None):
+        def __init__(self, target=None, daemon=None, name=None):
             self.target = target
             self.daemon = daemon
 
@@ -271,3 +285,43 @@ def test_sync_theme_toggle_button_updates_open_settings_dialog_theme_menu() -> N
     assert window.theme_toggle_button._icon_label.text == "◐"  # noqa: SLF001
     assert window._settings_dialog.theme_menu.value == "dark"  # noqa: SLF001
     assert window._settings_dialog.sync_calls == 1  # noqa: SLF001
+
+
+def test_window_export_from_the_owning_thread_still_reports_a_live_failure(
+    monkeypatch, tmp_path
+) -> None:
+    """When the session IS ours, a failing live call must still surface as a warning."""
+
+    slot = ProcessSlotRuntime(
+        slot_id="slot_1", panel=_FakePanel(), process_id=None, last_process_id="proc-1"
+    )
+    slot.last_process_debug = {"process_id": "proc-1", "page_name": "Paripe", "slot_id": "slot_1"}
+
+    window = MainAppWindow.__new__(MainAppWindow)
+    window._is_closing = False  # noqa: SLF001
+    window._latest_debug_slot_id = "slot_1"  # noqa: SLF001
+    window._current_config = SimpleNamespace(flow_engine="extension")  # noqa: SLF001
+    window._slots = {"slot_1": slot}  # noqa: SLF001
+    window._get_slot = lambda slot_id: slot  # type: ignore[method-assign]  # noqa: SLF001
+    window._set_slot_status = lambda *args, **kwargs: None  # type: ignore[method-assign]  # noqa: SLF001
+    window._process_service = SimpleNamespace(  # noqa: SLF001
+        get_process_debug_export=lambda process_id, slot_id=None: dict(slot.last_process_debug or {})
+    )
+
+    target = tmp_path / "export_owned.json"
+    monkeypatch.setattr(
+        "ui.main_app.window.filedialog.asksaveasfilename", lambda **kwargs: str(target)
+    )
+    monkeypatch.setattr(
+        "ui.main_app.window.BrowserManager.get_latest_session",
+        classmethod(lambda cls: _OwnedFakeSession()),
+    )
+    monkeypatch.setattr(
+        "ui.main_app.window.BrowserManager.get_latest_extension_debug", classmethod(lambda cls: {})
+    )
+
+    window.export_extension_state("slot_1")
+
+    payload = json.loads(Path(target).read_text(encoding="utf-8"))
+    assert payload["browser_export_warning"] == "Cannot switch to a different thread"
+    assert payload["frames"]["frames"][0]["frame_url"] == "cached-frame"

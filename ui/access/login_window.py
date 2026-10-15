@@ -12,8 +12,10 @@ from services.auth_context import AuthSession
 from services.background_video_status import set_video_status
 from services.login_credentials_store import LoginCredentialsStore
 from services.video_contribution_service import VideoContributionProgress, VideoContributionService
+from ui.shared.errors import safe_error_summary
 from ui.theme import (
     ACCENT,
+    ON_ACCENT,
     ACCENT_HOVER,
     APP_BG,
     BORDER,
@@ -155,6 +157,7 @@ class LoginWindow(ctk.CTk):
             height=42,
             corner_radius=12,
             fg_color=ACCENT,
+            text_color=ON_ACCENT,
             hover_color=ACCENT_HOVER,
         )
         self.login_button.grid(row=8, column=0, padx=24, pady=(18, 10), sticky="ew")
@@ -192,6 +195,7 @@ class LoginWindow(ctk.CTk):
             height=38,
             corner_radius=12,
             fg_color=ACCENT,
+            text_color=ON_ACCENT,
             hover_color=ACCENT_HOVER,
             state="disabled",
         )
@@ -348,7 +352,8 @@ class LoginWindow(ctk.CTk):
             )
 
     def _render_mode_buttons(self) -> None:
-        active_text = ("#FFFFFF", "#FFFFFF")
+        # White on ACCENT is 3.10:1 (light) / 2.39:1 (dark); ON_ACCENT clears AA.
+        active_text = ON_ACCENT
         inactive_text = TEXT_PRIMARY
         self.login_mode_button.configure(
             fg_color=ACCENT if self._mode == "login" else NEUTRAL_BUTTON,
@@ -501,7 +506,7 @@ class LoginWindow(ctk.CTk):
         except Exception as exc:
             set_video_status(
                 phase="error",
-                message=f"No se pudo completar el envio del video: {exc}",
+                message=f"No se pudo completar el envío del video. Revisa tu conexión y vuelve a intentar. ({safe_error_summary(exc, context='envio de video')})",
                 is_error=True,
             )
             return

@@ -32,9 +32,16 @@ class _FakePanel:
         self.status_panel = _FakeStatusPanel()
         self.form_panel = SimpleNamespace(page_menu=SimpleNamespace(get=lambda: "Compinche"))
         self.summary: list[str] = []
+        self.mode = "start"
 
     def set_summary(self, text: str) -> None:
         self.summary.append(text)
+
+    def set_run_button_mode(self, mode: str) -> None:
+        self.mode = mode
+
+    def run_button_mode(self) -> str:
+        return self.mode
 
 
 class _FakeAccessService:
@@ -50,9 +57,21 @@ class _FakeAccessService:
 class _FakeProcessService:
     def __init__(self) -> None:
         self.register_calls = []
+        self.cancel_calls: list[str] = []
+        self.cancelled: set[str] = set()
+        self.notified = 1
 
     def register_process_slot(self, process_id: str, slot_id: str) -> None:
         self.register_calls.append((process_id, slot_id))
+
+    def request_cancel(self, slot_id: str) -> int:
+        self.cancel_calls.append(slot_id)
+        if self.notified:
+            self.cancelled.add(slot_id)
+        return self.notified
+
+    def is_cancel_requested(self, slot_id: str) -> bool:
+        return slot_id in self.cancelled
 
 
 def _session(*, role: str = "member") -> AuthSession:

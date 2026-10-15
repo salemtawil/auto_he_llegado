@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hmac
+
 import tkinter as tk
 from typing import Callable
 
@@ -8,6 +10,7 @@ import customtkinter as ctk
 from config.settings import Settings, get_settings
 from ui.theme import (
     ACCENT,
+    ON_ACCENT,
     ACCENT_HOVER,
     APP_BG,
     BORDER,
@@ -111,6 +114,7 @@ class StandaloneAdminAccessDialog(ctk.CTkToplevel):
             height=42,
             corner_radius=14,
             fg_color=ACCENT,
+            text_color=ON_ACCENT,
             hover_color=ACCENT_HOVER,
         )
         submit_button.grid(row=0, column=1, padx=(8, 0), sticky="ew")
@@ -136,7 +140,16 @@ class StandaloneAdminAccessDialog(ctk.CTkToplevel):
 
 
 def is_admin_password_valid(password: str, settings: Settings | None = None) -> bool:
-    return password == (settings or get_settings()).admin_access_password
+    """Constant-time check of the admin password.
+
+    Fails closed: when ADMIN_ACCESS_PASSWORD is not configured there is no
+    admin password to match, so no password unlocks the admin panel.
+    """
+
+    expected = (settings or get_settings()).admin_access_password or ""
+    if not expected:
+        return False
+    return hmac.compare_digest(str(password or ""), expected)
 
 
 def request_admin_access(
