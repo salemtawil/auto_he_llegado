@@ -3,8 +3,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from copy import deepcopy
 import json
+import logging
+import os
 from pathlib import Path
 import shutil
+import signal
 import subprocess
 import threading
 from time import sleep, time
@@ -13,8 +16,155 @@ from contextlib import suppress
 from config.paths import DEFAULT_LOCAL_DATA_DIR, PROJECT_ROOT
 from config.settings import Settings, get_settings
 
+_LOGGER = logging.getLogger(__name__)
+
 _EXPECTED_EXTENSION_NAME = "Auto He Llegado Observer"
 _CHROME_DEBUG_PORT = 9222
+
+# psutil solo se usa para SABER si a un driver todavia le cuelga un navegador.
+# Matar no lo necesita. Si falta, la limpieza al cerrar la app sigue completa y
+# lo unico que se pierde es detectar que el operador cerro la ventana a mitad.
+try:  # pragma: no cover - depende del entorno
+    import psutil
+except Exception:  # noqa: BLE001
+    psutil = None
+
+
+def _browser_process_names() -> tuple[str, ...]:
+    return ("chrome", "chrome.exe", "chromium", "chromium.exe", "msedge", "msedge.exe")
+
+
+def capture_driver_pid(playwright: object) -> int | None:
+    """PID del proceso driver de Playwright (node), o None.
+
+    ATENCION: usa atributos privados de Playwright. El proyecto fija
+    playwright>=1.52,<2.0; si una version mueve esta ruta, esto devuelve None y
+    la app sigue funcionando, solo que sin poder matar drivers huerfanos.
+    Verificado en playwright 1.63.
+    """
+
+    for path in (
+        ("_impl_obj", "_connection", "_transport", "_proc"),
+        ("_connection", "_transport", "_proc"),
+    ):
+        current = playwright
+        for attribute in path:
+            current = getattr(current, attribute, None)
+            if current is None:
+                break
+        pid = getattr(current, "pid", None)
+        if isinstance(pid, int) and pid > 0:
+            return pid
+    return None
+
+
+def browser_still_attached(driver_pid: int | None) -> bool | None:
+    """True si al driver le cuelga algun navegador, False si no, None si no se sabe.
+
+    None significa "sin psutil, no puedo saberlo": quien llama NO debe matar
+    nada en ese caso, para no cerrarle el navegador al operador por error.
+    """
+
+    if driver_pid is None:
+        # No se pudo capturar el PID (API privada de Playwright movida). Eso es
+        # "no lo se", NO "no hay navegador": devolver False aqui hacia que el
+        # vigilante matase sesiones VIVAS.
+        return None
+    if psutil is None:
+        return None
+    try:
+        process = psutil.Process(driver_pid)
+        if process.status() == psutil.STATUS_ZOMBIE:
+            return False
+        names = _browser_process_names()
+        for child in process.children(recursive=True):
+            try:
+                if (child.name() or "").lower() in names:
+                    return True
+            except psutil.Error:
+                continue
+        return False
+    except psutil.NoSuchProcess:
+        # El driver ya no existe: no queda navegador que proteger.
+        return False
+    except psutil.Error:
+        # AccessDenied, TimeoutExpired... son "no lo se", no "no hay nada".
+        return None
+
+
+def driver_process_alive(pid: int | None) -> bool:
+    """True solo si ese PID sigue siendo NUESTRO driver, vivo.
+
+    Comprueba la identidad (hijo directo de este proceso y no zombie) para no
+    matar a un proceso ajeno que haya reutilizado el PID despues de que
+    playwright.stop() liberase el original. Sin psutil devuelve False: mas vale
+    no rematar que matar a ciegas.
+    """
+
+    if not pid or pid <= 0 or psutil is None:
+        return False
+    try:
+        process = psutil.Process(pid)
+        if process.status() == psutil.STATUS_ZOMBIE:
+            return False
+        return process.ppid() == os.getpid()
+    except psutil.Error:
+        return False
+
+
+def kill_process_tree(pid: int | None) -> bool:
+    """Mata el proceso y toda su descendencia. No necesita psutil.
+
+    Matar el driver arrastra al navegador que lanzo, asi que basta con esto
+    para dejar la maquina limpia.
+    """
+
+    if not pid or pid <= 0:
+        return False
+    if os.name == "nt":
+        try:
+            # /T mata el arbol de ESE pid y solo de ese: no afecta a otra
+            # corrida simultanea, que tiene su propio driver.
+            completed = subprocess.run(
+                ["taskkill", "/F", "/T", "/PID", str(pid)],
+                capture_output=True,
+                check=False,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+            # taskkill devuelve != 0 si el proceso ya no existia: informar True
+            # en ese caso hacia que el recuento y el log mintiesen.
+            return completed.returncode == 0
+        except Exception as exc:  # noqa: BLE001
+            _LOGGER.warning("No se pudo terminar el proceso %s: %s", pid, exc)
+            return False
+    killed = False
+    if psutil is not None:
+        try:
+            process = psutil.Process(pid)
+            for child in process.children(recursive=True):
+                with suppress(Exception):
+                    child.kill()
+            process.kill()
+            with suppress(Exception):
+                process.wait(timeout=5)
+            killed = True
+        except psutil.NoSuchProcess:
+            return False
+        except psutil.Error as exc:
+            _LOGGER.warning("No se pudo terminar el arbol de %s: %s", pid, exc)
+    if not killed:
+        try:
+            os.kill(pid, signal.SIGKILL)
+            killed = True
+        except ProcessLookupError:
+            return False
+        except Exception as exc:  # noqa: BLE001
+            _LOGGER.warning("No se pudo terminar el proceso %s: %s", pid, exc)
+            return False
+    # Evita dejar zombies: el driver es hijo directo de este proceso.
+    with suppress(Exception):
+        os.waitpid(pid, os.WNOHANG)
+    return killed
 
 
 @dataclass
@@ -36,10 +186,26 @@ class BrowserSession:
     _extension_debug_lock: object | None = None
     _last_extension_debug: dict | None = None
     _engine_phase_history: list[dict] | None = None
+    _owner_thread_ident: int | None = None
+    # PID del driver de Playwright. Es la UNICA via de cierre desde otro hilo:
+    # la API sync queda atada al hilo que la arranco, asi que cuando el hilo de
+    # la corrida muere, page/context/browser/playwright son inservibles.
+    _driver_pid: int | None = None
 
     def __post_init__(self) -> None:
         self._extension_debug_lock = threading.Lock()
         self._engine_phase_history = []
+        if self._driver_pid is None:
+            self._driver_pid = capture_driver_pid(self.playwright)
+        # Playwright's sync API is bound to the thread that started the driver:
+        # calling page/frame methods from any other thread raises. Diagnostics run
+        # from the UI must check this before touching the live session.
+        self._owner_thread_ident = threading.get_ident()
+
+    def is_owned_by_current_thread(self) -> bool:
+        """True when the caller may use this session's Playwright objects."""
+
+        return self._owner_thread_ident == threading.get_ident()
 
     def close(self) -> None:
         self._close_internal(force=False)
@@ -555,15 +721,61 @@ class BrowserSession:
             if self._last_extension_debug is not None:
                 self._last_extension_debug["engine_phase_history"] = deepcopy(self._engine_phase_history)
 
+    @property
+    def driver_pid(self) -> int | None:
+        return self._driver_pid
+
+    @property
+    def is_closed(self) -> bool:
+        return self._closed
+
+    def browser_still_open(self) -> bool | None:
+        """True/False si se sabe; None si no se puede determinar (sin psutil)."""
+
+        return browser_still_attached(self._driver_pid)
+
+    def kill_driver(self) -> bool:
+        """Cierre de ultimo recurso, valido desde CUALQUIER hilo.
+
+        Matar el driver arrastra al navegador. Se usa cuando el hilo propietario
+        ya murio y Playwright no se puede tocar.
+
+        Si no hay PID que matar, NO se marca la sesion como cerrada ni se borra
+        el perfil: hacerlo dejaba un navegador vivo marcado como cerrado, fuera
+        del alcance de shutdown_all y con su perfil borrado por debajo.
+        """
+
+        if self._driver_pid is None:
+            return False
+        killed = kill_process_tree(self._driver_pid)
+        if not killed:
+            return False
+        self._closed = True
+        if self.cleanup_profile_dir and self.profile_dir:
+            with suppress(Exception):
+                shutil.rmtree(self.profile_dir, ignore_errors=True)
+        return True
+
     def _close_internal(self, *, force: bool) -> None:
         if self._closed:
             return
-        self._closed = True
         if self.keep_open and not force:
+            # La sesion sigue viva a proposito. NO se marca cerrada: hacerlo
+            # convertia cualquier shutdown(force=True) posterior en un no-op y
+            # dejaba el navegador fuera de todo alcance.
             return
+        if not self.is_owned_by_current_thread():
+            # Playwright lanzaria "cannot switch to a different thread". La via
+            # por PID es la unica que funciona aqui.
+            self.kill_driver()
+            return
+        self._closed = True
         if self.disconnect_only:
+            # El Chrome es del operador y se queda; solo se suelta el driver.
             with suppress(Exception):
                 self.playwright.stop()
+            if driver_process_alive(self._driver_pid):
+                kill_process_tree(self._driver_pid)
             return
         with suppress(Exception):
             self.page.close()
@@ -574,6 +786,11 @@ class BrowserSession:
                 self.browser.close()
         with suppress(Exception):
             self.playwright.stop()
+        # stop() normalmente se lleva el driver. Solo se remata si sobrevivio y
+        # sigue siendo el nuestro: un kill ciego por PID puede alcanzar a otro
+        # proceso que lo haya reutilizado.
+        if driver_process_alive(self._driver_pid):
+            kill_process_tree(self._driver_pid)
         if self.cleanup_profile_dir and self.profile_dir:
             with suppress(Exception):
                 shutil.rmtree(self.profile_dir, ignore_errors=True)
@@ -758,11 +975,44 @@ class BrowserManager:
     _DEFAULT_WINDOW_HEIGHT = 960
     _sessions: list[BrowserSession] = []
     _sessions_lock = threading.Lock()
+    _REAPER_INTERVAL_SECONDS = 5.0
+    _REAPER_JOIN_TIMEOUT_SECONDS = 5.0
+    _reaper_thread: threading.Thread | None = None
+    _reaper_stop: threading.Event | None = None
+    _reaper_lock = threading.Lock()
     _latest_extension_debug: dict | None = None
     _current_run_id: int = 0
 
     def __init__(self, settings: Settings | None = None) -> None:
         self._settings = settings or get_settings()
+
+    @staticmethod
+    def _abort_launch(
+        playwright: object,
+        *,
+        browser: object | None = None,
+        context: object | None = None,
+        profile_dir: object | None = None,
+    ) -> None:
+        """Deshace un lanzamiento a medias: nada queda huerfano ni sin registrar."""
+
+        # El PID se captura ANTES de stop(): despues, stop() ya libero el
+        # proceso y el PID podria pertenecer a otro programa.
+        driver_pid = capture_driver_pid(playwright)
+        with suppress(Exception):
+            if context is not None:
+                context.close()
+        with suppress(Exception):
+            if browser is not None:
+                browser.close()
+        with suppress(Exception):
+            playwright.stop()
+        # Remate solo si stop() no se llevo el driver y sigue siendo el nuestro.
+        if driver_process_alive(driver_pid):
+            kill_process_tree(driver_pid)
+        if profile_dir is not None:
+            with suppress(Exception):
+                shutil.rmtree(profile_dir, ignore_errors=True)
 
     def open_clean_session(
         self,
@@ -893,19 +1143,30 @@ class BrowserManager:
                     "Verifica que Google Chrome este instalado y que el perfil no este en uso."
                 ) from exc
                 
-            context.add_init_script(
-                script=(
-                    "window.localStorage.setItem("
-                    "'autoHeLlegado.overlayEnabled', "
-                    f"'{ 'true' if extension_overlay else 'false' }'"
-                    ");"
+            # Igual que en la ruta tradicional: sin esta proteccion, un fallo
+            # aqui (new_page por timeout, context caido al arrancar) filtraba el
+            # context, el driver y ademas el perfil en disco.
+            try:
+                context.add_init_script(
+                    script=(
+                        "window.localStorage.setItem("
+                        "'autoHeLlegado.overlayEnabled', "
+                        f"'{ 'true' if extension_overlay else 'false' }'"
+                        ");"
+                    )
                 )
-            )
-            service_worker_url = self._detect_extension_service_worker(context)
-            service_worker_urls = self._collect_service_worker_urls(context)
-            service_worker_status = "present" if service_worker_url else "missing_blocking"
-            browser = context.browser
-            page = context.pages[0] if context.pages else context.new_page()
+                service_worker_url = self._detect_extension_service_worker(context)
+                service_worker_urls = self._collect_service_worker_urls(context)
+                service_worker_status = "present" if service_worker_url else "missing_blocking"
+                browser = context.browser
+                page = context.pages[0] if context.pages else context.new_page()
+            except Exception:
+                self._abort_launch(
+                    playwright,
+                    context=context,
+                    profile_dir=profile_dir,
+                )
+                raise
         elif enable_extension and extension_mode == "installed_profile":
             self._emit_profile_launch_diagnostics(chrome_profile_dir)
             self._emit_launch_diagnostics(
@@ -928,14 +1189,20 @@ class BrowserManager:
                 ) from exc
             connection_mode = "cdp"
             chrome_debug_port = _CHROME_DEBUG_PORT
-            service_worker_urls = self._collect_service_worker_urls(context)
-            background_page_urls = self._collect_background_page_urls(context)
-            self._emit_profile_runtime_diagnostics(
-                service_worker_urls=service_worker_urls,
-                background_page_urls=background_page_urls,
-            )
-            service_worker_url = self._find_extension_service_worker_url(service_worker_urls)
-            service_worker_status = "present" if service_worker_url else "missing_non_blocking"
+            try:
+                service_worker_urls = self._collect_service_worker_urls(context)
+                background_page_urls = self._collect_background_page_urls(context)
+                self._emit_profile_runtime_diagnostics(
+                    service_worker_urls=service_worker_urls,
+                    background_page_urls=background_page_urls,
+                )
+                service_worker_url = self._find_extension_service_worker_url(service_worker_urls)
+                service_worker_status = "present" if service_worker_url else "missing_non_blocking"
+            except Exception:
+                # Modo CDP: el Chrome es del operador, no se cierra. Solo se
+                # suelta el driver que arrancamos nosotros.
+                self._abort_launch(playwright)
+                raise
         else:
             self._emit_launch_diagnostics(
                 with_extension=False,
@@ -958,11 +1225,18 @@ class BrowserManager:
                     "No se pudo abrir Google Chrome. Verifica que Google Chrome esté instalado "
                     "y disponible para Playwright."
                 ) from exc
-            context = browser.new_context(
-                ignore_https_errors=True,
-                no_viewport=True,
-            )
-            page = context.new_page()
+            # new_context/new_page estaban fuera de toda proteccion: si fallaban,
+            # el browser ya lanzado y el driver quedaban huerfanos y sin
+            # registrar, fuera del alcance de shutdown_all y del vigilante.
+            try:
+                context = browser.new_context(
+                    ignore_https_errors=True,
+                    no_viewport=True,
+                )
+                page = context.new_page()
+            except Exception:
+                self._abort_launch(playwright, browser=browser)
+                raise
             service_worker_url = None
             service_worker_urls = []
             installed_extensions = []
@@ -1115,12 +1389,21 @@ class BrowserManager:
                 "Verifica que Google Chrome este instalado y que el perfil no este en uso."
             ) from exc
 
-        browser = context.browser
-        page = context.pages[0] if context.pages else context.new_page()
-        page.goto("chrome://extensions", wait_until="load", timeout=30_000)
-        service_worker_urls = self._collect_service_worker_urls(context)
-        service_worker_url = self._find_extension_service_worker_url(service_worker_urls)
-        installed_extensions = self._read_extensions_page_entries(page)
+        # Sin esta proteccion, un timeout en el goto (perfil real del operador,
+        # grande y lento de arrancar) dejaba context, browser, driver Y el
+        # Chrome lanzado vivos y SIN registrar, fuera del alcance de
+        # shutdown_all y del vigilante, manteniendo ademas el lock del perfil y
+        # bloqueando las corridas siguientes.
+        try:
+            browser = context.browser
+            page = context.pages[0] if context.pages else context.new_page()
+            page.goto("chrome://extensions", wait_until="load", timeout=30_000)
+            service_worker_urls = self._collect_service_worker_urls(context)
+            service_worker_url = self._find_extension_service_worker_url(service_worker_urls)
+            installed_extensions = self._read_extensions_page_entries(page)
+        except Exception:
+            self._abort_launch(playwright, context=context)
+            raise
         session = BrowserSession(
             playwright=playwright,
             browser=browser,
@@ -1207,12 +1490,101 @@ class BrowserManager:
 
     @classmethod
     def shutdown_all(cls) -> None:
+        """Cierra todo al salir de la app. No puede fallar en silencio.
+
+        Si el hilo propietario ya murio, Playwright es inalcanzable, asi que el
+        cierre se hace matando el driver por PID.
+        """
+
+        cls._stop_reaper()
         with cls._sessions_lock:
             sessions = list(cls._sessions)
             cls._sessions = []
         for session in sessions:
-            with suppress(Exception):
+            try:
                 session.shutdown()
+            except Exception as exc:  # noqa: BLE001
+                _LOGGER.warning(
+                    "Fallo el cierre ordenado de una sesion (run_id=%s): %s",
+                    session.run_id,
+                    exc,
+                )
+            # Red de seguridad, pero NO un kill ciego: solo si el driver
+            # sobrevivio al cierre y sigue siendo el nuestro.
+            if driver_process_alive(session.driver_pid):
+                kill_process_tree(session.driver_pid)
+
+    # ------------------------------------------------------------------
+    # Vigilante: un unico hilo demonio que detecta navegadores que el
+    # operador ya cerro y mata su driver, que de otro modo quedaria vivo
+    # para siempre. No toca Playwright, asi que es inmune a la afinidad de
+    # hilo de la API sync.
+    # ------------------------------------------------------------------
+
+    @classmethod
+    def _ensure_reaper_started(cls) -> None:
+        if psutil is None:
+            return  # sin psutil no se puede distinguir abierto de cerrado
+        with cls._reaper_lock:
+            if cls._reaper_thread is not None and cls._reaper_thread.is_alive():
+                return
+            cls._reaper_stop = threading.Event()
+            cls._reaper_thread = threading.Thread(
+                target=cls._reaper_loop,
+                name="browser-session-reaper",
+                daemon=True,
+            )
+            cls._reaper_thread.start()
+
+    @classmethod
+    def _stop_reaper(cls) -> None:
+        with cls._reaper_lock:
+            stop_event = cls._reaper_stop
+            thread = cls._reaper_thread
+            cls._reaper_thread = None
+        if stop_event is not None:
+            stop_event.set()
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=cls._REAPER_JOIN_TIMEOUT_SECONDS)
+
+    @classmethod
+    def _reaper_loop(cls) -> None:
+        stop_event = cls._reaper_stop
+        while stop_event is not None and not stop_event.wait(cls._REAPER_INTERVAL_SECONDS):
+            try:
+                cls.reap_orphan_sessions()
+            except Exception as exc:  # noqa: BLE001 - el vigilante nunca muere
+                _LOGGER.warning("El vigilante de sesiones fallo una ronda: %s", exc)
+
+    @classmethod
+    def reap_orphan_sessions(cls) -> int:
+        """Mata los drivers cuyo navegador ya no existe. Devuelve cuantos.
+
+        Un navegador que el operador sigue teniendo abierto NO se toca, ni
+        tampoco una sesion cuyo estado no se pueda determinar.
+        """
+
+        with cls._sessions_lock:
+            sessions = list(cls._sessions)
+        reaped = 0
+        for session in sessions:
+            if session.is_closed:
+                cls._unregister_session(session)
+                continue
+            if session.disconnect_only:
+                continue  # el Chrome del operador no lo gestionamos nosotros
+            still_open = session.browser_still_open()
+            if still_open is None or still_open:
+                continue
+            if session.kill_driver():
+                reaped += 1
+                _LOGGER.info(
+                    "Driver huerfano eliminado (run_id=%s, pid=%s): el navegador ya estaba cerrado.",
+                    session.run_id,
+                    session.driver_pid,
+                )
+            cls._unregister_session(session)
+        return reaped
 
     @classmethod
     def get_latest_session(cls) -> BrowserSession | None:
@@ -1765,17 +2137,27 @@ class BrowserManager:
             try:
                 original_close()
             finally:
-                with cls._sessions_lock:
-                    cls._sessions = [item for item in cls._sessions if item is not session]
+                # Solo se desregistra si realmente se cerro. Antes se hacia en
+                # el finally pasara lo que pasara, asi que una sesion con
+                # keep_open=True salia de la lista sin haberse cerrado y
+                # shutdown_all() ya no podia alcanzarla nunca.
+                if session.is_closed:
+                    cls._unregister_session(session)
 
         def shutdown_and_unregister() -> None:
             try:
                 original_shutdown()
             finally:
-                with cls._sessions_lock:
-                    cls._sessions = [item for item in cls._sessions if item is not session]
+                if session.is_closed:
+                    cls._unregister_session(session)
 
         session.close = close_and_unregister
         session.shutdown = shutdown_and_unregister
         with cls._sessions_lock:
             cls._sessions.append(session)
+        cls._ensure_reaper_started()
+
+    @classmethod
+    def _unregister_session(cls, session: BrowserSession) -> None:
+        with cls._sessions_lock:
+            cls._sessions = [item for item in cls._sessions if item is not session]
