@@ -342,7 +342,7 @@ def test_request_external_update_does_not_close_when_launch_fails(monkeypatch) -
 
     window._validate_updater_ready = lambda: None  # type: ignore[method-assign]  # noqa: SLF001
     window._download_update_package_from_github = lambda: _downloaded_update(Path("downloaded.zip"))  # type: ignore[method-assign]  # noqa: SLF001
-    window._launch_integrated_updater = lambda package_zip=None: False  # type: ignore[method-assign]  # noqa: SLF001
+    window._launch_integrated_updater = lambda package_zip=None, *, revision=None: False  # type: ignore[method-assign]  # noqa: SLF001
     window._handle_app_close = lambda **_kwargs: closed.append(True)  # type: ignore[method-assign]  # noqa: SLF001
     window._broadcast_status_message = lambda message, color=None: messages.append(message)  # type: ignore[method-assign]  # noqa: SLF001
     monkeypatch.setattr(window_module.messagebox, "showerror", lambda *args, **kwargs: None)
@@ -361,7 +361,13 @@ def test_request_external_update_launches_helper_shows_message_and_closes(monkey
 
     window._validate_updater_ready = lambda: None  # type: ignore[method-assign]  # noqa: SLF001
     window._download_update_package_from_github = lambda: _downloaded_update(Path("downloaded.zip"))  # type: ignore[method-assign]  # noqa: SLF001
-    window._launch_integrated_updater = lambda package_zip=None: True  # type: ignore[method-assign]  # noqa: SLF001
+    revisiones: list[str | None] = []
+
+    def _lanzar(package_zip=None, *, revision=None):
+        revisiones.append(revision)
+        return True
+
+    window._launch_integrated_updater = _lanzar  # type: ignore[method-assign]  # noqa: SLF001
     window._handle_app_close = lambda **_kwargs: closed.append(True)  # type: ignore[method-assign]  # noqa: SLF001
     window._broadcast_status_message = lambda message, color=None: messages.append(message)  # type: ignore[method-assign]  # noqa: SLF001
     monkeypatch.setattr(window_module.messagebox, "showerror", lambda *args, **kwargs: None)
@@ -374,3 +380,6 @@ def test_request_external_update_launches_helper_shows_message_and_closes(monkey
         "Actualizando a 2026.06.19.1, la app se reiniciara.",
     ]
     assert closed == [True]
+    # La revision llega al helper: es el helper quien la registra, y solo si
+    # la actualizacion se aplica de verdad.
+    assert revisiones == ["2026.06.19.1"]

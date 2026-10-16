@@ -14,6 +14,42 @@ from pathlib import Path, PurePosixPath
 from typing import Callable
 
 
+def _cargar_registro_de_revision():
+    """Localiza `write_installed_revision`, y si no aparece sigue sin el.
+
+    Este modulo corre de tres formas: congelado dentro de
+    AutoHeLlegadoUpdateHelper.exe, como script suelto desde `updater/`, y como
+    copia que la app deja en otro sitio para poder reemplazar el helper
+    original. En alguna de ellas el import puede no resolverse.
+
+    Si falla, NO se puede dejar que reviente: para cuando el helper arranca, la
+    app ya se cerro sola. Un ImportError aqui dejaria al agente sin aplicar la
+    actualizacion, sin log y sin app. Perder el registro de la revision solo
+    cuesta una descarga de mas la proxima vez.
+    """
+
+    try:
+        from updater.installed_revision import write_installed_revision
+
+        return write_installed_revision
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        from installed_revision import write_installed_revision
+
+        return write_installed_revision
+    except Exception:  # noqa: BLE001
+        pass
+
+    def _sin_registro(_install_dir, _revision) -> bool:
+        return False
+
+    return _sin_registro
+
+
+write_installed_revision = _cargar_registro_de_revision()
+
+
 PROTECTED_PATH_PATTERNS = (
     ".env",
     "config/",
@@ -179,6 +215,23 @@ def _write_log(log_path: Path, result: ApplyHelperResult, install_dir: Path, pac
     log_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
+def _restart_app(install_dir: Path, app_exe: str, starter) -> bool:
+    """Reabre la app. Devuelve si lo consiguio; nunca propaga el fallo.
+
+    Se llama tanto tras aplicar bien como tras revertir: en los dos casos la
+    instalacion esta en un estado coherente y la app deberia volver a abrirse.
+    """
+
+    app_path = Path(app_exe)
+    if not app_path.is_absolute():
+        app_path = install_dir / app_path
+    try:
+        starter(build_restart_command(app_path), cwd=str(install_dir))
+    except Exception:  # noqa: BLE001
+        return False
+    return True
+
+
 def build_restart_command(app_path: Path) -> list[str]:
     if sys.platform == "darwin" and app_path.suffix.lower() == ".app":
         return ["open", str(app_path)]
@@ -210,6 +263,7 @@ def apply_staged_update(
     app_exe: str,
     wait_pid: int | None = None,
     restart: bool = False,
+    revision: str | None = None,
     log_dir: Path | None = None,
     process_exists: Callable[[int], bool] | None = None,
     sleep: Callable[[float], None] | None = None,
@@ -237,7 +291,22 @@ def apply_staged_update(
         return result
 
     if package_zip is not None:
-        package_source = extract_package_zip(package_zip.resolve(), updates_root / "staging")
+        # Un zip corrupto o con rutas maliciosas no puede tumbar el helper con
+        # un traceback: la app ya se cerro, y el agente se quedaria mirando una
+        # ventana que no vuelve, sin log y sin explicacion.
+        try:
+            package_source = extract_package_zip(package_zip.resolve(), updates_root / "staging")
+        except Exception as exc:  # noqa: BLE001
+            result = ApplyHelperResult(
+                applied=False,
+                backup_dir=None,
+                log_path=log_path,
+                rolled_back=False,
+                restarted=_restart_app(install_dir, app_exe, starter) if restart else False,
+                error=f"No se pudo extraer el paquete: {exc}",
+            )
+            _write_log(log_path, result, install_dir, package_zip)
+            return result
     else:
         package_source = package_dir.resolve()
 
@@ -270,28 +339,39 @@ def apply_staged_update(
         for target_path, backup_path in reversed(replaced_files):
             if target_path in restored:
                 continue
-            target_path.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(backup_path, target_path)
+            # Si un archivo concreto no se puede restaurar (bloqueado, permisos),
+            # se sigue con los demas: revertir a medias es malo, pero abandonar
+            # la reversion en el primer tropiezo es peor. Queda anotado.
+            try:
+                target_path.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(backup_path, target_path)
+            except Exception as restore_error:  # noqa: BLE001
+                warnings.append(
+                    f"No se pudo restaurar {target_path.name}: {restore_error}. "
+                    f"Hay copia en {backup_path}."
+                )
+                continue
             restored.add(target_path)
+        # Tras revertir, la instalacion quedo como estaba: dejar al agente con
+        # la app cerrada seria peor que el propio fallo.
         result = ApplyHelperResult(
             applied=False,
             backup_dir=backup_dir,
             log_path=log_path,
             rolled_back=True,
-            restarted=False,
+            restarted=_restart_app(install_dir, app_exe, starter) if restart else False,
             warnings=warnings,
             error=str(exc),
         )
         _write_log(log_path, result, install_dir, package_source)
         return result
 
-    restarted = False
-    if restart:
-        app_path = Path(app_exe)
-        if not app_path.is_absolute():
-            app_path = install_dir / app_path
-        starter(build_restart_command(app_path), cwd=str(install_dir))
-        restarted = True
+    # Solo aqui: si hubo rollback, no se llega a esta linea y el archivo
+    # sigue diciendo la verdad sobre lo que hay instalado.
+    if revision and not write_installed_revision(install_dir, revision):
+        warnings.append("No se pudo registrar la revision instalada.")
+
+    restarted = _restart_app(install_dir, app_exe, starter) if restart else False
 
     result = ApplyHelperResult(
         applied=True,
@@ -314,6 +394,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--wait-pid", type=int, default=None)
     parser.add_argument("--restart", action="store_true")
     parser.add_argument("--log-dir", default=None)
+    parser.add_argument("--revision", default=None)
     return parser.parse_args(argv)
 
 
@@ -327,6 +408,7 @@ def main(argv: list[str] | None = None) -> int:
         wait_pid=args.wait_pid,
         restart=args.restart,
         log_dir=Path(args.log_dir) if args.log_dir else None,
+        revision=args.revision,
     )
     if result.applied:
         return 0

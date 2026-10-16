@@ -223,10 +223,23 @@ def prepare_release_update(
     config_path: Path,
     staging_dir: Path,
     urlopen_func: Callable = urlopen,
-) -> DownloadedUpdate:
+    current_revision: str | None = None,
+    sys_platform: str | None = None,
+    machine: str | None = None,
+) -> DownloadedUpdate | None:
+    """Descarga la actualizacion, o None si ya se esta en la ultima revision.
+
+    `current_revision` se compara ANTES de descargar: sin esto, pulsar
+    "Actualizar app" se bajaba el paquete entero aunque no hubiera nada nuevo.
+    Si llega None (porque no hay registro de lo instalado), se actualiza igual:
+    una descarga de mas es mejor que dejar a un agente sin actualizar.
+    """
+
     config = load_update_config(config_path)
     manifest = load_latest_manifest(config, urlopen_func=urlopen_func)
-    asset = select_release_asset(manifest)
+    asset = select_release_asset(manifest, sys_platform=sys_platform, machine=machine)
+    if current_revision and asset.revision and current_revision.strip() == asset.revision.strip():
+        return None
     return download_release_asset(asset, target_dir=staging_dir, urlopen_func=urlopen_func)
 
 

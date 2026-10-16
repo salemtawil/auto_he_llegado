@@ -238,7 +238,13 @@ def test_apply_staged_update_replaces_absolute_macos_app_bundle(tmp_path: Path, 
     assert backup_file.read_text(encoding="utf-8") == "old-plist"
 
 
-def test_apply_staged_update_does_not_restart_on_failure(tmp_path: Path) -> None:
+def test_apply_staged_update_restarts_after_rollback(tmp_path: Path) -> None:
+    """Cambio deliberado (2026-10-16): tras revertir, la app SI se relanza.
+
+    Antes no se relanzaba. Pero la app se cierra sola antes de lanzar el helper,
+    y una reversion deja la instalacion exactamente como estaba: no reabrirla
+    dejaba al agente con la ventana cerrada, sin app y sin ningun aviso.
+    """
     install_dir = tmp_path / "install"
     package_dir = tmp_path / "package"
     _write_file(install_dir / "AutoHeLlegado.exe", "old-exe")
@@ -256,8 +262,10 @@ def test_apply_staged_update_does_not_restart_on_failure(tmp_path: Path) -> None
     )
 
     assert result.applied is False
-    assert result.restarted is False
-    assert popen_calls == []
+    assert result.rolled_back is True
+    assert result.restarted is True
+    assert len(popen_calls) == 1, "la instalacion quedo intacta: hay que reabrirla"
+    assert (install_dir / "AutoHeLlegado.exe").read_text(encoding="utf-8") == "old-exe"
 
 
 def test_apply_staged_update_writes_log(tmp_path: Path) -> None:

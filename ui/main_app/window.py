@@ -34,6 +34,7 @@ from services.photo_pool_service import PhotoPoolService
 from services.process_service import ProcessService
 from services.video_contribution_service import VideoContributionProgress, VideoContributionService
 from updater.release_update_client import ReleaseUpdateError, prepare_release_update
+from updater.installed_revision import read_installed_revision
 from ui.main_app.admin_dialogs import AdminPasswordDialog, AdminUploaderDialog
 from ui.main_app.agent_name_dialog import AgentNameDialog
 from ui.main_app.pool_badge import PoolBadge
@@ -576,12 +577,25 @@ class MainAppWindow(ctk.CTk):
         except ReleaseUpdateError as exc:
             self._safe_after(0, lambda error=exc: messagebox.showerror("Actualizar app", str(error), parent=self))
             return
+        if downloaded_update is None:
+            self._safe_after(
+                0,
+                lambda: messagebox.showinfo(
+                    "Actualizar app",
+                    "Ya tienes la ultima version instalada.",
+                    parent=self,
+                ),
+            )
+            return
         self._safe_after(0, lambda current=downloaded_update: self._finish_external_update_request(current))
 
     def _finish_external_update_request(self, downloaded_update) -> None:
         if self._is_closing:
             return
-        if not self._launch_integrated_updater(downloaded_update.path):
+        if not self._launch_integrated_updater(
+            downloaded_update.path,
+            revision=downloaded_update.asset.revision,
+        ):
             return
 
         with contextlib.suppress(Exception):
@@ -710,7 +724,11 @@ class MainAppWindow(ctk.CTk):
         downloaded_update = prepare_release_update(
             config_path=self._resolve_release_update_config_path(),
             staging_dir=self._resolve_downloaded_update_dir(),
+            current_revision=read_installed_revision(PROJECT_ROOT),
         )
+        if downloaded_update is None:
+            # Ya se esta en la ultima revision: ni descarga ni reinicio.
+            return None
         with contextlib.suppress(Exception):
             self._broadcast_status_message(
                 f"Actualizacion descargada: {downloaded_update.asset.revision}. Preparando reinicio...",
@@ -718,7 +736,12 @@ class MainAppWindow(ctk.CTk):
             )
         return downloaded_update
 
-    def _launch_integrated_updater(self, package_zip: Path | None = None) -> bool:
+    def _launch_integrated_updater(
+        self,
+        package_zip: Path | None = None,
+        *,
+        revision: str | None = None,
+    ) -> bool:
         helper_source = self._resolve_update_helper_source()
         if helper_source is None:
             messagebox.showerror("Actualizar app", "No se encontro el helper de actualizacion.", parent=self)
@@ -743,6 +766,9 @@ class MainAppWindow(ctk.CTk):
             "--log-dir",
             str(log_dir),
         ]
+        if revision:
+            # El helper la escribe SOLO si la actualizacion se aplica de verdad.
+            command.extend(["--revision", str(revision)])
         if helper_runtime.suffix.lower() != ".exe":
             command.insert(0, self._resolve_helper_python_command())
 
