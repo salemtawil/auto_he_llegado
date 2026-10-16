@@ -261,6 +261,64 @@ def build_restart_command(app_path: Path) -> list[str]:
     return [str(app_path)]
 
 
+def resolve_app_bundle(install_dir: Path, app_exe: str) -> Path | None:
+    """Devuelve el `.app` que hay que volver a firmar, o None si no aplica.
+
+    Solo en macOS y solo cuando el destino es un bundle `.app`. En Windows y en
+    ejecucion desde fuente no hay nada que firmar.
+    """
+
+    if sys.platform != "darwin":
+        return None
+    app_path = Path(app_exe)
+    if not app_path.is_absolute():
+        app_path = install_dir / app_path
+    if app_path.suffix.lower() != ".app":
+        return None
+    return app_path
+
+
+def build_resign_command(app_path: Path) -> list[str]:
+    """Mismo comando con el que el build firma el bundle (ad-hoc)."""
+
+    return ["codesign", "--force", "--deep", "--sign", "-", str(app_path)]
+
+
+def resign_app_bundle(
+    install_dir: Path,
+    app_exe: str,
+    *,
+    runner: Callable[[list[str]], int] | None = None,
+) -> tuple[bool, str | None]:
+    """Vuelve a firmar el bundle tras tocar archivos dentro de el.
+
+    Por que hace falta: el build firma `AutoHeLlegado.app` con ad-hoc codesign y
+    lo verifica con `--deep --strict`. En cuanto este helper reemplaza un
+    archivo dentro del bundle, el sello de CodeResources deja de cuadrar. En
+    Apple Silicon los binarios arm64 exigen firma valida para ejecutarse, asi
+    que sin re-firmar la app no vuelve a abrir.
+
+    Tiene que llamarse SIEMPRE antes de reiniciar, tanto si se aplico como si se
+    revirtio: las dos rutas escriben dentro del bundle.
+
+    Nunca propaga la excepcion. Si falla, lo dice y quien llama lo anota: para
+    cuando esto corre la app ya se cerro sola, y un traceback dejaria al agente
+    sin log y sin app.
+    """
+
+    app_path = resolve_app_bundle(install_dir, app_exe)
+    if app_path is None:
+        return True, None
+    execute = runner or (lambda command: subprocess.run(command, check=False).returncode)
+    try:
+        code = execute(build_resign_command(app_path))
+    except Exception as exc:  # noqa: BLE001
+        return False, f"No se pudo ejecutar codesign: {exc}"
+    if code != 0:
+        return False, f"codesign devolvio {code} al firmar {app_path.name}."
+    return True, None
+
+
 def resolve_update_target_path(install_dir: Path, app_exe: str, relative_path: Path) -> Path:
     app_path = Path(app_exe)
     if not app_path.is_absolute():
@@ -290,6 +348,7 @@ def apply_staged_update(
     sleep: Callable[[float], None] | None = None,
     copy_file: Callable[[Path, Path], None] | None = None,
     popen_factory: Callable[..., object] | None = None,
+    resign_runner: Callable[[list[str]], int] | None = None,
     now_factory: Callable[[], datetime] | None = None,
 ) -> ApplyHelperResult:
     now = now_factory or datetime.now
@@ -373,6 +432,12 @@ def apply_staged_update(
                 )
                 continue
             restored.add(target_path)
+        # La reversion tambien escribio dentro del bundle, asi que la firma hay
+        # que rehacerla igual que tras aplicar. Antes de reiniciar, nunca
+        # despues: la app no abriria.
+        resigned, resign_error = resign_app_bundle(install_dir, app_exe, runner=resign_runner)
+        if not resigned and resign_error:
+            warnings.append(resign_error)
         # Tras revertir, la instalacion quedo como estaba: dejar al agente con
         # la app cerrada seria peor que el propio fallo.
         result = ApplyHelperResult(
@@ -391,6 +456,10 @@ def apply_staged_update(
     # sigue diciendo la verdad sobre lo que hay instalado.
     if revision and not write_installed_revision(install_dir, revision):
         warnings.append("No se pudo registrar la revision instalada.")
+
+    resigned, resign_error = resign_app_bundle(install_dir, app_exe, runner=resign_runner)
+    if not resigned and resign_error:
+        warnings.append(resign_error)
 
     restarted = _restart_app(install_dir, app_exe, starter) if restart else False
 

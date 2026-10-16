@@ -284,3 +284,209 @@ def test_apply_staged_update_writes_log(tmp_path: Path) -> None:
     log_text = result.log_path.read_text(encoding="utf-8")
     assert "Aplicado: si" in log_text
     assert "Restart: no" in log_text
+
+
+# ---------------------------------------------------------------------------
+# Re-firma del bundle en macOS.
+#
+# El build firma AutoHeLlegado.app con ad-hoc codesign y lo verifica con
+# --deep --strict. Al reemplazar archivos dentro del bundle el sello se rompe y
+# en Apple Silicon la app deja de abrir. Estas pruebas fijan QUE se vuelve a
+# firmar y, sobre todo, que se firma ANTES de reiniciar.
+#
+# Lo que estas pruebas NO demuestran: que codesign haga su trabajo en un Mac
+# real. Eso necesita un Mac. Aqui se verifica la logica que lo invoca.
+# ---------------------------------------------------------------------------
+
+
+def _como_mac(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(helper_module.sys, "platform", "darwin")
+
+
+def test_resolve_app_bundle_devuelve_none_fuera_de_mac(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(helper_module.sys, "platform", "win32")
+
+    assert helper_module.resolve_app_bundle(Path("C:/inst"), "AutoHeLlegado.app") is None
+
+
+def test_resolve_app_bundle_ignora_lo_que_no_es_bundle(monkeypatch: pytest.MonkeyPatch) -> None:
+    _como_mac(monkeypatch)
+
+    assert helper_module.resolve_app_bundle(Path("/inst"), "AutoHeLlegado.exe") is None
+    assert helper_module.resolve_app_bundle(Path("/inst"), "app_main.py") is None
+
+
+def test_resolve_app_bundle_resuelve_ruta_relativa(monkeypatch: pytest.MonkeyPatch) -> None:
+    _como_mac(monkeypatch)
+
+    assert helper_module.resolve_app_bundle(Path("/inst"), "AutoHeLlegado.app") == Path(
+        "/inst/AutoHeLlegado.app"
+    )
+
+
+def test_build_resign_command_usa_el_mismo_comando_que_el_build() -> None:
+    # Si esto cambia, tiene que cambiar tambien build_installer_macos.sh.
+    assert helper_module.build_resign_command(Path("/Applications/AutoHeLlegado.app")) == [
+        "codesign",
+        "--force",
+        "--deep",
+        "--sign",
+        "-",
+        "/Applications/AutoHeLlegado.app",
+    ]
+
+
+def test_resign_no_invoca_codesign_fuera_de_mac(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(helper_module.sys, "platform", "win32")
+    llamadas: list[list[str]] = []
+
+    ok, error = helper_module.resign_app_bundle(
+        Path("C:/inst"), "AutoHeLlegado.exe", runner=lambda cmd: llamadas.append(cmd) or 0
+    )
+
+    assert (ok, error) == (True, None)
+    assert llamadas == []
+
+
+def test_resign_reporta_fallo_sin_lanzar(monkeypatch: pytest.MonkeyPatch) -> None:
+    _como_mac(monkeypatch)
+
+    ok, error = helper_module.resign_app_bundle(
+        Path("/inst"), "AutoHeLlegado.app", runner=lambda _cmd: 1
+    )
+
+    assert ok is False
+    assert error is not None and "codesign" in error
+
+
+def test_resign_aguanta_que_codesign_ni_exista(monkeypatch: pytest.MonkeyPatch) -> None:
+    _como_mac(monkeypatch)
+
+    def _revienta(_cmd: list[str]) -> int:
+        raise FileNotFoundError("codesign")
+
+    ok, error = helper_module.resign_app_bundle(
+        Path("/inst"), "AutoHeLlegado.app", runner=_revienta
+    )
+
+    assert ok is False
+    assert error is not None and "codesign" in error
+
+
+def test_al_aplicar_en_mac_se_firma_antes_de_reiniciar(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _como_mac(monkeypatch)
+    install_dir = tmp_path / "Applications"
+    package_dir = tmp_path / "package"
+    _write_file(install_dir / "AutoHeLlegado.app" / "Contents" / "MacOS" / "cli.py", "viejo")
+    _write_file(package_dir / "AutoHeLlegado.app" / "Contents" / "MacOS" / "cli.py", "nuevo")
+
+    orden: list[str] = []
+
+    def _firmar(cmd: list[str]) -> int:
+        orden.append(f"firma:{cmd[0]}")
+        return 0
+
+    def _lanzar(cmd, cwd=None):  # noqa: ANN001, ARG001
+        orden.append("reinicio")
+        return object()
+
+    result = apply_staged_update(
+        install_dir=install_dir,
+        package_dir=package_dir,
+        app_exe="AutoHeLlegado.app",
+        restart=True,
+        resign_runner=_firmar,
+        popen_factory=_lanzar,
+        now_factory=lambda: datetime(2026, 10, 16, 12, 0, 0),
+    )
+
+    assert result.applied is True
+    assert result.warnings == []
+    # El orden es lo que importa: firmar despues de reiniciar no sirve de nada.
+    assert orden == ["firma:codesign", "reinicio"]
+    bundle_file = install_dir / "AutoHeLlegado.app" / "Contents" / "MacOS" / "cli.py"
+    assert bundle_file.read_text(encoding="utf-8") == "nuevo"
+
+
+def test_al_revertir_en_mac_tambien_se_firma_antes_de_reiniciar(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _como_mac(monkeypatch)
+    install_dir = tmp_path / "Applications"
+    package_dir = tmp_path / "package"
+    _write_file(install_dir / "AutoHeLlegado.app" / "Contents" / "MacOS" / "uno.py", "viejo-uno")
+    _write_file(package_dir / "AutoHeLlegado.app" / "Contents" / "MacOS" / "uno.py", "nuevo-uno")
+    _write_file(package_dir / "AutoHeLlegado.app" / "Contents" / "MacOS" / "dos.py", "nuevo-dos")
+
+    orden: list[str] = []
+    copiados: list[Path] = []
+
+    def _copiar_fallando(source: Path, target: Path) -> None:
+        copiados.append(target)
+        if len(copiados) == 2:
+            raise PermissionError("Operation not permitted")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(source.read_bytes())
+
+    result = apply_staged_update(
+        install_dir=install_dir,
+        package_dir=package_dir,
+        app_exe="AutoHeLlegado.app",
+        restart=True,
+        copy_file=_copiar_fallando,
+        resign_runner=lambda _cmd: orden.append("firma") or 0,
+        popen_factory=lambda cmd, cwd=None: orden.append("reinicio") or object(),  # noqa: ARG005
+        now_factory=lambda: datetime(2026, 10, 16, 12, 0, 0),
+    )
+
+    assert result.applied is False
+    assert result.rolled_back is True
+    # La reversion escribe dentro del bundle: la firma tambien hay que rehacerla.
+    assert orden == ["firma", "reinicio"]
+
+
+def test_fallo_de_firma_queda_anotado_en_los_avisos(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _como_mac(monkeypatch)
+    install_dir = tmp_path / "Applications"
+    package_dir = tmp_path / "package"
+    _write_file(install_dir / "AutoHeLlegado.app" / "Contents" / "MacOS" / "cli.py", "viejo")
+    _write_file(package_dir / "AutoHeLlegado.app" / "Contents" / "MacOS" / "cli.py", "nuevo")
+
+    result = apply_staged_update(
+        install_dir=install_dir,
+        package_dir=package_dir,
+        app_exe="AutoHeLlegado.app",
+        restart=False,
+        resign_runner=lambda _cmd: 2,
+        now_factory=lambda: datetime(2026, 10, 16, 12, 0, 0),
+    )
+
+    assert result.applied is True
+    assert any("codesign" in aviso for aviso in result.warnings)
+    # El log es lo unico que le queda al agente si la app no vuelve a abrir.
+    assert "codesign" in result.log_path.read_text(encoding="utf-8")
+
+
+def test_en_windows_no_se_llama_a_codesign(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(helper_module.sys, "platform", "win32")
+    install_dir = tmp_path / "install"
+    package_dir = tmp_path / "package"
+    _write_file(install_dir / "ui" / "window.py", "viejo")
+    _write_file(package_dir / "ui" / "window.py", "nuevo")
+    llamadas: list[list[str]] = []
+
+    result = apply_staged_update(
+        install_dir=install_dir,
+        package_dir=package_dir,
+        app_exe="AutoHeLlegado.exe",
+        restart=False,
+        resign_runner=lambda cmd: llamadas.append(cmd) or 0,
+        now_factory=lambda: datetime(2026, 10, 16, 12, 0, 0),
+    )
+
+    assert result.applied is True
+    assert llamadas == []

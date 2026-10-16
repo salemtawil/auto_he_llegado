@@ -1,3 +1,9 @@
+# El registro se monta ANTES que nada: si algo falla durante los imports de la
+# interfaz, queremos que quede escrito en vez de perderse.
+from config.app_logging import configure_logging
+
+configure_logging()
+
 from ui.theme import setup_theme
 from ui.access.login_window import request_app_access
 
