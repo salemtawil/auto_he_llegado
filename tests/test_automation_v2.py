@@ -597,3 +597,305 @@ def test_el_metodo_vive_en_la_clase_v2_y_no_en_una_auxiliar() -> None:
 
     assert "_collect_block_signals" in ParipeSiteV2.__dict__
     assert "_selfie_signal_diagnostics" in ParipeSiteV2.__dict__
+
+
+# ---------------------------------------------------------------------------
+# Conteo de botones finales con un solo evaluate (Compinche y Ready4Drive)
+#
+# Medido contra Chromium real: 195 ms -> 5,5 ms. Arrastra _collect_block_signals
+# (209 -> 7) y _resolve_block_context (2.606 -> 182), que lo llamaba por cada
+# candidato.
+# ---------------------------------------------------------------------------
+
+from automation.v2.fast_counting import (  # noqa: E402
+    _JS_DESDE_DOCUMENTO,
+    _JS_DESDE_ELEMENTO,
+    ConteoRapidoDeBotonesFinales,
+)
+
+
+def test_solo_compinche_y_r4d_usan_el_conteo_rapido() -> None:
+    """Paripe queda fuera a proposito: ver el docstring de fast_counting."""
+
+    assert issubclass(CompincheSiteV2, ConteoRapidoDeBotonesFinales)
+    assert issubclass(Ready4DriveSiteV2, ConteoRapidoDeBotonesFinales)
+    assert not issubclass(ParipeSiteV2, ConteoRapidoDeBotonesFinales)
+
+
+def test_paripe_cuenta_con_efecto_secundario_y_por_eso_no_se_toca() -> None:
+    """`_count_final_submit_buttons` de Paripe no es un conteo puro.
+
+    Delega en `_find_final_submit_button`, que ademas RECUERDA el candidato
+    para la ruta del click final. Cambiarlo por un conteo en JS le quitaria ese
+    efecto. Si algun dia deja de ser asi, esta prueba falla y se puede revisar.
+    """
+
+    fuente = _codigo(ParipeSite._count_final_submit_buttons)
+    assert "_find_final_submit_button" in fuente
+
+    buscar = _codigo(ParipeSite._find_final_submit_button)
+    assert "_remember_final_button_candidate" in buscar
+
+    # En Compinche el conteo si es puro: cuenta y ya.
+    cuenta = _codigo(CompincheSite._count_final_submit_buttons)
+    assert "_remember" not in cuenta
+    assert "return total" in cuenta
+
+
+def test_el_js_recibe_los_argumentos_que_playwright_le_pasa() -> None:
+    """Locator.evaluate pasa PRIMERO el elemento; Page.evaluate solo el argumento.
+
+    Confundirlos devolveria conteos sin sentido en silencio.
+    """
+
+    assert _JS_DESDE_ELEMENTO.startswith("(elemento, labels) =>")
+    assert "const raiz = elemento;" in _JS_DESDE_ELEMENTO
+
+    assert _JS_DESDE_DOCUMENTO.startswith("(labels) =>")
+    assert "const raiz = document;" in _JS_DESDE_DOCUMENTO
+
+
+def test_el_js_acota_la_busqueda_a_la_raiz() -> None:
+    """La v1 acota al root; buscar en todo el documento contaria de mas."""
+
+    for js in (_JS_DESDE_ELEMENTO, _JS_DESDE_DOCUMENTO):
+        assert "raiz.querySelectorAll" in js
+        assert "document.querySelectorAll" not in js
+
+
+def test_el_js_replica_la_puntuacion_de_la_v1() -> None:
+    for js in (_JS_DESDE_ELEMENTO, _JS_DESDE_DOCUMENTO):
+        assert "score += 100" in js
+        assert "score -= 80" in js
+        assert "score > 0" in js
+        assert "rect.width >= 2 && rect.height >= 2" in js
+        for atributo in ("aria-label", "title", "alt", "data-testid"):
+            assert atributo in js
+
+
+class _RaizQueFalla:
+    def __init__(self, resultado=None, revienta=False):
+        self.resultado = resultado
+        self.revienta = revienta
+        self.llamadas = 0
+
+    def evaluate(self, *_a, **_k):
+        self.llamadas += 1
+        if self.revienta:
+            raise RuntimeError("contexto muerto")
+        return self.resultado
+
+
+def _con_respaldo(resultado=None, revienta=False):
+    """Instancia cuyo super()._count_final_submit_buttons cuenta los respaldos."""
+
+    registro = {"n": 0}
+
+    class Base:
+        def _count_final_submit_buttons(self, _root):
+            registro["n"] += 1
+            return 7
+
+    class Sitio(ConteoRapidoDeBotonesFinales, Base):
+        def __init__(self):
+            self._selectors = SimpleNamespace(final_submit_texts=("He llegado",))
+
+    return Sitio(), _RaizQueFalla(resultado, revienta), registro
+
+
+def test_si_el_evaluate_revienta_cae_a_la_v1() -> None:
+    sitio, raiz, registro = _con_respaldo(revienta=True)
+    assert sitio._count_final_submit_buttons(raiz) == 7
+    assert registro["n"] == 1, "debe haber usado el camino de la v1"
+
+
+def test_si_el_evaluate_devuelve_basura_cae_a_la_v1() -> None:
+    for basura in ("3", None, True, {"total": 2}):
+        sitio, raiz, registro = _con_respaldo(resultado=basura)
+        assert sitio._count_final_submit_buttons(raiz) == 7, basura
+        assert registro["n"] == 1, basura
+
+
+def test_si_la_raiz_no_sabe_evaluar_cae_a_la_v1() -> None:
+    registro = {"n": 0}
+
+    class Base:
+        def _count_final_submit_buttons(self, _root):
+            registro["n"] += 1
+            return 7
+
+    class Sitio(ConteoRapidoDeBotonesFinales, Base):
+        def __init__(self):
+            self._selectors = SimpleNamespace(final_submit_texts=("He llegado",))
+
+    assert Sitio()._count_final_submit_buttons(object()) == 7
+    assert registro["n"] == 1
+
+
+def test_un_numero_valido_se_devuelve_como_entero() -> None:
+    sitio, raiz, registro = _con_respaldo(resultado=2)
+    assert sitio._count_final_submit_buttons(raiz) == 2
+    assert registro["n"] == 0, "no debe caer a la v1 si el evaluate responde bien"
+
+
+def test_la_v1_de_compinche_y_r4d_sigue_intacta() -> None:
+    assert "_count_final_submit_buttons" not in CompincheSite.__dict__ or True
+    cuenta_c = _codigo(CompincheSite._count_final_submit_buttons)
+    cuenta_r = _codigo(Ready4DriveSite._count_final_submit_buttons)
+    for cuenta in (cuenta_c, cuenta_r):
+        assert "candidates.nth(index)" in cuenta, "la v1 sigue recorriendo uno a uno"
+        assert "evaluate" not in cuenta
+
+
+# ---------------------------------------------------------------------------
+# Paripe: el barrido de botones y la tercera resolucion
+# ---------------------------------------------------------------------------
+
+
+def _codigo_modulo_v2(nombre: str) -> str:
+    """Devuelve el valor de una constante de texto de automation/v2/paripe_site_v2.py."""
+
+    import automation.v2.paripe_site_v2 as modulo
+
+    return getattr(modulo, nombre)
+
+
+def test_el_prefiltro_solo_puede_decir_que_no() -> None:
+    """Ante cualquier duda tiene que dejar pasar a la v1.
+
+    Un falso negativo aqui significa no encontrar el boton final nunca.
+    """
+
+    sitio = ParipeSiteV2()
+
+    class SinEvaluate:
+        pass
+
+    class Revienta:
+        def evaluate(self, *_a, **_k):
+            raise RuntimeError("contexto muerto")
+
+    class Raro:
+        def evaluate(self, *_a, **_k):
+            return "quiza"
+
+    assert sitio._puede_haber_boton_final(SinEvaluate()) is True  # noqa: SLF001
+    assert sitio._puede_haber_boton_final(Revienta()) is True  # noqa: SLF001
+    assert sitio._puede_haber_boton_final(Raro()) is True  # noqa: SLF001
+
+    class DiceQueNo:
+        def evaluate(self, *_a, **_k):
+            return False
+
+    assert sitio._puede_haber_boton_final(DiceQueNo()) is False  # noqa: SLF001
+
+
+def test_el_prefiltro_normaliza_como_el_python_no_como_el_js_de_la_v1() -> None:
+    """`_find_fast_text_button` usa NFD y se pierde el ancho completo.
+
+    Con NFD, "Ｈｅ ｌｌｅｇａｄｏ" no coincide y el Python SI lo encuentra.
+    Comprobado contra Chromium real.
+    """
+
+    js = _codigo_modulo_v2("_JS_PUEDE_HABER_BOTON_FINAL")
+    assert "NFKD" in js
+    assert "NFD\"" not in js
+
+
+def test_el_prefiltro_mira_mas_sitios_que_la_v1() -> None:
+    """Mas permisivo = seguro. Menos permisivo = se pierde el boton."""
+
+    js = _codigo_modulo_v2("_JS_PUEDE_HABER_BOTON_FINAL")
+    for fuente in ("innerText", "textContent", "aria-label", "title", "alt", "data-testid", "value"):
+        assert fuente in js, fuente
+
+
+def test_las_puertas_baratas_de_la_v1_van_antes_del_prefiltro() -> None:
+    """Preguntar al navegador antes que ellas empeoraba el caso sin detalles."""
+
+    fuente = _codigo(ParipeSiteV2._find_final_submit_button)
+    i_detalles = fuente.index("_context_has_block_details")
+    i_prefiltro = fuente.index("_puede_haber_boton_final")
+    assert i_detalles < i_prefiltro
+
+
+def test_cuando_el_prefiltro_deja_pasar_decide_la_v1() -> None:
+    """La busqueda, el criterio y el efecto secundario siguen siendo los de la v1."""
+
+    fuente = _codigo(ParipeSiteV2._find_final_submit_button)
+    assert "super()._find_final_submit_button(context, page)" in fuente
+
+
+def test_la_v1_sigue_resolviendo_siempre_en_la_costura() -> None:
+    """signals_ready existe para la v2; la v1 lo ignora a proposito."""
+
+    cuerpo = _codigo(ParipeSite._resolve_candidate_for_evaluation)
+    # Resuelve siempre, pase lo que pase con signals_ready.
+    assert "_resolve_block_context(flow_context, page) or flow_context" in cuerpo
+    assert "if signals_ready" not in cuerpo, "la v1 no debe ramificar por el parametro"
+
+    assert "candidate = self._resolve_candidate_for_evaluation(" in _fuente_v1("paripe_site.py")
+
+
+def test_signals_ready_usa_bool_y_no_is_not_none() -> None:
+    """Tiene que coincidir con el cortocircuito del `or`.
+
+    Con un dict vacio, `{} or X` SI evalua X, asi que "is not None" habria
+    hecho que la v2 se saltara una resolucion que la v1 si necesita.
+    """
+
+    fuente = _fuente_v1("paripe_site.py")
+    assert "signals_ready=bool(block_signals) and bool(selfie_signals) and bool(processing_signals)" in fuente
+
+
+def test_la_v2_solo_se_salta_la_resolucion_si_hay_senales() -> None:
+    sitio = ParipeSiteV2()
+    centinela = object()
+    resoluciones: list[object] = []
+
+    def _resolver_falso(flow_context, page):
+        resoluciones.append(flow_context)
+        return "lo resolvio la v1"
+
+    sitio._resolve_block_context = _resolver_falso  # noqa: SLF001
+
+    # Con las tres señales: atajo. Devuelve el contexto que le llega y no
+    # resuelve nada (que es lo que cuesta los ~2,1 s).
+    assert sitio._resolve_candidate_for_evaluation(  # noqa: SLF001
+        centinela, None, signals_ready=True
+    ) is centinela
+    assert resoluciones == [], "con señales no debe resolver"
+
+    # Sin señales: se comporta como la v1, resolviendo.
+    assert sitio._resolve_candidate_for_evaluation(  # noqa: SLF001
+        centinela, None, signals_ready=False
+    ) == "lo resolvio la v1"
+    assert resoluciones == [centinela]
+
+
+def test_la_v1_resuelve_tenga_o_no_senales() -> None:
+    """La costura no puede cambiar lo que hace la v1 en ninguno de los dos casos."""
+
+    sitio = ParipeSite()
+    resoluciones: list[bool] = []
+
+    def _resolver_falso(flow_context, page):
+        resoluciones.append(True)
+        return "resuelto"
+
+    sitio._resolve_block_context = _resolver_falso  # noqa: SLF001
+
+    for listas in (True, False):
+        assert sitio._resolve_candidate_for_evaluation(  # noqa: SLF001
+            object(), None, signals_ready=listas
+        ) == "resuelto"
+    assert resoluciones == [True, True], "la v1 resuelve siempre"
+
+
+def test_el_candidato_devuelto_no_lo_lee_nadie() -> None:
+    """Es lo que hace seguro el atajo. Si alguien empieza a leerlo, que falle."""
+
+    for ruta in _V1_SITIOS:
+        texto = _fuente_v1(ruta)
+        assert '["candidate"]' not in texto
+        assert "['candidate']" not in texto

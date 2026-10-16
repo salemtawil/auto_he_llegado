@@ -15,6 +15,67 @@ from automation.paripe_site import ParipeSite
 from automation.v2.mixins import AutomationV2Mixin
 
 
+#: Prefiltro: ¿PUEDE haber un boton final aqui? Solo se usa para decir "no".
+#:
+#: Tiene que ser un SUPERCONJUNTO de lo que encuentra `_find_button_by_labels`
+#: de la v1: si este dice que no hay, la v1 tampoco habria encontrado nada, y
+#: devolver None es exactamente lo que la v1 habria devuelto.
+#:
+#: Por eso es deliberadamente mas permisivo que la v1 en todo:
+#:   - mira innerText, textContent y 5 atributos, no solo el texto renderizado;
+#:   - normaliza en dos variantes (con y sin quitar lo no-ascii) y le vale que
+#:     la etiqueta aparezca en cualquiera de las dos.
+#:
+#: La segunda variante NO es un capricho: `_find_fast_text_button` de la v1 usa
+#: NFD, y con caracteres de ancho completo ("Ｈｅ ｌｌｅｇａｄｏ") se pierde un
+#: boton que el Python SI encuentra, porque Python usa NFKD. Comprobado contra
+#: Chromium real.
+_JS_PUEDE_HABER_BOTON_FINAL = """
+(elemento, etiquetas) => {
+    const base = (value) =>
+        (value || "")
+            .normalize("NFKD")
+            .replace(/[\\u0300-\\u036f]/g, "");
+    const compacta = (value) =>
+        value.replace(/\\s+/g, " ").trim().toLowerCase();
+    const soloAscii = (value) =>
+        compacta(value.replace(/[^\\x00-\\x7F]/g, ""));
+    const visible = (nodo) => {
+        const estilo = window.getComputedStyle(nodo);
+        if (!estilo || estilo.visibility === "hidden" || estilo.display === "none") {
+            return false;
+        }
+        const caja = nodo.getBoundingClientRect();
+        return caja.width >= 2 && caja.height >= 2;
+    };
+    const nodos = Array.from(
+        elemento.querySelectorAll("button, [role='button'], a")
+    );
+    for (const nodo of nodos) {
+        if (!visible(nodo)) {
+            continue;
+        }
+        const trozos = [nodo.innerText, nodo.textContent];
+        for (const atributo of ["aria-label", "title", "alt", "data-testid", "value"]) {
+            trozos.push(nodo.getAttribute(atributo));
+        }
+        const crudo = base(trozos.filter(Boolean).join(" "));
+        const variantes = [compacta(crudo), soloAscii(crudo)];
+        for (const etiqueta of etiquetas) {
+            if (!etiqueta) {
+                continue;
+            }
+            if (variantes.some((v) => v.includes(etiqueta))) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+"""
+
+
+
 class ParipeSiteV2(AutomationV2Mixin, ParipeSite):
     #: La v1 esperaba 800 ms tras pulsar "Continuar" descartando CUALQUIER
     #: deteccion de bloque, aunque el snapshot rapido ya mostrase el boton final
@@ -180,6 +241,80 @@ class ParipeSiteV2(AutomationV2Mixin, ParipeSite):
         """
 
         return self._collect_block_signals_from_dialog(flow_context)
+
+
+    def _find_final_submit_button(self, context, page=None):
+        """Igual que la v1, pero sin pagar el barrido cuando no hay nada que barrer.
+
+        La v1 recorre todos los `button, [role=button], a` del contexto
+        preguntando visible + caja + texto por cada uno: ~190 ms medidos contra
+        Chromium real, y el bucle de bloque lo llama varias veces por vuelta.
+        La inmensa mayoria de esas vueltas no hay ningun boton final todavia.
+
+        Aqui se pregunta primero, en una sola llamada, si PUEDE haberlo. Si la
+        respuesta es no, se devuelve None, que es justo lo que la v1 habria
+        devuelto. Si es si, se delega en la v1 entera: misma busqueda, mismo
+        criterio, mismo `_remember_final_button_candidate`, mismo Locator para
+        hacer click. O sea, la decision y el efecto secundario no cambian.
+
+        No se usa `_find_fast_text_button` de la v1 para esto porque normaliza
+        con NFD y se pierde casos que el Python SI ve (ancho completo).
+        """
+
+        if self._final_submit_resolved():
+            return None
+        # Las puertas baratas de la v1 van PRIMERO: preguntar al navegador antes
+        # que ellas hacia el caso "sin detalles de bloque" mas lento, no mas
+        # rapido (medido: 3,3 ms -> 6,0 ms).
+        if not self._context_has_block_details(context):
+            return None
+        if not self._puede_haber_boton_final(context):
+            return None
+        return super()._find_final_submit_button(context, page)
+
+    def _puede_haber_boton_final(self, context) -> bool:
+        """Solo responde que NO con certeza. Ante la duda, dice que si."""
+
+        evaluate = getattr(context, "evaluate", None)
+        if not callable(evaluate):
+            return True
+        etiquetas = [
+            self._normalize_text(etiqueta)
+            for etiqueta in self._selectors.final_submit_texts
+        ]
+        try:
+            respuesta = evaluate(_JS_PUEDE_HABER_BOTON_FINAL, etiquetas)
+        except Exception:
+            return True
+        return respuesta is not False
+
+
+    def _resolve_candidate_for_evaluation(self, flow_context, page, *, signals_ready: bool):
+        """Si las tres señales ya vienen calculadas, no hay nada que resolver.
+
+        `_evaluate_block_candidate` de la v1 arranca resolviendo el contexto,
+        ~2,1 s medidos contra Chromium real. Pero cuando el bucle le pasa las
+        tres bolsas de señales ya calculadas (paripe_site.py:2672, que es lo que
+        hace en cada vuelta), ese `candidate` no se usa para NADA:
+
+          - `block_signals or self._collect_block_signals(candidate, page)` y
+            sus dos hermanas cortocircuitan, porque las bolsas vienen llenas;
+          - se devuelve en el dict bajo la clave "candidate", y
+            `block_evaluation["candidate"]` no se lee en ningun sitio del
+            repositorio.
+
+        Por eso `signals_ready` se calcula con bool() y no con "is not None":
+        tiene que coincidir exactamente con el cortocircuito del `or`, que con
+        un dict vacio SI evaluaria la parte derecha.
+
+        El `flow_context` que llega ya viene resuelto por el bucle en la 2556.
+        """
+
+        if signals_ready:
+            return flow_context
+        return super()._resolve_candidate_for_evaluation(
+            flow_context, page, signals_ready=signals_ready
+        )
 
 
 class _DiagnosticoPerezoso(Mapping):

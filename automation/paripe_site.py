@@ -3079,6 +3079,23 @@ class ParipeSite(BaseSite):
             "processing_ui": has_processing_ui,
         }
 
+    def _resolve_candidate_for_evaluation(
+        self,
+        flow_context: Locator,
+        page: Page,
+        *,
+        signals_ready: bool,
+    ) -> Locator:
+        """Costura de version. La v1 resuelve siempre, igual que antes.
+
+        `signals_ready` dice si las tres bolsas de señales llegaron ya
+        calculadas. La v1 lo ignora a proposito: esta aqui para que la v2 pueda
+        saltarse una resolucion que en ese caso no se usa para nada. Ver
+        automation/v2/paripe_site_v2.py.
+        """
+
+        return self._resolve_block_context(flow_context, page) or flow_context
+
     def _evaluate_block_candidate(
         self,
         flow_context: Locator,
@@ -3089,7 +3106,11 @@ class ParipeSite(BaseSite):
         selfie_signals: dict[str, bool] | None = None,
         processing_signals: dict[str, bool] | None = None,
     ) -> dict[str, object]:
-        candidate = self._resolve_block_context(flow_context, page) or flow_context
+        candidate = self._resolve_candidate_for_evaluation(
+            flow_context,
+            page,
+            signals_ready=bool(block_signals) and bool(selfie_signals) and bool(processing_signals),
+        )
         signals = block_signals or self._collect_block_signals(candidate, page)
         selfie = selfie_signals or self._collect_selfie_return_signals(page, current_context or candidate)
         processing = processing_signals or self._collect_processing_signals(page, current_context or candidate)

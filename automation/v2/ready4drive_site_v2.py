@@ -13,8 +13,9 @@ La v1 (`automation/ready4drive_site.py`) NO se toca.
 from __future__ import annotations
 
 from automation.ready4drive_site import Ready4DriveSite
+from automation.v2.fast_counting import ConteoRapidoDeBotonesFinales
 from automation.v2.mixins import AutomationV2Mixin
 
 
-class Ready4DriveSiteV2(AutomationV2Mixin, Ready4DriveSite):
+class Ready4DriveSiteV2(AutomationV2Mixin, ConteoRapidoDeBotonesFinales, Ready4DriveSite):
     pass

@@ -8,10 +8,11 @@ from __future__ import annotations
 from time import monotonic
 
 from automation.compinche_site import CompincheSite
+from automation.v2.fast_counting import ConteoRapidoDeBotonesFinales
 from automation.v2.mixins import AutomationV2Mixin
 
 
-class CompincheSiteV2(AutomationV2Mixin, CompincheSite):
+class CompincheSiteV2(AutomationV2Mixin, ConteoRapidoDeBotonesFinales, CompincheSite):
     def _wait_for_uploaded_file_input(self, *, file_input, timeout_ms: int) -> bool:
         """Arregla una llamada que revienta con TypeError.
 
