@@ -50,6 +50,14 @@ packages_to_collect = (
     "cv2",
     "numpy",
     "psutil",
+    # Entrega de video a Drive (services/video_delivery_service.py).
+    # build_installer_windows.ps1 ya verifica que estos imports funcionen en el
+    # entorno de construccion, pero sin recolectarlos aqui el ejecutable puede
+    # quedarse sin los datos que googleapiclient necesita en ejecucion: su
+    # discovery_cache son archivos .json, no codigo, y el analisis estatico de
+    # PyInstaller no los ve.
+    "googleapiclient",
+    "google_auth_oauthlib",
 )
 
 for package_name in packages_to_collect:

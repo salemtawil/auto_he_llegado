@@ -71,7 +71,17 @@ def make_candidate(candidate_id: str, *, batch_id: str = "batch-1") -> PhotoCand
     )
 
 
-def test_fingerprint_candidates_query_excludes_undelivered_batches(tmp_path) -> None:
+def test_fingerprint_candidates_query_compares_contra_todos_los_lotes(tmp_path) -> None:
+    """Decision del responsable (2026-10-16): se compara contra TODOS los lotes.
+
+    Esta prueba pedia antes filtrar por `delivery_file_id`, para comparar solo
+    contra lotes ya entregados. El servicio nunca tuvo ese filtro, asi que la
+    prueba fallaba desde que se escribio.
+
+    Se decidio mantener el comportamiento actual, que es el mas estricto: un
+    video subido una vez cuenta como duplicado aunque su lote se quedara a
+    medias. La alternativa habria dejado al agente volver a subir ese video.
+    """
     class RecordingQuery:
         def __init__(self) -> None:
             self.calls = []
@@ -107,8 +117,17 @@ def test_fingerprint_candidates_query_excludes_undelivered_batches(tmp_path) -> 
 
     assert service.list_video_fingerprint_candidates() == []
 
-    assert ("is_", ("delivery_file_id", "null"), {}) in provider.query.calls
-    assert ("neq", ("delivery_file_id", ""), {}) in provider.query.calls
+    nombres = [llamada[0] for llamada in provider.query.calls]
+    argumentos = [llamada[1] for llamada in provider.query.calls]
+
+    # Solo se exige tener huella: nada de filtrar por entrega.
+    assert ("video_fingerprint", "null") in argumentos
+    assert not any(
+        "delivery_file_id" in str(args) for args in argumentos
+    ), "comparar solo contra entregados fue descartado a proposito"
+
+    # Y lo que si tiene que seguir haciendo: ordenar, limitar y pedir el campo.
+    assert "order" in nombres and "limit" in nombres and "select" in nombres
 
 
 def test_approve_candidates_moves_storage_and_bulk_creates_photos(tmp_path, monkeypatch) -> None:
