@@ -1,0 +1,13 @@
+{
+  "revision": "2026.10.15.1",
+  "assets": {
+    "windows": {
+      "url": "https://github.com/salemtawil/auto_he_llegado/releases/download/2026.10.15.1/AutoHeLlegado_Windows_Update_2026.10.15.1.zip",
+      "sha256": "9b67155dae44635507af3401067ce5c2946969c55795e3e5c31044beede491bb",
+      "file_name": "AutoHeLlegado_Windows_Update_2026.10.15.1.zip"
+    }
+  },
+  "notes": [
+    "27 archivo(s) actualizados"
+  ]
+}
