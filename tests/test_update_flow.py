@@ -31,6 +31,8 @@ from updater.installed_revision import (
 )
 from updater.release_update_client import prepare_release_update
 
+RAIZ = Path(__file__).resolve().parents[1]
+
 
 # ---------------------------------------------------------------------------
 # Registro de la revision instalada
@@ -252,15 +254,15 @@ def test_solo_entra_lo_que_cambio(tmp_path: Path) -> None:
     assert len(payload["assets"]["windows"]["sha256"]) == 64
 
 
-def test_se_niega_si_cambian_dependencias(tmp_path: Path) -> None:
-    """Un paquete ligero con dependencias nuevas rompe la instalacion del agente."""
+def test_se_niega_si_el_paquete_tocaria_internal(tmp_path: Path) -> None:
+    """Aplicarlo daria WinError 32 y la reversion chocaria con el mismo bloqueo."""
 
     build = _build_falso(tmp_path)
     base = tmp_path / "baseline.json"
     escribir_linea_base(build_dir=build, baseline_file=base)
 
     (build / "_internal" / "cv2" / "cv2.pyd").write_text("version nueva")
-    with pytest.raises(ErrorDeEmpaquetado, match="instalador completo"):
+    with pytest.raises(ErrorDeEmpaquetado, match="NO puede reemplazar"):
         construir_paquete(
             revision="1.0.2",
             build_dir=build,
@@ -269,21 +271,34 @@ def test_se_niega_si_cambian_dependencias(tmp_path: Path) -> None:
         )
 
 
-def test_se_puede_forzar_a_sabiendas(tmp_path: Path) -> None:
+def test_se_niega_si_el_paquete_tocaria_el_propio_helper(tmp_path: Path) -> None:
     build = _build_falso(tmp_path)
+    (build / "AutoHeLlegadoUpdateHelper.exe").write_text("helper v1")
     base = tmp_path / "baseline.json"
     escribir_linea_base(build_dir=build, baseline_file=base)
-    (build / "_internal" / "cv2" / "cv2.pyd").write_text("version nueva")
 
-    zip_path, _ = construir_paquete(
-        revision="1.0.2",
-        build_dir=build,
-        baseline_file=base,
-        output_dir=tmp_path / "out",
-        permitir_dependencias=True,
-    )
-    with zipfile.ZipFile(zip_path) as archivo:
-        assert "_internal/cv2/cv2.pyd" in archivo.namelist()
+    (build / "AutoHeLlegadoUpdateHelper.exe").write_text("helper v2")
+    with pytest.raises(ErrorDeEmpaquetado, match="NO puede reemplazar"):
+        construir_paquete(
+            revision="1.0.2",
+            build_dir=build,
+            baseline_file=base,
+            output_dir=tmp_path / "out",
+        )
+
+
+def test_el_rechazo_no_se_puede_forzar() -> None:
+    """Habia una bandera --allow-dependency-changes y la use para saltarme el
+    aviso. Esa fue la causa de 2026.10.15.1. Ya no existe."""
+
+    import inspect
+
+    import scripts.build_update_package as modulo
+
+    firma = inspect.signature(modulo.construir_paquete)
+    assert "permitir_dependencias" not in firma.parameters
+    fuente = (RAIZ / "scripts" / "build_update_package.py").read_text(encoding="utf-8")
+    assert "allow-dependency-changes" not in fuente
 
 
 def test_sin_linea_base_no_adivina(tmp_path: Path) -> None:
@@ -500,3 +515,65 @@ def test_cuando_el_modulo_esta_se_usa_el_de_verdad(tmp_path: Path) -> None:
     escribir = helper._cargar_registro_de_revision()  # noqa: SLF001
     assert escribir(tmp_path, "2026.10.15.1") is True
     assert read_installed_revision(tmp_path) == "2026.10.15.1"
+
+
+# ---------------------------------------------------------------------------
+# Lo que el helper NO puede reemplazar (fisica de Windows)
+#
+# El helper congelado corre DESDE la carpeta de instalacion, asi que Windows
+# bloquea su propio .exe y todo lo que carga de _internal/. Intentar
+# reemplazarlos da WinError 32 a mitad de copia, y la reversion choca con el
+# mismo bloqueo. Paso de verdad el 2026-10-15.
+# ---------------------------------------------------------------------------
+
+
+def test_el_paquete_no_puede_pisar_internal_ni_el_propio_helper(tmp_path: Path) -> None:
+    install = tmp_path / "install"
+    install.mkdir()
+    (install / "_internal").mkdir()
+    (install / "AutoHeLlegado.exe").write_text("app vieja")
+    (install / "AutoHeLlegadoUpdateHelper.exe").write_text("helper viejo")
+    (install / "_internal" / "python314.dll").write_text("runtime viejo")
+
+    paquete = tmp_path / "paquete"
+    (paquete / "_internal").mkdir(parents=True)
+    (paquete / "AutoHeLlegado.exe").write_text("app nueva")
+    (paquete / "AutoHeLlegadoUpdateHelper.exe").write_text("helper nuevo")
+    (paquete / "_internal" / "python314.dll").write_text("runtime nuevo")
+
+    resultado = apply_staged_update(
+        install_dir=install, package_dir=paquete, app_exe="AutoHeLlegado.exe"
+    )
+
+    # La app si se actualiza: nadie la tiene abierta.
+    assert resultado.applied is True
+    assert (install / "AutoHeLlegado.exe").read_text() == "app nueva"
+
+    # El helper y el runtime NO, aunque vinieran en el paquete.
+    assert (install / "AutoHeLlegadoUpdateHelper.exe").read_text() == "helper viejo"
+    assert (install / "_internal" / "python314.dll").read_text() == "runtime viejo"
+
+
+@pytest.mark.parametrize(
+    "ruta",
+    [
+        "_internal/python314.dll",
+        "_internal/base_library.zip",
+        "_internal/psutil/_psutil_windows.pyd",
+        "AutoHeLlegadoUpdateHelper.exe",
+    ],
+)
+def test_rutas_bloqueadas_por_windows(ruta: str) -> None:
+    from updater.apply_update_helper import is_protected_path
+
+    assert is_protected_path(ruta) is True
+
+
+@pytest.mark.parametrize(
+    "ruta",
+    ["AutoHeLlegado.exe", "AutoHeLlegadoUploader.exe", "browser_extension/content.js"],
+)
+def test_rutas_que_si_se_pueden_reemplazar(ruta: str) -> None:
+    from updater.apply_update_helper import is_protected_path
+
+    assert is_protected_path(ruta) is False

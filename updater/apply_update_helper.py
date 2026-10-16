@@ -61,6 +61,27 @@ PROTECTED_PATH_PATTERNS = (
     "updates/update_logs/",
     "updater/updater_config.json",
     "*.local.json",
+    # ---------------------------------------------------------------------
+    # Lo que este helper NO puede reemplazar, por fisica de Windows.
+    #
+    # El helper congelado se ejecuta DESDE la carpeta de instalacion: la app
+    # lanza `AutoHeLlegadoUpdateHelper.exe` tal cual, sin copiarlo a otro sitio
+    # (ver _prepare_helper_runtime_copy, que solo copia cuando el helper es un
+    # .py). Mientras corre, Windows mantiene bloqueados su propio ejecutable y
+    # todo lo que carga de `_internal/`: python3XX.dll, base_library.zip,
+    # MSVCP140.dll, los .pyd de psutil...
+    #
+    # Intentar reemplazarlos da WinError 32 a mitad de la copia, y entonces la
+    # reversion intenta restaurar y choca con el mismo bloqueo. Paso de verdad
+    # en la primera publicacion real (2026-10-15).
+    #
+    # Se saltan aqui, en el punto de aplicacion, aunque el paquete los traiga:
+    # una actualizacion incompleta pero coherente es infinitamente mejor que
+    # una instalacion rota. Para cambiar dependencias o el propio helper hace
+    # falta un instalador completo.
+    # ---------------------------------------------------------------------
+    "_internal/",
+    "AutoHeLlegadoUpdateHelper.exe",
 )
 
 

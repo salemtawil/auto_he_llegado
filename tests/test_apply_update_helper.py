@@ -47,9 +47,9 @@ def test_apply_staged_update_replaces_files_and_creates_backup(tmp_path: Path) -
     install_dir = tmp_path / "install"
     package_dir = tmp_path / "package"
     _write_file(install_dir / "AutoHeLlegado.exe", "old-exe")
-    _write_file(install_dir / "_internal" / "core.bin", "old-core")
+    _write_file(install_dir / "browser_extension" / "content.js", "old-content")
     _write_file(package_dir / "AutoHeLlegado.exe", "new-exe")
-    _write_file(package_dir / "_internal" / "core.bin", "new-core")
+    _write_file(package_dir / "browser_extension" / "content.js", "new-content")
     _write_file(package_dir / "browser_extension" / "manifest.json", "manifest")
 
     result = apply_staged_update(
@@ -61,11 +61,11 @@ def test_apply_staged_update_replaces_files_and_creates_backup(tmp_path: Path) -
 
     assert result.applied is True
     assert (install_dir / "AutoHeLlegado.exe").read_text(encoding="utf-8") == "new-exe"
-    assert (install_dir / "_internal" / "core.bin").read_text(encoding="utf-8") == "new-core"
+    assert (install_dir / "browser_extension" / "content.js").read_text(encoding="utf-8") == "new-content"
     assert (install_dir / "browser_extension" / "manifest.json").read_text(encoding="utf-8") == "manifest"
     assert result.backup_dir is not None
     assert (result.backup_dir / "AutoHeLlegado.exe").read_text(encoding="utf-8") == "old-exe"
-    assert (result.backup_dir / "_internal" / "core.bin").read_text(encoding="utf-8") == "old-core"
+    assert (result.backup_dir / "browser_extension" / "content.js").read_text(encoding="utf-8") == "old-content"
 
 
 def test_apply_staged_update_preserves_protected_files(tmp_path: Path) -> None:
@@ -104,7 +104,7 @@ def test_apply_staged_update_accepts_package_zip(tmp_path: Path) -> None:
     package_zip = tmp_path / "AutoHeLlegado_Update.zip"
     _write_file(install_dir / "AutoHeLlegado.exe", "old-exe")
     _write_file(package_dir / "AutoHeLlegado.exe", "new-exe")
-    _write_file(package_dir / "_internal" / "core.bin", "new-core")
+    _write_file(package_dir / "browser_extension" / "content.js", "new-content")
 
     import zipfile
 
@@ -122,21 +122,21 @@ def test_apply_staged_update_accepts_package_zip(tmp_path: Path) -> None:
 
     assert result.applied is True
     assert (install_dir / "AutoHeLlegado.exe").read_text(encoding="utf-8") == "new-exe"
-    assert (install_dir / "_internal" / "core.bin").read_text(encoding="utf-8") == "new-core"
+    assert (install_dir / "browser_extension" / "content.js").read_text(encoding="utf-8") == "new-content"
 
 
 def test_apply_staged_update_rolls_back_if_copy_fails(tmp_path: Path) -> None:
     install_dir = tmp_path / "install"
     package_dir = tmp_path / "package"
     _write_file(install_dir / "AutoHeLlegado.exe", "old-exe")
-    _write_file(install_dir / "_internal" / "core.bin", "old-core")
+    _write_file(install_dir / "browser_extension" / "content.js", "old-content")
     _write_file(package_dir / "AutoHeLlegado.exe", "new-exe")
-    _write_file(package_dir / "_internal" / "core.bin", "new-core")
+    _write_file(package_dir / "browser_extension" / "content.js", "new-content")
     copied_targets: list[Path] = []
 
     def failing_copy(source: Path, target: Path) -> None:
         copied_targets.append(target)
-        if target.name == "core.bin":
+        if target.name == "content.js":
             raise PermissionError("locked")
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(source.read_bytes())
@@ -153,7 +153,7 @@ def test_apply_staged_update_rolls_back_if_copy_fails(tmp_path: Path) -> None:
     assert result.applied is False
     assert result.rolled_back is True
     assert (install_dir / "AutoHeLlegado.exe").read_text(encoding="utf-8") == "old-exe"
-    assert (install_dir / "_internal" / "core.bin").read_text(encoding="utf-8") == "old-core"
+    assert (install_dir / "browser_extension" / "content.js").read_text(encoding="utf-8") == "old-content"
 
 
 def test_apply_staged_update_restarts_app_on_success(tmp_path: Path) -> None:

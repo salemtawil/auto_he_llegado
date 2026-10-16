@@ -10,12 +10,18 @@ unos 15 MB, o 60 si cambian los cuatro.
 Este script empaqueta solo lo que de verdad cambio respecto a la ultima linea
 base publicada, y escribe el `update_latest.json` que la app busca.
 
-La trampa, y el guard
----------------------
-Si una actualizacion necesita una dependencia nueva de pip, `_internal` cambia
-y un paquete de solo-exes dejaria la instalacion del agente rota: codigo nuevo
-pidiendo librerias que no estan. Ahi el script SE NIEGA a construir el paquete
-ligero y te dice que publiques un instalador completo.
+Lo que NO se puede actualizar asi
+---------------------------------
+El helper congelado se ejecuta DESDE la carpeta de instalacion: la app lanza
+`AutoHeLlegadoUpdateHelper.exe` tal cual, sin copiarlo. Mientras corre, Windows
+bloquea su propio ejecutable y todo lo que carga de `_internal/`.
+
+Asi que un paquete que toque `_internal/` o el helper es INAPLICABLE: da
+WinError 32 a mitad de copia y la reversion choca con el mismo bloqueo. El
+script lo rechaza y no hay forma de forzarlo. Para cambiar dependencias o el
+propio helper, instalador completo.
+
+Esto no es teoria: paso publicando 2026.10.15.1.
 
 Nunca adivina. Si no puede comparar contra una linea base, se niega.
 
@@ -105,10 +111,27 @@ def cambios_contra_linea_base(
     )
 
 
-def _es_dependencia(relativo: str) -> bool:
-    """`_internal/` son las librerias; todo lo demas es nuestro."""
+#: Lo que el helper NO puede reemplazar nunca, pase lo que pase.
+#:
+#: El helper congelado se ejecuta DESDE la carpeta de instalacion, asi que
+#: Windows bloquea su propio .exe y todo lo que carga de `_internal/`. Meterlos
+#: en un paquete ligero da WinError 32 a mitad de copia y la reversion choca
+#: con el mismo bloqueo. Paso de verdad el 2026-10-15, publicando 2026.10.15.1.
+#:
+#: Esto NO se puede forzar: no hay bandera que lo salte. Para cambiar
+#: dependencias o el propio helper hace falta un instalador completo.
+INAPLICABLE = (
+    "_internal/",
+    "AutoHeLlegadoUpdateHelper.exe",
+)
 
-    return relativo.replace("\\", "/").startswith("_internal/")
+
+def _es_inaplicable(relativo: str) -> bool:
+    normalizado = relativo.replace("\\", "/")
+    return any(
+        normalizado == patron or normalizado.startswith(patron)
+        for patron in INAPLICABLE
+    )
 
 
 def construir_paquete(
@@ -117,7 +140,6 @@ def construir_paquete(
     build_dir: Path = BUILD_DIR,
     baseline_file: Path = BASELINE_FILE,
     output_dir: Path = OUTPUT_DIR,
-    permitir_dependencias: bool = False,
 ) -> tuple[Path, Path]:
     if not baseline_file.is_file():
         raise ErrorDeEmpaquetado(
@@ -135,15 +157,19 @@ def construir_paquete(
             "No hay ningun archivo distinto de la linea base: no hay nada que publicar."
         )
 
-    dependencias = [relativo for relativo in cambios if _es_dependencia(relativo)]
-    if dependencias and not permitir_dependencias:
-        muestra = "\n  ".join(dependencias[:10])
-        extra = f"\n  ... y {len(dependencias) - 10} mas" if len(dependencias) > 10 else ""
+    inaplicables = [relativo for relativo in cambios if _es_inaplicable(relativo)]
+    if inaplicables:
+        muestra = "\n  ".join(inaplicables[:10])
+        extra = f"\n  ... y {len(inaplicables) - 10} mas" if len(inaplicables) > 10 else ""
         raise ErrorDeEmpaquetado(
-            "Cambiaron dependencias dentro de _internal/, asi que un paquete ligero\n"
-            "dejaria al agente con codigo nuevo pidiendo librerias que no tiene.\n"
-            "Publica un instalador completo y vuelve a fijar la linea base.\n\n"
-            f"Archivos de dependencias que cambiaron ({len(dependencias)}):\n  {muestra}{extra}"
+            "Este paquete tocaria archivos que el helper NO puede reemplazar.\n\n"
+            "El helper congelado corre DESDE la carpeta de instalacion, asi que\n"
+            "Windows bloquea su propio .exe y todo lo que carga de _internal/.\n"
+            "Aplicarlo daria WinError 32 a mitad de copia y la reversion chocaria\n"
+            "con el mismo bloqueo, dejando la instalacion del agente a medias.\n\n"
+            "Esto no se puede forzar. Publica un instalador completo y vuelve a\n"
+            "fijar la linea base con --write-baseline.\n\n"
+            f"Archivos inaplicables ({len(inaplicables)}):\n  {muestra}{extra}"
         )
 
     staging = output_dir / f"update_{revision}"
@@ -201,11 +227,6 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--revision", default="")
     parser.add_argument("--build-dir", default=str(BUILD_DIR))
     parser.add_argument("--write-baseline", action="store_true")
-    parser.add_argument(
-        "--allow-dependency-changes",
-        action="store_true",
-        help="Empaqueta aunque cambien dependencias. Solo si sabes lo que haces.",
-    )
     args = parser.parse_args(argv)
     build_dir = Path(args.build_dir)
 
@@ -221,7 +242,6 @@ def main(argv: list[str] | None = None) -> int:
         zip_path, manifiesto = construir_paquete(
             revision=args.revision,
             build_dir=build_dir,
-            permitir_dependencias=args.allow_dependency_changes,
         )
     except ErrorDeEmpaquetado as error:
         print(f"\n{error}\n", file=sys.stderr)
