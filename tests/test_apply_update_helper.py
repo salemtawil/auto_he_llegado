@@ -326,14 +326,16 @@ def test_resolve_app_bundle_resuelve_ruta_relativa(monkeypatch: pytest.MonkeyPat
 
 def test_build_resign_command_usa_el_mismo_comando_que_el_build() -> None:
     # Si esto cambia, tiene que cambiar tambien build_installer_macos.sh.
-    assert helper_module.build_resign_command(Path("/Applications/AutoHeLlegado.app")) == [
-        "codesign",
-        "--force",
-        "--deep",
-        "--sign",
-        "-",
-        "/Applications/AutoHeLlegado.app",
-    ]
+    #
+    # La ruta se compara contra str(ruta), no contra un literal: en Windows
+    # Path("/Applications/...") se escribe con barras invertidas, y la suite se
+    # ejecuta tanto ahi como en macOS. Lo que importa son los argumentos.
+    ruta = Path("/Applications/AutoHeLlegado.app")
+    comando = helper_module.build_resign_command(ruta)
+
+    assert comando[:5] == ["codesign", "--force", "--deep", "--sign", "-"]
+    assert comando[5] == str(ruta)
+    assert len(comando) == 6
 
 
 def test_resign_no_invoca_codesign_fuera_de_mac(monkeypatch: pytest.MonkeyPatch) -> None:

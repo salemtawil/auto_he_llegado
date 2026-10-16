@@ -31,20 +31,33 @@ def entorno_limpio(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(threading, "excepthook", threading.excepthook)
 
     logger = logging.getLogger(registro.LOGGER_NAME)
+    raiz = logging.getLogger()
     previos = list(logger.handlers)
-    raiz_previos = list(logging.getLogger().handlers)
+    raiz_previos = list(raiz.handlers)
+    # configure_logging muta estado global del modulo logging: si el fixture no
+    # lo devuelve a su sitio, rompe pruebas de OTROS archivos que corren
+    # despues. Paso de verdad con test_ui_confirmations, que usa caplog sobre
+    # auto_he_llegado.ui y dejaba de ver nada por el propagate=False que se
+    # quedaba puesto.
+    propagate_previo = logger.propagate
+    nivel_previo = logger.level
+    raiz_nivel_previo = raiz.level
     yield tmp_path
     for handler in list(logger.handlers):
         if handler not in previos:
             handler.close()
             logger.removeHandler(handler)
-    for handler in list(logging.getLogger().handlers):
+    for handler in list(raiz.handlers):
         if handler not in raiz_previos:
-            logging.getLogger().removeHandler(handler)
+            raiz.removeHandler(handler)
     eco = logging.getLogger(f"{registro.LOGGER_NAME}.salida")
     for handler in list(eco.handlers):
         handler.close()
         eco.removeHandler(handler)
+    eco.propagate = True
+    logger.propagate = propagate_previo
+    logger.setLevel(nivel_previo)
+    raiz.setLevel(raiz_nivel_previo)
 
 
 def _contenido(ruta: Path) -> str:
@@ -182,3 +195,22 @@ def test_los_avisos_de_librerias_de_terceros_tambien_se_guardan(entorno_limpio: 
     logging.getLogger("playwright").warning("Target page closed")
 
     assert "Target page closed" in _contenido(ruta)
+
+
+def test_el_fixture_no_deja_el_logging_global_tocado() -> None:
+    """Guardia de regresion: va al final a proposito.
+
+    configure_logging pone propagate=False en auto_he_llegado para que el
+    mensaje no salga duplicado (el manejador esta tambien en la raiz). Si el
+    fixture no lo restaura, caplog deja de ver los registros de
+    auto_he_llegado.ui y rompe test_ui_confirmations, que corre despues por
+    orden alfabetico. Ya paso una vez.
+    """
+
+    logger = logging.getLogger(registro.LOGGER_NAME)
+
+    assert logger.propagate is True, (
+        "El fixture dejo propagate=False: contamina las pruebas de otros archivos."
+    )
+    assert not [h for h in logger.handlers if hasattr(h, "baseFilename")]
+    assert logging.getLogger(f"{registro.LOGGER_NAME}.salida").propagate is True
