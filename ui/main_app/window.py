@@ -1344,6 +1344,11 @@ class MainAppWindow(ctk.CTk):
         slot.thread.start()
 
     def _run_process_worker(self, slot_id: str, process_id: str, request: ProcessExecutionRequest) -> None:
+        # Entrada y salida explicitas en el log: sin esto no habia forma de
+        # distinguir "el proceso sigue trabajando" de "el proceso termino y el
+        # aviso a la interfaz se perdio". Las dos cosas se ven igual en
+        # pantalla, y la segunda deja la app esperando para siempre.
+        _LOGGER.info("Worker iniciado (slot=%s, proceso=%s).", slot_id, process_id)
         try:
             result = self._process_service.execute(
                 request,
@@ -1352,6 +1357,12 @@ class MainAppWindow(ctk.CTk):
                     phase,
                     message,
                 ),
+            )
+            _LOGGER.info(
+                "Worker terminado (slot=%s, proceso=%s, exito=%s). Avisando a la interfaz.",
+                slot_id,
+                process_id,
+                getattr(result, "success", "?"),
             )
             self._safe_after(
                 0,
@@ -1362,6 +1373,9 @@ class MainAppWindow(ctk.CTk):
                 ),
             )
         except Exception as exc:
+            _LOGGER.exception(
+                "Worker terminado con error (slot=%s, proceso=%s).", slot_id, process_id
+            )
             self._safe_after(
                 0,
                 lambda current_slot_id=slot_id, current_process_id=process_id, error=exc: self._handle_process_error(
@@ -1372,6 +1386,7 @@ class MainAppWindow(ctk.CTk):
             )
 
     def _finish_process(self, slot_id: str, process_id: str, result: ProcessExecutionResult) -> None:
+        _LOGGER.info("La interfaz recibio el fin del proceso %s.", process_id)
         elapsed_seconds = self._finalize_process_tracking(slot_id, process_id)
         if self._is_closing:
             return
@@ -2139,10 +2154,15 @@ class MainAppWindow(ctk.CTk):
 
     def _safe_after(self, delay_ms: int, callback, *, allow_during_close: bool = False) -> None:
         if self._is_closing and not allow_during_close:
+            _LOGGER.debug("_safe_after descartado: la app se esta cerrando.")
             return
         try:
             self.after(delay_ms, callback)
         except Exception:
+            # Tragarse esto en silencio deja al usuario con un proceso que
+            # parece colgado para siempre: el trabajo termino y el aviso a la
+            # interfaz se perdio sin dejar rastro. Que al menos quede escrito.
+            _LOGGER.exception("No se pudo programar un callback en la interfaz.")
             return
 
     # How long a cooperative close waits for the running automations to finish
