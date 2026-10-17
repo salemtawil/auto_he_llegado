@@ -3,10 +3,12 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import ssl
 from pathlib import Path
 
 import pytest
 
+import updater.release_update_client as ruc
 from updater.release_update_client import (
     ReleaseUpdateError,
     download_release_asset,
@@ -125,3 +127,59 @@ def test_download_release_asset_rejects_placeholder_sha(tmp_path: Path) -> None:
             target_dir=tmp_path,
             urlopen_func=lambda _request, timeout=120: _FakeResponse(b"zip-content"),
         )
+
+
+# ---------------------------------------------------------------------------
+# Certificados.
+#
+# Fallo real en el Mac Mini, 2026-10-17, al pulsar "Actualizar app":
+#
+#   No se pudo consultar GitHub: <urlopen error [SSL: CERTIFICATE_VERIFY_FAILED]
+#   certificate verify failed: unable to get local issuer certificate>
+#
+# El resto de la app hablaba con Supabase sin problema. La diferencia: todo lo
+# demas usa httpx, que trae certifi incorporado, y el actualizador usaba
+# urlopen pelado, que depende del almacen de OpenSSL. En una app empaquetada de
+# macOS ese almacen no apunta a ningun sitio.
+# ---------------------------------------------------------------------------
+
+
+def test_el_contexto_tls_trae_certificados_raiz() -> None:
+    contexto = ruc._contexto_con_certificados()
+
+    # Sin autoridades cargadas, cualquier HTTPS falla con CERTIFICATE_VERIFY_FAILED.
+    assert contexto.get_ca_certs(), "El contexto TLS no cargo ninguna autoridad raiz."
+    assert contexto.verify_mode == ssl.CERT_REQUIRED
+
+
+def test_sin_certifi_se_cae_al_contexto_por_defecto(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Quedarse sin certifi debe degradar al comportamiento anterior, nunca
+    # reventar: el actualizador corre con la app ya cerrandose.
+    import builtins
+
+    real_import = builtins.__import__
+
+    def _sin_certifi(name, *args, **kwargs):
+        if name == "certifi":
+            raise ImportError("certifi no disponible")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", _sin_certifi)
+
+    assert isinstance(ruc._contexto_con_certificados(), ssl.SSLContext)
+
+
+def test_las_entradas_publicas_usan_el_urlopen_verificado() -> None:
+    # Si alguna vuelve a urlopen pelado, el fallo solo aparece en una app
+    # empaquetada: en desarrollo no se nota porque ahi el sistema si tiene
+    # certificados.
+    import inspect
+
+    for funcion in (
+        ruc.fetch_json,
+        ruc.load_latest_manifest,
+        ruc.download_release_asset,
+        ruc.prepare_release_update,
+    ):
+        defecto = inspect.signature(funcion).parameters["urlopen_func"].default
+        assert defecto is ruc.urlopen_verificado, f"{funcion.__name__} no verifica certificados."

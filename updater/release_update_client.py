@@ -6,7 +6,34 @@ import platform
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
+import ssl
 from urllib.request import Request, urlopen
+
+
+def _contexto_con_certificados() -> ssl.SSLContext:
+    """Contexto TLS que sabe de donde sacar los certificados raiz.
+
+    urlopen usa el almacen de certificados de OpenSSL, que en una app
+    empaquetada de macOS no apunta a ningun sitio: la consulta a GitHub moria
+    con CERTIFICATE_VERIFY_FAILED mientras el resto de la app funcionaba, porque
+    todo lo demas habla por httpx, que trae certifi incorporado.
+
+    Si certifi no estuviera disponible se cae al contexto por defecto, que es lo
+    que habia hasta ahora: peor, pero nunca peor que fallar al importar.
+    """
+
+    try:
+        import certifi
+
+        return ssl.create_default_context(cafile=certifi.where())
+    except Exception:  # noqa: BLE001
+        return ssl.create_default_context()
+
+
+def urlopen_verificado(request, timeout: int | None = None):
+    """urlopen con los certificados resueltos. Firma compatible con urlopen."""
+
+    return urlopen(request, timeout=timeout, context=_contexto_con_certificados())
 
 
 GITHUB_API_BASE = "https://api.github.com/repos"
@@ -63,7 +90,7 @@ def load_update_config(config_path: Path) -> UpdateConfig:
 def fetch_json(
     url: str,
     *,
-    urlopen_func: Callable = urlopen,
+    urlopen_func: Callable = urlopen_verificado,
     timeout: int = 60,
 ) -> dict:
     request = Request(
@@ -90,7 +117,7 @@ def fetch_json(
 def load_latest_manifest(
     config: UpdateConfig,
     *,
-    urlopen_func: Callable = urlopen,
+    urlopen_func: Callable = urlopen_verificado,
 ) -> dict:
     if config.latest_url:
         return fetch_json(config.latest_url, urlopen_func=urlopen_func)
@@ -181,7 +208,7 @@ def download_release_asset(
     asset: ReleaseAsset,
     *,
     target_dir: Path,
-    urlopen_func: Callable = urlopen,
+    urlopen_func: Callable = urlopen_verificado,
     timeout: int = 120,
 ) -> DownloadedUpdate:
     if not asset.file_name.lower().endswith(".zip"):
@@ -222,7 +249,7 @@ def prepare_release_update(
     *,
     config_path: Path,
     staging_dir: Path,
-    urlopen_func: Callable = urlopen,
+    urlopen_func: Callable = urlopen_verificado,
     current_revision: str | None = None,
     sys_platform: str | None = None,
     machine: str | None = None,
