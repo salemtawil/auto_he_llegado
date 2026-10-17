@@ -31,7 +31,45 @@ except Exception:  # noqa: BLE001
 
 
 def _browser_process_names() -> tuple[str, ...]:
-    return ("chrome", "chrome.exe", "chromium", "chromium.exe", "msedge", "msedge.exe")
+    """Fragmentos de nombre, NO nombres exactos.
+
+    El nombre real del proceso del navegador cambia por plataforma y por canal:
+
+        Windows   chrome.exe
+        macOS     Google Chrome                 (el del sistema)
+        macOS     Google Chrome for Testing     (el que trae Playwright)
+
+    La comparacion por igualdad dejaba fuera los dos de macOS, y eso no era un
+    detalle cosmetico: browser_still_attached devolvia False ("no hay
+    navegador") con el navegador delante, y el vigilante mataba la sesion del
+    agente a los 5 segundos de abrirla. Paso de verdad en el Mac Mini el
+    2026-10-17 (run_id=1, pid=1625).
+
+    Buscar por fragmento no corre el riesgo de alcanzar a un proceso ajeno
+    porque solo se mira entre los hijos de NUESTRO driver.
+    """
+
+    return ("chrome", "chromium", "msedge", "edge")
+
+
+def _parece_navegador(child: object) -> bool:
+    """Si ese hijo del driver es un navegador. Nunca lanza.
+
+    Mira el nombre y, por si psutil lo devuelve truncado (en macOS el nombre
+    del proceso se corta), tambien el nombre del ejecutable.
+    """
+
+    etiquetas: list[str] = []
+    with suppress(Exception):
+        etiquetas.append(child.name() or "")
+    with suppress(Exception):
+        etiquetas.append(Path(child.exe() or "").name)
+    fragmentos = _browser_process_names()
+    for etiqueta in etiquetas:
+        texto = etiqueta.lower()
+        if any(fragmento in texto for fragmento in fragmentos):
+            return True
+    return False
 
 
 def capture_driver_pid(playwright: object) -> int | None:
@@ -76,13 +114,18 @@ def browser_still_attached(driver_pid: int | None) -> bool | None:
         process = psutil.Process(driver_pid)
         if process.status() == psutil.STATUS_ZOMBIE:
             return False
-        names = _browser_process_names()
-        for child in process.children(recursive=True):
-            try:
-                if (child.name() or "").lower() in names:
-                    return True
-            except psutil.Error:
-                continue
+        hijos = process.children(recursive=True)
+        for child in hijos:
+            if _parece_navegador(child):
+                return True
+        if hijos:
+            # Al driver le cuelga descendencia, pero ninguna se reconoce como
+            # navegador. Eso es "no lo se", NO "no hay navegador": confundir
+            # las dos cosas es exactamente lo que mataba sesiones vivas cuando
+            # el nombre del proceso no estaba en la lista. Con esta guarda, el
+            # dia que cambie un nombre o aparezca otra plataforma el fallo es
+            # "no se limpia un huerfano", no "se mata al agente a media faena".
+            return None
         return False
     except psutil.NoSuchProcess:
         # El driver ya no existe: no queda navegador que proteger.

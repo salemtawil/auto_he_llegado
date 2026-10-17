@@ -529,3 +529,118 @@ def test_en_windows_un_pid_inexistente_no_se_reporta_como_exito(monkeypatch) -> 
     monkeypatch.setattr(bm.subprocess, "run", _fake_run(128, []))
 
     assert _KILL_REAL(1001) is False
+
+
+# ---------------------------------------------------------------------------
+# Nombres de proceso del navegador por plataforma
+#
+# Fallo real, Mac Mini, 2026-10-17: el navegador se abria, metia credenciales y
+# a los 15 segundos moria con "Connection closed while reading from the driver".
+# El log lo dejo escrito:
+#
+#   Driver huerfano eliminado (run_id=1, pid=1625): el navegador ya estaba
+#   cerrado.
+#
+# No estaba cerrado. _browser_process_names comparaba por igualdad contra una
+# lista de nombres de Windows, el proceso real se llamaba "Google Chrome for
+# Testing", no casaba, browser_still_attached devolvia False, y el vigilante
+# mataba la sesion viva en su primera ronda (5 s).
+# ---------------------------------------------------------------------------
+
+
+def _psutil_con_hijos(*nombres: str, exes: dict[str, str] | None = None):
+    """Doble de psutil cuyo driver tiene esos hijos."""
+
+    rutas = exes or {}
+
+    class FakeHijo:
+        def __init__(self, nombre: str) -> None:
+            self._nombre = nombre
+
+        def name(self) -> str:
+            return self._nombre
+
+        def exe(self) -> str:
+            return rutas.get(self._nombre, f"/ruta/{self._nombre}")
+
+    class FakePsutil:
+        STATUS_ZOMBIE = "zombie"
+        Error = bm.psutil.Error
+        NoSuchProcess = bm.psutil.NoSuchProcess
+
+        class Process:
+            def __init__(self, pid):
+                pass
+
+            def status(self):
+                return "running"
+
+            def children(self, recursive=False):
+                return [FakeHijo(nombre) for nombre in nombres]
+
+    return FakePsutil
+
+
+@pytest.mark.parametrize(
+    "nombre",
+    [
+        "chrome.exe",            # Windows
+        "Google Chrome",         # macOS, el del sistema
+        "Google Chrome for Testing",  # macOS, el que trae Playwright
+        "chromium",
+        "msedge.exe",
+    ],
+)
+def test_se_reconoce_el_navegador_en_cada_plataforma(monkeypatch, nombre: str) -> None:
+    monkeypatch.setattr(bm, "psutil", _psutil_con_hijos(nombre))
+
+    assert bm.browser_still_attached(123) is True
+
+
+def test_se_reconoce_aunque_psutil_trunque_el_nombre(monkeypatch) -> None:
+    # En macOS el nombre de proceso viene cortado. Si el nombre no sirve, el
+    # ejecutable si.
+    monkeypatch.setattr(
+        bm,
+        "psutil",
+        _psutil_con_hijos(
+            "",
+            exes={"": "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"},
+        ),
+    )
+
+    assert bm.browser_still_attached(123) is True
+
+
+def test_sin_hijos_es_que_no_hay_navegador(monkeypatch) -> None:
+    # Driver pelado: aqui si hay huerfano que limpiar.
+    monkeypatch.setattr(bm, "psutil", _psutil_con_hijos())
+
+    assert bm.browser_still_attached(123) is False
+
+
+def test_hijos_no_reconocidos_es_no_lo_se_y_no_no_hay(monkeypatch) -> None:
+    """La guarda que convierte este fallo en inofensivo.
+
+    Si manana cambia un nombre de proceso o aparece otra plataforma, el
+    resultado debe ser "el vigilante no limpia un huerfano", nunca "el
+    vigilante mata al agente a media faena".
+    """
+
+    monkeypatch.setattr(bm, "psutil", _psutil_con_hijos("node", "algo-raro"))
+
+    assert bm.browser_still_attached(123) is None
+
+
+def test_el_vigilante_no_mata_una_sesion_de_macos(_clean_registry, monkeypatch) -> None:
+    """Regresion de extremo a extremo del fallo del Mac Mini."""
+
+    killed = _clean_registry
+    session, *_ = build_session(keep_open=True, driver_pid=1625)
+    BrowserManager._register_session(session)
+    session.close()
+    monkeypatch.setattr(bm, "psutil", _psutil_con_hijos("Google Chrome for Testing"))
+
+    assert BrowserManager.reap_orphan_sessions() == 0
+    assert killed == []
+    assert any(item is session for item in BrowserManager._sessions)
