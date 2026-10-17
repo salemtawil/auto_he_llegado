@@ -112,12 +112,17 @@ jobs:
           support="$HOME/Library/Application Support/AutoHeLlegado"
           test -s "$support/.env"
           test -s "$support/config/google-drive-oauth-client.json"
-          test -x /Applications/AutoHeLlegado.app/Contents/MacOS/AutoHeLlegado
-          codesign --verify --deep --strict /Applications/AutoHeLlegado.app
+          app="$HOME/Applications/AutoHeLlegado.app"
+          test -x "$app/Contents/MacOS/AutoHeLlegado"
+          codesign --verify --deep --strict "$app"
+          # La instalacion es del usuario, no de root: si no, el actualizador
+          # no podria escribir dentro del bundle.
+          test -O "$app"
+          test ! -d /Applications/AutoHeLlegado.app
           before=$(shasum -a 256 "$support/.env")
           sudo installer -pkg "${pkg[0]}" -target / -verboseR
           test "$before" = "$(shasum -a 256 "$support/.env")"
-          /Applications/AutoHeLlegado.app/Contents/MacOS/AutoHeLlegado > "$RUNNER_TEMP/app-startup.log" 2>&1 &
+          "$app/Contents/MacOS/AutoHeLlegado" > "$RUNNER_TEMP/app-startup.log" 2>&1 &
           app_pid=$!
           sleep 10
           if ! kill -0 "$app_pid" 2>/dev/null; then

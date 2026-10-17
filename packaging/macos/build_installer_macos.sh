@@ -262,9 +262,35 @@ if [ ! -d "$USER_HOME" ] || [ "$USER_HOME" = "/" ]; then
   exit 1
 fi
 SUPPORT_DIR="$USER_HOME/Library/Application Support/$APP_NAME"
-APP_TARGET="/Applications/AutoHeLlegado.app"
 
-/bin/mkdir -p "$SUPPORT_DIR"
+# La app se instala en la carpeta Aplicaciones DEL USUARIO, no en la del
+# sistema. Motivo: el codigo Python va congelado dentro del bundle, asi que
+# una actualizacion ligera tiene que escribir ahi. En /Applications los
+# archivos son de root y el actualizador pedirla contrasena en cada
+# actualizacion; en ~/Applications son del agente y no pide nada, igual que en
+# Windows.
+APP_TARGET="$USER_HOME/Applications/AutoHeLlegado.app"
+APP_STAGE="/Library/Application Support/$APP_NAME/stage/AutoHeLlegado.app"
+APP_LEGACY="/Applications/AutoHeLlegado.app"
+
+/bin/mkdir -p "$SUPPORT_DIR" "$USER_HOME/Applications"
+
+test -x "$APP_STAGE/Contents/MacOS/AutoHeLlegado"
+
+# ditto conserva la firma y los atributos extendidos del bundle; cp -R no
+# siempre. Se borra el destino antes para no dejar restos de la version
+# anterior mezclados con la nueva.
+/bin/rm -rf "$APP_TARGET"
+/usr/bin/ditto "$APP_STAGE" "$APP_TARGET"
+/usr/sbin/chown -R "$CONSOLE_USER":staff "$USER_HOME/Applications/AutoHeLlegado.app"
+/bin/rm -rf "/Library/Application Support/$APP_NAME/stage"
+
+# Migracion: si quedaba una instalacion antigua en la carpeta del sistema, se
+# retira para que el agente no tenga dos copias y acabe abriendo la que no se
+# actualiza.
+if [ -d "$APP_LEGACY" ]; then
+  /bin/rm -rf "$APP_LEGACY"
+fi
 
 test -x "$APP_TARGET/Contents/MacOS/AutoHeLlegado"
 
@@ -316,7 +342,7 @@ if [ -f "$SUPPORT_DIR/.env.backup" ]; then
 fi
 /bin/chmod +x "$SUPPORT_DIR/updater/launchers/ActualizarApp.command" 2>/dev/null || true
 /bin/rm -rf "$SUPPORT_DIR/ms-playwright"
-/usr/bin/xattr -dr com.apple.quarantine "/Applications/AutoHeLlegado.app" 2>/dev/null || true
+/usr/bin/xattr -dr com.apple.quarantine "$APP_TARGET" 2>/dev/null || true
 
 exit 0
 SH
@@ -385,8 +411,13 @@ PYINSTALLER_ARGS+=("$SPEC_PATH")
 run_step "Generando AutoHeLlegado.app ($MACOS_TARGET_ARCH)" "$PYTHON" "${PYINSTALLER_ARGS[@]}"
 assert_path_exists "$APP_OUTPUT" "No se genero $APP_OUTPUT."
 
-run_step "Preparando payload del instalador" mkdir -p "$PKG_ROOT/Applications" "$PAYLOAD_ROOT" "$PKG_SCRIPTS"
-cp -R "$APP_OUTPUT" "$PKG_ROOT/Applications/AutoHeLlegado.app"
+# El pkg deja la app en un area de paso y el postinstall la mueve a la carpeta
+# del usuario. No se instala directamente en /Applications porque ahi los
+# archivos quedan de root y el actualizador no podria escribirlos.
+APP_STAGE_ROOT="$PKG_ROOT/Library/Application Support/AutoHeLlegado/stage"
+APP_STAGE_PATH="$APP_STAGE_ROOT/AutoHeLlegado.app"
+run_step "Preparando payload del instalador" mkdir -p "$APP_STAGE_ROOT" "$PAYLOAD_ROOT" "$PKG_SCRIPTS"
+cp -R "$APP_OUTPUT" "$APP_STAGE_PATH"
 
 copy_tree "$PROJECT_ROOT/browser_extension" "$PAYLOAD_ROOT/browser_extension"
 copy_tree "$PROJECT_ROOT/sql" "$PAYLOAD_ROOT/sql"
@@ -413,11 +444,11 @@ write_postinstall_script "$PKG_SCRIPTS/postinstall"
 run_step "Validando script de instalacion" /bin/bash -n "$PKG_SCRIPTS/postinstall"
 
 if [ "${SKIP_CODESIGN:-0}" != "1" ] && command -v codesign >/dev/null 2>&1; then
-  run_step "Firmando localmente con ad-hoc codesign" codesign --force --deep --sign - "$PKG_ROOT/Applications/AutoHeLlegado.app"
+  run_step "Firmando localmente con ad-hoc codesign" codesign --force --deep --sign - "$APP_STAGE_PATH"
 fi
-run_step "Verificando firma de la app" codesign --verify --deep --strict "$PKG_ROOT/Applications/AutoHeLlegado.app"
+run_step "Verificando firma de la app" codesign --verify --deep --strict "$APP_STAGE_PATH"
 
-run_step "Validando payload" test -d "$PKG_ROOT/Applications/AutoHeLlegado.app"
+run_step "Validando payload" test -d "$APP_STAGE_PATH"
 assert_path_exists "$PAYLOAD_ROOT/browser_extension/manifest.json" "Falta browser_extension/manifest.json."
 assert_path_exists "$PAYLOAD_ROOT/updater/github_sync_updater.py" "Falta updater/github_sync_updater.py."
 assert_path_exists "$PAYLOAD_ROOT/updater/apply_update_helper.py" "Falta updater/apply_update_helper.py."
@@ -436,7 +467,7 @@ run_step "Generando update zip para GitHub" bash -c '
   rm -rf "$update_stage_root/config"
   rm -f "$update_zip_path"
   (cd "$update_stage_root" && /usr/bin/ditto -c -k --sequesterRsrc --rsrc . "$update_zip_path")
-' _ "$BUILD_ROOT/update_payload" "$PAYLOAD_ROOT" "$UPDATE_ZIP_PATH" "$PKG_ROOT/Applications/AutoHeLlegado.app"
+' _ "$BUILD_ROOT/update_payload" "$PAYLOAD_ROOT" "$UPDATE_ZIP_PATH" "$APP_STAGE_PATH"
 
 run_step "Analizando componentes" pkgbuild --analyze --root "$PKG_ROOT" "$BUILD_ROOT/components.plist"
 "$PYTHON" - "$BUILD_ROOT/components.plist" <<'PY'
