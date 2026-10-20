@@ -22,7 +22,9 @@ def test_load_old_config_adds_theme_default(tmp_path) -> None:
 
     assert config.theme_mode == "light"
     assert config.max_selfie_retries == 10
-    assert config.keep_browser_open is True
+    # Por defecto el navegador se cierra al terminar: dejarlo abierto hacia
+    # que cualquier agente que no tocara la configuracion acumulase navegadores.
+    assert config.keep_browser_open is False
     assert config.flow_engine == "traditional"
     assert config.enable_browser_extension is True
     assert config.browser_extension_overlay is True

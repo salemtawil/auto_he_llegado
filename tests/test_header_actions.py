@@ -39,6 +39,7 @@ def _window_with_tiles(session: AuthSession) -> tuple[MainAppWindow, dict[str, _
         "uploader": _FakeTile("uploader"),
         "cleanup": _FakeTile("cleanup"),
         "video": _FakeTile("video"),
+        "close_browsers": _FakeTile("close_browsers"),
         "theme": _FakeTile("theme"),
         "settings": _FakeTile("settings"),
     }
@@ -47,6 +48,7 @@ def _window_with_tiles(session: AuthSession) -> tuple[MainAppWindow, dict[str, _
     window.uploader_button = tiles["uploader"]  # type: ignore[assignment]
     window.cleanup_button = tiles["cleanup"]  # type: ignore[assignment]
     window.video_button = tiles["video"]  # type: ignore[assignment]
+    window.close_browsers_button = tiles["close_browsers"]  # type: ignore[assignment]
     window.theme_toggle_button = tiles["theme"]  # type: ignore[assignment]
     window.settings_button = tiles["settings"]  # type: ignore[assignment]
     return window, tiles
@@ -61,6 +63,7 @@ def test_member_header_only_shows_basic_actions_and_video() -> None:
     assert [name for name, tile in tiles.items() if tile.visible] == [
         "refresh",
         "video",
+        "close_browsers",
         "theme",
         "settings",
     ]
@@ -78,6 +81,7 @@ def test_admin_header_shows_all_actions() -> None:
         "uploader",
         "cleanup",
         "video",
+        "close_browsers",
         "theme",
         "settings",
     ]

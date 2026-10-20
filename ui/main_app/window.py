@@ -2222,6 +2222,12 @@ class MainAppWindow(ctk.CTk):
     # not run, so this must resolve without falling through to it.
     _close_prompt_open = False
 
+    # Mismo motivo: _layout_header_actions nombra este boton, y si no existe
+    # como atributo de clase, leerlo en una ventana a medio construir cae en el
+    # __getattr__ de Tk y revienta con RecursionError en vez de con un
+    # AttributeError legible.
+    close_browsers_button = None
+
     def _handle_app_close(self, *, confirm: bool = True) -> None:
         if self._is_closing or self._close_prompt_open:
             return
