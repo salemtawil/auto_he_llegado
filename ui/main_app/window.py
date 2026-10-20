@@ -201,7 +201,7 @@ class MainAppWindow(ctk.CTk):
         self.header_actions = ctk.CTkFrame(self.header, fg_color="transparent")
         self.header_actions.grid(row=0, column=2, padx=(0, 12), pady=6, sticky="nsew")
         self.header_actions.grid_rowconfigure(0, weight=1)
-        for column in range(7):
+        for column in range(8):
             self.header_actions.grid_columnconfigure(column, weight=1)
 
         self.refresh_button = self._create_header_tile(
@@ -244,13 +244,21 @@ class MainAppWindow(ctk.CTk):
         )
         self.video_button.grid(row=0, column=4, padx=(0, 6), sticky="nsew")
 
+        self.close_browsers_button = self._create_header_tile(
+            self.header_actions,
+            icon="⏻",
+            text="Navegadores",
+            command=self.close_all_browsers,
+        )
+        self.close_browsers_button.grid(row=0, column=5, padx=(0, 6), sticky="nsew")
+
         self.theme_toggle_button = self._create_header_tile(
             self.header_actions,
             icon="",
             text="Claro",
             command=self.toggle_theme_mode,
         )
-        self.theme_toggle_button.grid(row=0, column=5, padx=(0, 6), sticky="nsew")
+        self.theme_toggle_button.grid(row=0, column=6, padx=(0, 6), sticky="nsew")
 
         self.settings_button = self._create_header_tile(
             self.header_actions,
@@ -259,7 +267,7 @@ class MainAppWindow(ctk.CTk):
             command=self.open_settings_dialog,
             highlighted=True,
         )
-        self.settings_button.grid(row=0, column=6, sticky="nsew")
+        self.settings_button.grid(row=0, column=7, sticky="nsew")
         self._layout_header_actions()
         self._sync_theme_toggle_button()
         self._refresh_header_summary()
@@ -338,6 +346,7 @@ class MainAppWindow(ctk.CTk):
         visible_actions = [
             self.refresh_button,
             self.video_button,
+            self.close_browsers_button,
             self.theme_toggle_button,
             self.settings_button,
         ]
@@ -348,6 +357,7 @@ class MainAppWindow(ctk.CTk):
                 self.uploader_button,
                 self.cleanup_button,
                 self.video_button,
+                self.close_browsers_button,
                 self.theme_toggle_button,
                 self.settings_button,
             ]
@@ -358,6 +368,7 @@ class MainAppWindow(ctk.CTk):
             self.uploader_button,
             self.cleanup_button,
             self.video_button,
+            self.close_browsers_button,
             self.theme_toggle_button,
             self.settings_button,
         ]
@@ -860,6 +871,43 @@ class MainAppWindow(ctk.CTk):
             )
         except Exception as exc:
             self._broadcast_status_message(f"No se pudo guardar la configuración local. Revisa los permisos de la carpeta de datos y vuelve a intentar. ({safe_error_summary(exc, context='guardar configuracion local')})", color=ERROR)
+
+    def close_all_browsers(self) -> None:
+        """Libera ahora todos los navegadores abiertos por la app.
+
+        Playwright es el dueno del proceso del navegador y lo mantiene vivo
+        aunque el agente cierre la ventana, asi que sin esto los navegadores
+        que se dejan abiertos para ver el resultado no liberan la RAM hasta
+        cerrar la app.
+
+        Si hay una automatizacion trabajando se pide confirmacion: cerrarle el
+        navegador la interrumpe.
+        """
+
+        activos = self._active_process_count()
+        if activos > 0 and not messagebox.askyesno(
+            "Cerrar navegadores",
+            f"Hay {activos} proceso(s) en ejecucion.\n\n"
+            "Al cerrar los navegadores se interrumpiran.\n\n"
+            "Cerrar de todas formas?",
+            parent=self,
+            default=messagebox.NO,
+        ):
+            return
+        try:
+            liberados = BrowserManager.close_all_browsers()
+        except Exception as exc:  # noqa: BLE001
+            messagebox.showerror(
+                "Cerrar navegadores",
+                f"No se pudieron cerrar los navegadores. ({safe_error_summary(exc, context='cierre de navegadores')})",
+                parent=self,
+            )
+            return
+        if liberados:
+            mensaje = f"Se cerraron {liberados} navegador(es) y sus procesos."
+        else:
+            mensaje = "No habia navegadores abiertos por la app."
+        self._broadcast_status_message(mensaje, color=SUCCESS)
 
     def toggle_theme_mode(self) -> None:
         next_mode = "dark" if self._current_config.theme_mode == "light" else "light"
