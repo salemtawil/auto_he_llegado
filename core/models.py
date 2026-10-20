@@ -287,7 +287,11 @@ class LocalConfig(DomainModel):
     # Version de las automatizaciones: "v1" son las de siempre, "v2" las
     # optimizadas. Por defecto v1: la v2 solo se usa si se elige a proposito.
     automation_version: str = "v1"
-    keep_browser_open: bool = True
+    # Por defecto el navegador se cierra al terminar. Dejarlo abierto es util
+    # para revisar como quedo la pagina, pero Playwright mantiene vivo el
+    # proceso aunque se cierre la ventana, asi que como valor de fabrica
+    # garantizaba que cada agente acumulase navegadores hasta quedarse sin RAM.
+    keep_browser_open: bool = False
     enable_browser_extension: bool = True
     browser_extension_overlay: bool = True
     page_timeout_seconds: int = 180

@@ -644,3 +644,90 @@ def test_el_vigilante_no_mata_una_sesion_de_macos(_clean_registry, monkeypatch) 
     assert BrowserManager.reap_orphan_sessions() == 0
     assert killed == []
     assert any(item is session for item in BrowserManager._sessions)
+
+
+# ---------------------------------------------------------------------------
+# Sesiones que se dejan abiertas a proposito.
+#
+# Con keep_browser_open, el navegador se queda para que el agente vea el
+# resultado. Pero Playwright es el dueno del proceso del navegador y lo
+# mantiene vivo aunque se cierre la ventana, asi que el vigilante nunca veia
+# un huerfano y la sesion no se liberaba hasta cerrar la app. Resultado real:
+# 88 procesos tras trece corridas.
+# ---------------------------------------------------------------------------
+
+
+class _HiloFalso:
+    def __init__(self, vivo: bool) -> None:
+        self._vivo = vivo
+
+    def is_alive(self) -> bool:
+        return self._vivo
+
+
+def _sesion_terminada(driver_pid: int = 777):
+    session, *_ = build_session(keep_open=True, driver_pid=driver_pid)
+    session._owner_thread = _HiloFalso(False)
+    return session
+
+
+def test_una_corrida_en_marcha_no_se_toca_por_larga_que_sea(
+    _clean_registry, monkeypatch
+) -> None:
+    # paripe_block_wait_seconds son 300 s: una corrida legitima puede estar
+    # mucho rato sin dar senales. Cerrarsela al agente seria imperdonable.
+    killed = _clean_registry
+    session, *_ = build_session(keep_open=True, driver_pid=777)
+    session._owner_thread = _HiloFalso(True)
+    BrowserManager._register_session(session)
+    monkeypatch.setattr(type(session), "browser_still_open", lambda self: True)
+    monkeypatch.setattr(bm.BrowserManager, "_ABANDONED_SESSION_TTL_SECONDS", 0.0)
+
+    # Dos rondas con el plazo a cero: si la guarda del hilo vivo no estuviera,
+    # la segunda la cerraria. Con una sola ronda esta prueba no probaria nada.
+    BrowserManager.reap_orphan_sessions()
+    assert BrowserManager.reap_orphan_sessions() == 0
+    assert killed == []
+    assert any(item is session for item in BrowserManager._sessions)
+
+
+def test_la_primera_ronda_solo_marca_la_hora(_clean_registry, monkeypatch) -> None:
+    killed = _clean_registry
+    session = _sesion_terminada()
+    BrowserManager._register_session(session)
+    monkeypatch.setattr(type(session), "browser_still_open", lambda self: True)
+
+    assert BrowserManager.reap_orphan_sessions() == 0
+    assert killed == []
+    assert session._abandoned_since is not None
+
+
+def test_pasado_el_plazo_se_libera_el_navegador(_clean_registry, monkeypatch) -> None:
+    killed = _clean_registry
+    session = _sesion_terminada(driver_pid=888)
+    BrowserManager._register_session(session)
+    monkeypatch.setattr(type(session), "browser_still_open", lambda self: True)
+    monkeypatch.setattr(bm.BrowserManager, "_ABANDONED_SESSION_TTL_SECONDS", 0.0)
+
+    BrowserManager.reap_orphan_sessions()  # marca la hora
+    assert BrowserManager.reap_orphan_sessions() == 1
+    assert killed == [888]
+    assert BrowserManager._sessions == []
+
+
+def test_el_cierre_manual_libera_todo_y_deja_el_vigilante_vivo(
+    _clean_registry, monkeypatch
+) -> None:
+    # El boton de la app. A diferencia de shutdown_all(), que es para salir,
+    # aqui la app sigue trabajando y necesita que el vigilante siga en marcha.
+    killed = _clean_registry
+    parado: list[bool] = []
+    monkeypatch.setattr(bm.BrowserManager, "_stop_reaper", classmethod(lambda cls: parado.append(True)))
+    for pid in (901, 902):
+        session, *_ = build_session(keep_open=True, driver_pid=pid)
+        BrowserManager._register_session(session)
+
+    assert BrowserManager.close_all_browsers() == 2
+    assert sorted(killed) == [901, 902]
+    assert BrowserManager._sessions == []
+    assert parado == [], "El cierre manual no debe parar el vigilante."

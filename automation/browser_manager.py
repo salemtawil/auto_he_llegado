@@ -230,6 +230,12 @@ class BrowserSession:
     _last_extension_debug: dict | None = None
     _engine_phase_history: list[dict] | None = None
     _owner_thread_ident: int | None = None
+    # Hilo que creo la sesion. Cuando muere, la corrida termino: es un dato,
+    # no una suposicion, y por eso sirve para decidir cuando una sesion que se
+    # dejo abierta ya no la esta mirando nadie.
+    _owner_thread: object | None = None
+    # Momento en que se vio por primera vez que la corrida habia terminado.
+    _abandoned_since: float | None = None
     # PID del driver de Playwright. Es la UNICA via de cierre desde otro hilo:
     # la API sync queda atada al hilo que la arranco, asi que cuando el hilo de
     # la corrida muere, page/context/browser/playwright son inservibles.
@@ -244,6 +250,21 @@ class BrowserSession:
         # calling page/frame methods from any other thread raises. Diagnostics run
         # from the UI must check this before touching the live session.
         self._owner_thread_ident = threading.get_ident()
+        self._owner_thread = threading.current_thread()
+
+    def run_is_still_running(self) -> bool:
+        """True mientras el hilo que creo la sesion siga vivo.
+
+        Si no se sabe, se responde True: nunca cerrar por duda.
+        """
+
+        hilo = self._owner_thread
+        if hilo is None:
+            return True
+        try:
+            return bool(hilo.is_alive())
+        except Exception:  # noqa: BLE001
+            return True
 
     def is_owned_by_current_thread(self) -> bool:
         """True when the caller may use this session's Playwright objects."""
@@ -1019,6 +1040,13 @@ class BrowserManager:
     _sessions: list[BrowserSession] = []
     _sessions_lock = threading.Lock()
     _REAPER_INTERVAL_SECONDS = 5.0
+
+    # Cuanto se deja viva una sesion que quedo abierta a proposito despues de
+    # que su corrida terminara. El navegador se deja abierto para que el agente
+    # vea el resultado; pasado este rato ya lo vio, y lo unico que hace es
+    # comerse la RAM. Playwright mantiene vivo el proceso del navegador aunque
+    # se cierre la ventana, asi que sin esto no se libera hasta cerrar la app.
+    _ABANDONED_SESSION_TTL_SECONDS = 900.0
     _REAPER_JOIN_TIMEOUT_SECONDS = 5.0
     _reaper_thread: threading.Thread | None = None
     _reaper_stop: threading.Event | None = None
@@ -1600,6 +1628,60 @@ class BrowserManager:
                 _LOGGER.warning("El vigilante de sesiones fallo una ronda: %s", exc)
 
     @classmethod
+    def _cerrar_si_caduco(cls, session: BrowserSession) -> bool:
+        """Cierra una sesion cuya corrida acabo hace rato. Devuelve si la cerro.
+
+        Solo mira sesiones cuyo HILO DE CORRIDA ya murio: una automatizacion
+        trabajando nunca entra aqui, por larga que sea. No es una heuristica
+        que adivine si el agente sigue mirando; es el dato de cuando acabo el
+        trabajo.
+        """
+
+        if session.run_is_still_running():
+            session._abandoned_since = None
+            return False
+        ahora = time()
+        if session._abandoned_since is None:
+            session._abandoned_since = ahora
+            return False
+        if ahora - session._abandoned_since < cls._ABANDONED_SESSION_TTL_SECONDS:
+            return False
+        if not session.kill_driver():
+            return False
+        _LOGGER.info(
+            "Navegador liberado por inactividad (run_id=%s, pid=%s): su corrida "
+            "termino hace mas de %.0f minutos.",
+            session.run_id,
+            session.driver_pid,
+            cls._ABANDONED_SESSION_TTL_SECONDS / 60,
+        )
+        cls._unregister_session(session)
+        return True
+
+    @classmethod
+    def close_all_browsers(cls) -> int:
+        """Cierra todas las sesiones AHORA y deja el vigilante en marcha.
+
+        Es lo que hay detras del boton de la app. A diferencia de
+        shutdown_all(), que se usa al salir, aqui no se para el vigilante:
+        la app sigue funcionando y las proximas corridas necesitan que vigile.
+        """
+
+        with cls._sessions_lock:
+            sessions = list(cls._sessions)
+        cerradas = 0
+        for session in sessions:
+            try:
+                if session.kill_driver():
+                    cerradas += 1
+            except Exception as exc:  # noqa: BLE001
+                _LOGGER.warning("No se pudo cerrar una sesion: %s", exc)
+            finally:
+                cls._unregister_session(session)
+        _LOGGER.info("Cierre manual de navegadores: %s liberados.", cerradas)
+        return cerradas
+
+    @classmethod
     def reap_orphan_sessions(cls) -> int:
         """Mata los drivers cuyo navegador ya no existe. Devuelve cuantos.
 
@@ -1616,6 +1698,9 @@ class BrowserManager:
                 continue
             if session.disconnect_only:
                 continue  # el Chrome del operador no lo gestionamos nosotros
+            if cls._cerrar_si_caduco(session):
+                reaped += 1
+                continue
             still_open = session.browser_still_open()
             if still_open is None or still_open:
                 continue
