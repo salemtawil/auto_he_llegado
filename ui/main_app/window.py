@@ -26,6 +26,7 @@ from core.models import LocalConfig, ProcessExecutionRequest, ProcessExecutionRe
 from core.validators import sanitize_phone_number, validate_non_empty_string, validate_positive_int
 from services.last_result_service import LastResultService
 from services.local_config_service import LocalConfigService
+from services.machine_tuning_service import MachineTuningService
 from services.log_service import LogService
 from services.auth_context import get_current_session
 from services.access_service import AccessService, AccessSnapshot
@@ -100,6 +101,14 @@ class MainAppWindow(ctk.CTk):
         self._last_result_service = last_result_service or LastResultService()
         self._settings = get_settings()
         self._current_config = self._config_service.load()
+        # El equipo manda: si cambio de maquina (o es la primera vez), los
+        # limites se recalculan antes de armar la interfaz, porque de ellos
+        # depende cuantos paneles pueden correr a la vez.
+        try:
+            self._machine_tuning = MachineTuningService(self._config_service)
+            self._current_config = self._machine_tuning.ajustar(self._current_config).config
+        except Exception:  # noqa: BLE001 - medir el equipo nunca impide abrir
+            _LOGGER.exception("No se pudo ajustar la app al equipo.")
         self._settings_dialog: SettingsDialog | None = None
         self._agent_name_dialog: AgentNameDialog | None = None
         self._admin_password_dialog: AdminPasswordDialog | None = None
@@ -171,7 +180,7 @@ class MainAppWindow(ctk.CTk):
 
         self.header_meta_label = ctk.CTkLabel(
             self.title_wrap,
-            text="Motor: Tradicional | Procesos activos: 0/2",
+            text=f"Motor: Tradicional | {self._slot_process_count_label()}",
             font=ctk.CTkFont(size=10, weight="bold"),
             text_color=TEXT_MUTED,
             anchor="w",
@@ -1140,7 +1149,7 @@ class MainAppWindow(ctk.CTk):
         engine_label = self._flow_engine_label(self._current_config.flow_engine)
         self._header_meta_parts = [
             f"Motor: {engine_label}",
-            f"Activos: {self._active_process_count()}/2",
+            f"Activos: {self._active_process_count()}/{self._max_concurrent_processes()}",
             f"Principal: {slot_title}",
             f"Página: {page_name}",
         ]
@@ -1196,8 +1205,18 @@ class MainAppWindow(ctk.CTk):
     def _active_process_count(self) -> int:
         return sum(1 for slot in self._slots.values() if slot.thread is not None)
 
+    def _max_concurrent_processes(self) -> int:
+        try:
+            tope = int(self._current_config.max_concurrent_processes)
+        except (TypeError, ValueError):
+            return 1
+        return max(1, min(2, tope))
+
     def _slot_process_count_label(self) -> str:
-        return f"Procesos activos: {self._active_process_count()}/2"
+        return (
+            f"Procesos activos: {self._active_process_count()}"
+            f"/{self._max_concurrent_processes()}"
+        )
 
     def _set_slot_summary(self, slot_id: str, text: str) -> None:
         panel = self._get_slot(slot_id).panel
@@ -1335,8 +1354,14 @@ class MainAppWindow(ctk.CTk):
         if slot.thread is not None:
             self._set_slot_status(slot_id, "Este panel ya tiene un proceso en ejecución. Espera a que termine antes de iniciar otro.", color=ERROR)
             return
-        if active_count >= 2:
-            self._set_slot_status(slot_id, "Ya hay 2 procesos activos. Espera a que termine uno para iniciar otro.", color=ERROR)
+        tope = self._max_concurrent_processes()
+        if active_count >= tope:
+            self._set_slot_status(
+                slot_id,
+                f"Ya hay {tope} proceso(s) activo(s) para este equipo."
+                " Espera a que termine uno para iniciar otro.",
+                color=ERROR,
+            )
             return
         if active_count >= 1 and current_flow_engine != "traditional":
             self._set_slot_status(
@@ -2261,6 +2286,10 @@ class MainAppWindow(ctk.CTk):
     # AttributeError legible.
     close_browsers_button = None
 
+    # Igual: si medir el equipo falla, el atributo no llega a asignarse y
+    # cualquier lectura posterior caeria en el __getattr__ de Tk.
+    _machine_tuning = None
+
     def _handle_app_close(self, *, confirm: bool = True) -> None:
         if self._is_closing or self._close_prompt_open:
             return
@@ -2411,6 +2440,14 @@ class MainAppWindow(ctk.CTk):
                 "action_timeout_seconds",
             ),
             max_selfie_retries=self._parse_selfie_retry_limit(source["max_selfie_retries"]),
+            # La ventana de ajustes no muestra estos campos. Si no se arrastran
+            # desde la configuracion actual, guardar ajustes los devolveria a
+            # su valor de fabrica y la app volveria a medir el equipo en el
+            # siguiente arranque, pisando lo que el agente acaba de elegir.
+            paripe_block_wait_seconds=self._current_config.paripe_block_wait_seconds,
+            max_concurrent_processes=self._current_config.max_concurrent_processes,
+            hardware_signature=self._current_config.hardware_signature,
+            hardware_profile=self._current_config.hardware_profile,
             last_result_filter=(
                 "success_only"
                 if source.get("last_result_filter", "general") == "solo exitoso"

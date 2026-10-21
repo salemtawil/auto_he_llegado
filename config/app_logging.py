@@ -196,6 +196,17 @@ def _se_puede_escribir(directorio: Path) -> str:
         return f"no ({exc.__class__.__name__})"
 
 
+def _perfil_del_equipo() -> str:
+    """RAM, nucleos y perfil con el que arranco la app. Nunca lanza."""
+
+    try:
+        from config.machine_profile import describir_equipo
+
+        return describir_equipo()
+    except Exception as exc:  # noqa: BLE001 - el encabezado nunca debe fallar
+        return f"no se pudo medir ({type(exc).__name__})"
+
+
 def registrar_entorno(logger: logging.Logger | None = None) -> None:
     """Deja en el log todo lo que hace falta para situar un fallo.
 
@@ -227,6 +238,7 @@ def registrar_entorno(logger: logging.Logger | None = None) -> None:
         ("playwright", version_playwright),
         ("chrome del sistema", _chrome_del_sistema()),
         ("usuario", os.environ.get("USER") or os.environ.get("USERNAME") or "?"),
+        ("equipo", _perfil_del_equipo()),
     ]
     registro.info("--- entorno ---")
     for clave, valor in datos:

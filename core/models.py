@@ -298,6 +298,15 @@ class LocalConfig(DomainModel):
     action_timeout_seconds: int = 180
     paripe_block_wait_seconds: int = 300
     max_selfie_retries: int = 10
+    # Cuantas corridas a la vez aguanta este equipo. Lo calcula
+    # `config/machine_profile.py` segun la RAM y los nucleos; la interfaz no
+    # ofrece mas de dos paneles, asi que el valor util es 1 o 2.
+    max_concurrent_processes: int = 2
+    # Firma del equipo con el que se calcularon los valores de arriba. Si al
+    # arrancar no coincide con la del equipo actual, se recalculan: asi un
+    # config copiado de otra maquina no le impone sus limites a esta.
+    hardware_signature: str = ""
+    hardware_profile: str = ""
     last_result_filter: str = "general"
     theme_mode: str = "light"
 
