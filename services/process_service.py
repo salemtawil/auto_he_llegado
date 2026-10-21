@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import logging
 import os
 import platform
 import queue
@@ -9,6 +11,11 @@ from collections.abc import Callable
 from collections import OrderedDict
 from datetime import datetime, timezone
 from time import monotonic
+
+try:
+    import psutil
+except Exception:  # noqa: BLE001 - sin psutil solo se pierde la medicion
+    psutil = None  # type: ignore[assignment]
 
 from automation.browser_manager import BrowserManager
 from automation.compinche_site import CompincheSite
@@ -33,6 +40,9 @@ from services.photo_source_tracker import (
     reset_photo_source_counts,
 )
 from services.process_run_context import ProcessRunContext
+
+
+_LOGGER = logging.getLogger(__name__)
 
 
 class ProcessService:
@@ -816,6 +826,45 @@ class ProcessService:
                 self._slot_debug_exports[slot_id] = dict(payload)
                 self._slot_debug_exports.move_to_end(slot_id)
             self._evict_debug_exports_locked()
+        self._registrar_huella_de_memoria(payload)
+
+    def _registrar_huella_de_memoria(self, payload: dict) -> None:
+        """Deja en el log cuanta memoria se lleva el historial de depuracion.
+
+        Motivo: la app arranca en ~200 MB y sube corrida tras corrida. Se
+        guardan hasta 50 exportaciones de depuracion con su linea de tiempo
+        entera, y nadie habia medido nunca cuanto ocupa eso. Esta linea permite
+        ver si el crecimiento va pegado a este historial o viene de otro sitio,
+        en vez de adivinarlo.
+
+        Nunca puede costar una corrida: todo va envuelto.
+        """
+
+        try:
+            tamano = len(json.dumps(payload, default=str).encode("utf-8"))
+        except Exception:  # noqa: BLE001
+            tamano = -1
+        try:
+            eventos = len(payload.get("timeline") or [])
+        except Exception:  # noqa: BLE001
+            eventos = -1
+        rss_mb = -1.0
+        if psutil is not None:
+            try:
+                rss_mb = psutil.Process(os.getpid()).memory_info().rss / (1024 * 1024)
+            except Exception:  # noqa: BLE001
+                pass
+        with self._process_debug_lock:
+            guardadas = len(self._process_debug_exports)
+        _LOGGER.info(
+            "Memoria: RSS=%.0f MB | exportaciones guardadas=%s (tope %s) | "
+            "esta corrida=%s bytes, %s eventos de linea de tiempo",
+            rss_mb,
+            guardadas,
+            self._MAX_PROCESS_DEBUG_EXPORTS,
+            tamano,
+            eventos,
+        )
 
     def _evict_debug_exports_locked(self) -> None:
         while len(self._process_debug_exports) > self._MAX_PROCESS_DEBUG_EXPORTS:
