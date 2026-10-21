@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+from contextlib import suppress
 import os
 import platform
 import queue
@@ -849,17 +850,30 @@ class ProcessService:
         except Exception:  # noqa: BLE001
             eventos = -1
         rss_mb = -1.0
+        handles = -1
+        conexiones = -1
         if psutil is not None:
             try:
-                rss_mb = psutil.Process(os.getpid()).memory_info().rss / (1024 * 1024)
+                proceso = psutil.Process(os.getpid())
+                rss_mb = proceso.memory_info().rss / (1024 * 1024)
+                # Cada conexion abierta es un handle. Si suben corrida tras
+                # corrida, hay pools de httpx que nadie cierra: cada corrida
+                # construye su propio cliente de Supabase y su contexto SSL, y
+                # esa memoria vive en OpenSSL, donde tracemalloc no mira.
+                with suppress(Exception):
+                    handles = proceso.num_handles()
+                with suppress(Exception):
+                    conexiones = len(proceso.net_connections(kind="tcp"))
             except Exception:  # noqa: BLE001
                 pass
         with self._process_debug_lock:
             guardadas = len(self._process_debug_exports)
         _LOGGER.info(
-            "Memoria: RSS=%.0f MB | sesiones vivas=%s | exportaciones guardadas=%s "
-            "(tope %s) | esta corrida=%s bytes, %s eventos de linea de tiempo",
+            "Memoria: RSS=%.0f MB | handles=%s | conexiones TCP=%s | sesiones vivas=%s | "
+            "exportaciones guardadas=%s (tope %s) | esta corrida=%s bytes, %s eventos",
             rss_mb,
+            handles,
+            conexiones,
             sesiones_vivas_en_memoria(),
             guardadas,
             self._MAX_PROCESS_DEBUG_EXPORTS,
