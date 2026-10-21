@@ -322,6 +322,12 @@ def configure_logging(*, capturar_print: bool = True) -> Path | None:
         _configurado = True
         return None
 
+    # Si escribir en el archivo falla (OneDrive o el antivirus bloqueando el
+    # fichero, disco lleno), logging avisa por sys.stderr... que mas abajo se
+    # redirige a este mismo manejador. Eso reentra en el manejador que acaba de
+    # fallar y encadena hasta RecursionError. Callarlo corta el ciclo.
+    logging.raiseExceptions = False
+
     logger.setLevel(logging.DEBUG)
     logger.addHandler(manejador)
     logger.propagate = False

@@ -1,3 +1,10 @@
+from config.app_logging import configure_logging
+
+# El log se monta antes de importar la interfaz, igual que en app_main.py: este
+# ejecutable tambien se empaqueta sin consola, asi que sin esto un fallo al
+# subir fotos o un crash de un hilo no deja rastro en ningun sitio.
+configure_logging()
+
 from debug_tools.inspector_window import DebugInspectorWindow
 from ui.admin_auth import request_admin_access
 from ui.access.login_window import request_app_access

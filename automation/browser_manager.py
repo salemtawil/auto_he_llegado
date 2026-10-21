@@ -254,6 +254,11 @@ class BrowserSession:
     _owner_thread: object | None = None
     # Momento en que se vio por primera vez que la corrida habia terminado.
     _abandoned_since: float | None = None
+    # Navegador que abrio el agente a mano desde la interfaz. Su hilo muere en
+    # cuanto termina de navegar, asi que para el vigilante seria una corrida
+    # abandonada y lo cerraria a los 15 minutos mientras el agente lo usa. Solo
+    # lo cierra el boton "Navegadores" o la salida de la app.
+    operator_owned: bool = False
     # PID del driver de Playwright. Es la UNICA via de cierre desde otro hilo:
     # la API sync queda atada al hilo que la arranco, asi que cuando el hilo de
     # la corrida muere, page/context/browser/playwright son inservibles.
@@ -1111,6 +1116,7 @@ class BrowserManager:
         keep_open: bool = False,
         enable_extension: bool = False,
         extension_overlay: bool = True,
+        operator_owned: bool = False,
     ) -> BrowserSession:
         run_id = self.current_run_id()
         try:
@@ -1340,6 +1346,7 @@ class BrowserManager:
             context=context,
             page=page,
             keep_open=keep_open,
+            operator_owned=operator_owned,
             extension_enabled=enable_extension,
             extension_path=str(resolved_extension_dir) if resolved_extension_dir is not None else None,
             extension_loaded=bool(service_worker_url or expected_extension_visible),
@@ -1439,11 +1446,13 @@ class BrowserManager:
         *,
         keep_open: bool = False,
         extension_overlay: bool = True,
+        operator_owned: bool = False,
     ) -> BrowserSession:
         return self.open_clean_session(
             keep_open=keep_open,
             enable_extension=True,
             extension_overlay=extension_overlay,
+            operator_owned=operator_owned,
         )
 
     def prepare_chrome_extension_profile(self) -> BrowserSession:
@@ -1657,6 +1666,9 @@ class BrowserManager:
         trabajo.
         """
 
+        if session.operator_owned:
+            session._abandoned_since = None
+            return False
         if session.run_is_still_running():
             session._abandoned_since = None
             return False

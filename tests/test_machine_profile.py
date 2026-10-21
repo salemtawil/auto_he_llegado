@@ -168,3 +168,32 @@ def test_ajustar_respeta_el_resto_de_la_configuracion():
     assert resultado.config.agent_name == "Marta"
     assert resultado.config.agent_name_confirmed is True
     assert resultado.config.theme_mode == "dark"
+
+
+def test_una_medicion_poco_fiable_no_se_guarda_nunca():
+    # Un fallo puntual de psutil no debe dejar a un equipo de 16 GB con el
+    # perfil 'ligero' guardado y la firma cambiada.
+    perfil_bueno = derivar_perfil(equipo(16384, 8))
+    guardada = LocalConfig(
+        hardware_signature=perfil_bueno.firma,
+        hardware_profile=perfil_bueno.nombre,
+        max_concurrent_processes=2,
+        page_timeout_seconds=180,
+    )
+    servicio_config = ConfigServiceFalso(guardada)
+    resultado = MachineTuningService(
+        servicio_config, perfil=derivar_perfil(equipo(4096, 8, confiable=False))
+    ).ajustar()
+
+    assert resultado.aplicado is False
+    assert servicio_config.guardados == [], "no debe escribir una medida que no es fiable"
+    assert servicio_config.config.hardware_signature == perfil_bueno.firma
+    assert servicio_config.config.max_concurrent_processes == 2
+    # Para ESTA sesion si se usan los limites prudentes.
+    assert resultado.config.max_concurrent_processes == 1
+
+
+def test_el_perfil_del_equipo_se_mide_una_sola_vez():
+    from config.machine_profile import perfil_del_equipo
+
+    assert perfil_del_equipo() is perfil_del_equipo()

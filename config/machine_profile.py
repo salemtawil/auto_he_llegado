@@ -12,6 +12,7 @@ configuracion guardada es `services/machine_tuning_service.py`.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import lru_cache
 import logging
 import os
 import platform
@@ -60,6 +61,10 @@ class MachineProfile:
     paripe_block_wait_seconds: int
     firma: str
     motivo: str
+    # False cuando no se pudo medir la RAM de verdad. En ese caso los limites
+    # son una suposicion prudente y NO deben guardarse: pisarian la medida
+    # buena de un equipo holgado por un fallo puntual de psutil.
+    medicion_confiable: bool = True
 
     def como_ajustes(self) -> dict[str, object]:
         """Los campos de LocalConfig que este perfil fija."""
@@ -143,6 +148,17 @@ def _procesos_que_caben(recursos: MachineResources) -> int:
     return max(1, min(MAX_PROCESOS_SOPORTADOS, por_ram, por_cpu))
 
 
+@lru_cache(maxsize=1)
+def perfil_del_equipo() -> MachineProfile:
+    """El perfil de ESTE equipo, medido una sola vez por proceso.
+
+    Lo piden el encabezado del log y el servicio de ajuste en el mismo
+    arranque; sin la cache se mediria (e importaria psutil) dos veces.
+    """
+
+    return derivar_perfil()
+
+
 def derivar_perfil(recursos: MachineResources | None = None) -> MachineProfile:
     """Traduce la medida del equipo a limites concretos."""
 
@@ -187,13 +203,14 @@ def derivar_perfil(recursos: MachineResources | None = None) -> MachineProfile:
         # su eleccion cada vez que cambie de maquina.
         firma=recursos.firma(),
         motivo=motivo,
+        medicion_confiable=recursos.medicion_confiable,
     )
 
 
 def describir_equipo(perfil: MachineProfile | None = None) -> str:
     """Una linea para el log y para la ventana de ajustes."""
 
-    perfil = perfil or derivar_perfil()
+    perfil = perfil or perfil_del_equipo()
     return (
         f"Perfil '{perfil.nombre}': {perfil.motivo}."
         f" Hasta {perfil.max_concurrent_processes} proceso(s) a la vez,"

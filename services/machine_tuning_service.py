@@ -13,8 +13,8 @@ import logging
 
 from config.machine_profile import (
     MachineProfile,
-    derivar_perfil,
     describir_equipo,
+    perfil_del_equipo,
 )
 from core.models import LocalConfig
 from services.local_config_service import LocalConfigService
@@ -41,12 +41,31 @@ class MachineTuningService:
 
     def perfil(self) -> MachineProfile:
         if self._perfil is None:
-            self._perfil = derivar_perfil()
+            self._perfil = perfil_del_equipo()
         return self._perfil
 
     def ajustar(self, config: LocalConfig | None = None) -> TuningResult:
         perfil = self.perfil()
         config = config if config is not None else self._config_service.load()
+
+        if not perfil.medicion_confiable:
+            # Sin medida real los limites son una suposicion: valen para esta
+            # sesion, pero no se guardan. Si se guardaran, un fallo puntual de
+            # psutil dejaria a un equipo de 16 GB con el perfil 'ligero' y la
+            # firma cambiada, y al arranque siguiente volveria a reescribirlo
+            # todo, borrando ademas lo que el agente hubiera ajustado a mano.
+            _LOGGER.warning(
+                "No se pudo medir el equipo; se usan limites prudentes sin"
+                " guardarlos. %s",
+                describir_equipo(perfil),
+            )
+            datos = config.model_dump()
+            datos.update(perfil.como_ajustes())
+            return TuningResult(
+                config=LocalConfig.model_validate(datos),
+                perfil=perfil,
+                aplicado=False,
+            )
 
         if config.hardware_signature == perfil.firma:
             _LOGGER.info(

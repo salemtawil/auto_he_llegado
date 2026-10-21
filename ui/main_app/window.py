@@ -2179,6 +2179,9 @@ class MainAppWindow(ctk.CTk):
         return BrowserManager().open_extension_session(
             keep_open=keep_open,
             extension_overlay=extension_overlay,
+            # Lo abre el agente desde la interfaz: el vigilante no debe
+            # cerrarselo a los 15 minutos por parecer una corrida abandonada.
+            operator_owned=keep_open,
         )
 
     def _schedule_process_progress(self, slot_id: str, phase: str, message: str) -> None:
