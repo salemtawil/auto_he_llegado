@@ -214,3 +214,68 @@ def test_el_fixture_no_deja_el_logging_global_tocado() -> None:
     )
     assert not [h for h in logger.handlers if hasattr(h, "baseFilename")]
     assert logging.getLogger(f"{registro.LOGGER_NAME}.salida").propagate is True
+
+
+# ---------------------------------------------------------------------------
+# Rastreo de memoria (tracemalloc).
+#
+# La app sube ~2 MB por segundo durante una corrida. Descartadas las sesiones
+# retenidas (la cuenta sube y baja) y el historial de depuracion (1 MB en nueve
+# corridas). En vez de seguir con hipotesis, se mide que lineas retienen la
+# memoria. Va apagado por defecto porque rastrear cada reserva ralentiza el
+# interprete.
+# ---------------------------------------------------------------------------
+
+
+def test_el_rastreo_viene_apagado(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("AUTO_HE_LLEGADO_TRACEMALLOC", raising=False)
+
+    assert registro.iniciar_rastreo_de_memoria() is False
+
+
+def test_el_rastreo_se_enciende_con_la_variable(monkeypatch: pytest.MonkeyPatch) -> None:
+    import tracemalloc
+
+    monkeypatch.setenv("AUTO_HE_LLEGADO_TRACEMALLOC", "1")
+    estaba = tracemalloc.is_tracing()
+    try:
+        assert registro.iniciar_rastreo_de_memoria() is True
+        assert tracemalloc.is_tracing()
+    finally:
+        if not estaba:
+            tracemalloc.stop()
+
+
+def test_el_top_de_memoria_queda_escrito(entorno_limpio: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import tracemalloc
+
+    ruta = registro.configure_logging()
+    assert ruta is not None
+    monkeypatch.setenv("AUTO_HE_LLEGADO_TRACEMALLOC", "1")
+    estaba = tracemalloc.is_tracing()
+    try:
+        registro.iniciar_rastreo_de_memoria()
+        basura = [bytes(50_000) for _ in range(40)]  # algo que reservar
+        registro.registrar_top_de_memoria()
+        assert len(basura) == 40
+    finally:
+        if not estaba:
+            tracemalloc.stop()
+
+    texto = _contenido(ruta)
+    assert "memoria rastreada" in texto
+    assert "MB en" in texto
+
+
+def test_sin_rastreo_el_top_no_escribe_nada(entorno_limpio: Path) -> None:
+    # Si no se esta rastreando, no debe ensuciar el log ni lanzar.
+    import tracemalloc
+
+    ruta = registro.configure_logging()
+    assert ruta is not None
+    if tracemalloc.is_tracing():
+        tracemalloc.stop()
+
+    registro.registrar_top_de_memoria()
+
+    assert "memoria rastreada" not in _contenido(ruta)

@@ -234,6 +234,62 @@ def registrar_entorno(logger: logging.Logger | None = None) -> None:
     registro.info("--- fin entorno ---")
 
 
+def iniciar_rastreo_de_memoria() -> bool:
+    """Enciende tracemalloc si AUTO_HE_LLEGADO_TRACEMALLOC=1. Nunca lanza.
+
+    Apagado por defecto: rastrear cada reserva de memoria ralentiza el
+    interprete. Se enciende solo para una sesion de diagnostico, cuando hace
+    falta saber QUE lineas retienen la memoria en vez de suponerlo.
+    """
+
+    if os.getenv("AUTO_HE_LLEGADO_TRACEMALLOC", "").strip() not in {"1", "true", "si"}:
+        return False
+    try:
+        import tracemalloc
+
+        if not tracemalloc.is_tracing():
+            tracemalloc.start(15)
+        logging.getLogger(LOGGER_NAME).info(
+            "Rastreo de memoria ACTIVADO. La app ira mas lenta; es para diagnosticar."
+        )
+        return True
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def registrar_top_de_memoria(limite: int = 12) -> None:
+    """Deja en el log las lineas que mas memoria retienen. Nunca lanza."""
+
+    logger = logging.getLogger(LOGGER_NAME)
+    try:
+        import tracemalloc
+
+        if not tracemalloc.is_tracing():
+            return
+        instantanea = tracemalloc.take_snapshot().filter_traces(
+            (
+                tracemalloc.Filter(False, tracemalloc.__file__),
+                tracemalloc.Filter(False, __file__),
+            )
+        )
+        estadisticas = instantanea.statistics("lineno")[:limite]
+        total_mb = sum(item.size for item in instantanea.statistics("filename")) / (1024 * 1024)
+        logger.info("--- memoria rastreada: %.1f MB en total ---", total_mb)
+        for puesto, item in enumerate(estadisticas, start=1):
+            marco = item.traceback[0]
+            logger.info(
+                "  %2d. %7.1f MB en %s objetos  %s:%s",
+                puesto,
+                item.size / (1024 * 1024),
+                item.count,
+                marco.filename,
+                marco.lineno,
+            )
+        logger.info("--- fin memoria rastreada ---")
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def configure_logging(*, capturar_print: bool = True) -> Path | None:
     """Monta el registro a archivo. Idempotente. Nunca lanza.
 
@@ -280,4 +336,5 @@ def configure_logging(*, capturar_print: bool = True) -> Path | None:
     logger.info("=" * 70)
     logger.info("Arranque de Auto He Llegado")
     registrar_entorno(logger)
+    iniciar_rastreo_de_memoria()
     return _ruta_activa

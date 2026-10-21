@@ -866,6 +866,12 @@ class ProcessService:
             tamano,
             eventos,
         )
+        try:
+            from config.app_logging import registrar_top_de_memoria
+
+            registrar_top_de_memoria()
+        except Exception:  # noqa: BLE001
+            pass
 
     def _evict_debug_exports_locked(self) -> None:
         while len(self._process_debug_exports) > self._MAX_PROCESS_DEBUG_EXPORTS:
