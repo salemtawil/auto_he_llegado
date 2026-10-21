@@ -731,3 +731,49 @@ def test_el_cierre_manual_libera_todo_y_deja_el_vigilante_vivo(
     assert sorted(killed) == [901, 902]
     assert BrowserManager._sessions == []
     assert parado == [], "El cierre manual no debe parar el vigilante."
+
+
+# ---------------------------------------------------------------------------
+# Cuenta de sesiones vivas.
+#
+# La app arranca en 80 MB y llega a 796 MB tras unas corridas, unos 48 MB por
+# corrida: demasiado para datos de texto. Una sesion viva sostiene Playwright
+# entero, asi que si el numero de sesiones sin reciclar sube corrida tras
+# corrida, ahi esta la memoria. Esta cuenta lo responde con un numero en vez de
+# con una suposicion.
+# ---------------------------------------------------------------------------
+
+
+def test_una_sesion_liberada_sale_de_la_cuenta() -> None:
+    import gc
+
+    # Se mira ESA sesion por su id, no un total global: otras pruebas del
+    # archivo dejan sesiones vivas y un contador global haria la prueba
+    # dependiente del orden. Ya me paso.
+    session, *_ = build_session(keep_open=False, driver_pid=4242)
+    identificador = id(session)
+    assert identificador in bm._SESIONES_VIVAS
+
+    del session
+    gc.collect()
+
+    # Si esto fallara, el propio contador estaria reteniendo las sesiones y
+    # seria peor el remedio que la enfermedad.
+    assert identificador not in bm._SESIONES_VIVAS
+
+
+def test_una_sesion_retenida_sigue_contando() -> None:
+    import gc
+
+    session, *_ = build_session(keep_open=False, driver_pid=4243)
+    identificador = id(session)
+    retenida = [session]  # alguien guarda una referencia, como en el fallo real
+    del session
+    gc.collect()
+
+    assert identificador in bm._SESIONES_VIVAS
+
+    del retenida
+    gc.collect()
+
+    assert identificador not in bm._SESIONES_VIVAS

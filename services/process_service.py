@@ -17,7 +17,7 @@ try:
 except Exception:  # noqa: BLE001 - sin psutil solo se pierde la medicion
     psutil = None  # type: ignore[assignment]
 
-from automation.browser_manager import BrowserManager
+from automation.browser_manager import BrowserManager, sesiones_vivas_en_memoria
 from automation.compinche_site import CompincheSite
 from automation.engine_router import FlowEngineRouter
 from automation.engines.common import RegisteredSiteRunner
@@ -857,9 +857,10 @@ class ProcessService:
         with self._process_debug_lock:
             guardadas = len(self._process_debug_exports)
         _LOGGER.info(
-            "Memoria: RSS=%.0f MB | exportaciones guardadas=%s (tope %s) | "
-            "esta corrida=%s bytes, %s eventos de linea de tiempo",
+            "Memoria: RSS=%.0f MB | sesiones vivas=%s | exportaciones guardadas=%s "
+            "(tope %s) | esta corrida=%s bytes, %s eventos de linea de tiempo",
             rss_mb,
+            sesiones_vivas_en_memoria(),
             guardadas,
             self._MAX_PROCESS_DEBUG_EXPORTS,
             tamano,

@@ -12,6 +12,7 @@ import subprocess
 import threading
 from time import sleep, time
 from contextlib import suppress
+import weakref
 
 from config.paths import DEFAULT_LOCAL_DATA_DIR, PROJECT_ROOT
 from config.settings import Settings, get_settings
@@ -210,6 +211,23 @@ def kill_process_tree(pid: int | None) -> bool:
     return killed
 
 
+# Cuenta exacta de sesiones vivas en memoria. Es un WeakSet: una sesion sale de
+# aqui sola en cuanto el recolector la libera, asi que si el numero sube corrida
+# tras corrida es que ALGUIEN sigue guardando una referencia. Y una sesion viva
+# sostiene Playwright entero -conexion, buffers del protocolo, navegador,
+# contexto y pagina-, que es mucha memoria por corrida.
+_SESIONES_VIVAS: "weakref.WeakValueDictionary[int, object]" = weakref.WeakValueDictionary()
+
+
+def sesiones_vivas_en_memoria() -> int:
+    """Cuantos objetos de sesion siguen sin reciclarse. -1 si no se puede saber."""
+
+    try:
+        return len(_SESIONES_VIVAS)
+    except Exception:  # noqa: BLE001
+        return -1
+
+
 @dataclass
 class BrowserSession:
     playwright: object
@@ -251,6 +269,8 @@ class BrowserSession:
         # from the UI must check this before touching the live session.
         self._owner_thread_ident = threading.get_ident()
         self._owner_thread = threading.current_thread()
+        with suppress(Exception):
+            _SESIONES_VIVAS[id(self)] = self
 
     def run_is_still_running(self) -> bool:
         """True mientras el hilo que creo la sesion siga vivo.
