@@ -1433,8 +1433,41 @@ class MainAppWindow(ctk.CTk):
                 ),
             )
 
+    def _registrar_huella_de_tk(self) -> None:
+        """Cuantos objetos tiene vivos Tcl. Nunca lanza.
+
+        Por que: tracemalloc dice que la memoria de Python apenas crece (53 a 57
+        MB entre corridas) mientras el proceso sube cientos de MB. Esa diferencia
+        solo puede estar en bibliotecas de C, y la candidata obvia es Tcl/Tk, que
+        reserva por su cuenta y es invisible para tracemalloc.
+
+        Si este numero sube corrida tras corrida, se estan creando widgets u
+        objetos de Tk que nadie destruye. Si se mantiene, la memoria viene de
+        otro sitio y hay que seguir buscando.
+        """
+
+        try:
+            comandos = len(self.tk.call("info", "commands"))
+        except Exception:  # noqa: BLE001
+            comandos = -1
+        try:
+            imagenes = len(self.tk.call("image", "names"))
+        except Exception:  # noqa: BLE001
+            imagenes = -1
+        try:
+            fuentes = len(self.tk.call("font", "names"))
+        except Exception:  # noqa: BLE001
+            fuentes = -1
+        _LOGGER.info(
+            "Tk: comandos=%s | imagenes=%s | fuentes=%s",
+            comandos,
+            imagenes,
+            fuentes,
+        )
+
     def _finish_process(self, slot_id: str, process_id: str, result: ProcessExecutionResult) -> None:
         _LOGGER.info("La interfaz recibio el fin del proceso %s.", process_id)
+        self._registrar_huella_de_tk()
         elapsed_seconds = self._finalize_process_tracking(slot_id, process_id)
         if self._is_closing:
             return
