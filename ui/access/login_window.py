@@ -141,6 +141,20 @@ class LoginWindow(ctk.CTk):
         )
         self.remember_checkbox.grid(row=6, column=0, padx=24, pady=(0, 4), sticky="w")
 
+        # Mismo renglon que el recordatorio, al otro lado: no mueve ninguna
+        # fila del formulario.
+        self.forgot_password_button = ctk.CTkButton(
+            self.container,
+            text="Olvide mi contrasena",
+            command=self._handle_password_reset,
+            height=24,
+            width=170,
+            fg_color="transparent",
+            hover_color=NEUTRAL_BUTTON_HOVER,
+            text_color=TEXT_MUTED,
+        )
+        self.forgot_password_button.grid(row=6, column=0, padx=24, pady=(0, 4), sticky="e")
+
         self.status_label = ctk.CTkLabel(
             self.container,
             text="",
@@ -293,6 +307,7 @@ class LoginWindow(ctk.CTk):
         )
         self.register_panel.grid() if is_register else self.register_panel.grid_remove()
         self.remember_checkbox.grid_remove() if is_register else self.remember_checkbox.grid()
+        self.forgot_password_button.grid_remove() if is_register else self.forgot_password_button.grid()
         self.video_panel.grid_remove()
         self._selected_video = None
         self.submit_video_button.configure(state="disabled")
@@ -333,6 +348,46 @@ class LoginWindow(ctk.CTk):
             daemon=True,
         )
         thread.start()
+
+    def _handle_password_reset(self) -> None:
+        if self._busy:
+            return
+        identifier = self.email_entry.get().strip()
+        if not identifier:
+            self.status_label.configure(
+                text="Escribe primero tu usuario o tu email y vuelve a pulsar.",
+                text_color=WARNING,
+            )
+            self.email_entry.focus_set()
+            return
+        self._set_busy(True, "Pidiendo el correo de restablecimiento...")
+        threading.Thread(
+            target=lambda: self._password_reset_worker(identifier),
+            daemon=True,
+        ).start()
+
+    def _password_reset_worker(self, identifier: str) -> None:
+        try:
+            destino = self._access_service.send_password_reset(identifier)
+        except Exception as exc:  # noqa: BLE001 - el texto crudo no va a pantalla
+            self.after(
+                0,
+                lambda error=exc: self._finish_error(self._friendly_access_error(error)),
+            )
+            return
+        self.after(0, lambda correo=destino: self._finish_password_reset(correo))
+
+    def _finish_password_reset(self, destino: str) -> None:
+        self._set_busy(False)
+        # No se promete que el correo haya llegado: Supabase acepta la peticion
+        # aunque el envio de correos no este configurado.
+        self.status_label.configure(
+            text=(
+                f"Si {destino} esta registrado, recibira un enlace para cambiar"
+                " la contrasena. Revisa tambien el correo no deseado."
+            ),
+            text_color=SUCCESS,
+        )
 
     def _login_worker(self, identifier: str, password: str) -> None:
         try:

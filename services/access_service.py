@@ -146,6 +146,36 @@ class AccessService:
             needs_email_confirmation=getattr(response, "session", None) is None,
         )
 
+    def send_password_reset(self, identifier: str) -> str:
+        """Pide a Supabase el correo para restablecer la contrasena.
+
+        El agente escribe su usuario (o su email): el usuario se traduce a
+        email con el mismo RPC que usa el login, porque aqui todavia no hay
+        sesion con la que consultar la tabla de perfiles.
+
+        Devuelve el email al que se mando, enmascarado, para poder decirle a
+        donde mirar sin revelar la direccion completa a quien este delante.
+
+        Depende de que el envio de correos este configurado en Supabase. Si no
+        lo esta, Supabase acepta la peticion igual y el correo no llega nunca:
+        por eso el mensaje de la interfaz no promete que haya llegado.
+        """
+
+        normalized = self._normalize_identifier(identifier)
+        if not normalized:
+            raise ValueError("Escribe tu usuario o tu email.")
+        email = self._resolve_login_email(normalized)
+        self._client_provider.client.auth.reset_password_for_email(email)
+        return self._mask_email(email)
+
+    @staticmethod
+    def _mask_email(email: str) -> str:
+        nombre, _, dominio = email.partition("@")
+        if not dominio:
+            return "***"
+        visible = nombre[:2] if len(nombre) > 2 else nombre[:1]
+        return f"{visible}{'*' * max(len(nombre) - len(visible), 1)}@{dominio}"
+
     def sign_out(self) -> None:
         try:
             self._client_provider.client.auth.sign_out()

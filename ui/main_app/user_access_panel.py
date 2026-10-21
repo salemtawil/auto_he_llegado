@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import threading
 import tkinter as tk
+from concurrent.futures import ThreadPoolExecutor
 
 import customtkinter as ctk
 
+from services.auth_context import get_current_session
 from services.user_access_admin_service import UserAccessAdminService, UserAccessRecord
 from services.access_service import VideoRequirementPolicy
 from services.photo_pool_policy_service import PhotoPoolPolicy
@@ -39,6 +41,18 @@ class UserAccessPanel(ctk.CTkFrame):
         self._service = access_admin_service or UserAccessAdminService()
         self._is_loading = False
         self._pool_bucket_values: list[str] = []
+        # Cada fila de usuario creaba 11 objetos CTkFont. Con 100 usuarios son
+        # 1.100 fuentes nuevas por refresco, y Tk no las libera al destruir los
+        # widgets: era la mayor parte del tiempo que tardaba en abrir el panel.
+        # Son todas iguales, asi que se crean una vez.
+        self._fuente_titulo = ctk.CTkFont(size=12, weight="bold")
+        self._fuente_etiqueta = ctk.CTkFont(size=12)
+        self._fuente_campo = ctk.CTkFont(size=11, weight="bold")
+        self._pendientes_de_pintar: list[UserAccessRecord] = []
+        # Para no ofrecer borrarse a uno mismo: la politica de la base tambien
+        # lo impide, pero un boton que siempre falla es un boton roto.
+        sesion = get_current_session()
+        self._mi_user_id = str(getattr(sesion, "user_id", "") or "")
         self.grid_columnconfigure(0, weight=1)
         self.grid_rowconfigure(2, weight=1)
         self._build_header()
@@ -295,11 +309,26 @@ class UserAccessPanel(ctk.CTkFrame):
         threading.Thread(target=self._refresh_worker, daemon=True).start()
 
     def _refresh_worker(self) -> None:
+        """Trae todo lo que pinta el panel.
+
+        Antes eran seis idas y vueltas a Supabase EN FILA antes de dibujar
+        nada: politica de video, politica de pool, lista de buckets, y dentro
+        de `list_users` otra vez la politica de video mas los perfiles mas los
+        lotes. Con una conexion domestica eso son varios segundos de pantalla
+        vacia. Las tres primeras son independientes entre si, asi que van a la
+        vez, y la politica ya consultada se le pasa a `list_users` para no
+        pedirla dos veces.
+        """
+
         try:
-            policy = self._service.get_video_requirement_policy()
-            pool_policy = self._service.get_photo_pool_policy()
-            pool_buckets = self._service.list_photo_pool_buckets()
-            users = self._service.list_users()
+            with ThreadPoolExecutor(max_workers=3) as grupo:
+                tarea_politica = grupo.submit(self._service.get_video_requirement_policy)
+                tarea_pool = grupo.submit(self._service.get_photo_pool_policy)
+                tarea_buckets = grupo.submit(self._service.list_photo_pool_buckets)
+                policy = tarea_politica.result()
+                pool_policy = tarea_pool.result()
+                pool_buckets = tarea_buckets.result()
+            users = self._service.list_users(policy=policy)
             self.after(0, lambda: self._apply_refresh(users, policy, pool_policy, pool_buckets))
         except Exception as exc:
             self.after(0, lambda error=exc: self._show_error(error))
@@ -374,8 +403,25 @@ class UserAccessPanel(ctk.CTkFrame):
                 sticky="w",
             )
             return
-        for row, user in enumerate(users):
-            self._user_row(user).grid(row=row, column=0, padx=6, pady=5, sticky="ew")
+        # Por tandas: cada fila son 26 widgets, asi que dibujar cien de golpe
+        # congela la ventana. Se pintan las primeras y el resto en cuanto Tk
+        # tiene un hueco, de modo que el panel aparece util de inmediato.
+        self._pendientes_de_pintar = list(users)
+        self._pintar_siguiente_tanda(0)
+
+    _FILAS_POR_TANDA = 12
+
+    def _pintar_siguiente_tanda(self, desde: int) -> None:
+        pendientes = self._pendientes_de_pintar
+        if desde >= len(pendientes):
+            return
+        hasta = min(desde + self._FILAS_POR_TANDA, len(pendientes))
+        for indice in range(desde, hasta):
+            self._user_row(pendientes[indice]).grid(
+                row=indice, column=0, padx=6, pady=5, sticky="ew"
+            )
+        if hasta < len(pendientes):
+            self.after(1, lambda siguiente=hasta: self._pintar_siguiente_tanda(siguiente))
 
     def _user_row(self, user: UserAccessRecord) -> ctk.CTkFrame:
         row = ctk.CTkFrame(
@@ -398,7 +444,7 @@ class UserAccessPanel(ctk.CTkFrame):
             row,
             text=title,
             text_color=TEXT_PRIMARY,
-            font=ctk.CTkFont(size=12, weight="bold"),
+            font=self._fuente_titulo,
             anchor="w",
         ).grid(row=0, column=0, padx=10, pady=(8, 1), sticky="ew")
         video_exempt_text = " | exento de video" if user.video_exempt else ""
@@ -406,7 +452,7 @@ class UserAccessPanel(ctk.CTkFrame):
             row,
             text=f"{state} | rol {user.role}{video_exempt_text}",
             text_color=state_color,
-            font=ctk.CTkFont(size=12),
+            font=self._fuente_etiqueta,
             anchor="w",
         ).grid(row=1, column=0, padx=10, pady=(0, 7), sticky="ew")
 
@@ -415,7 +461,7 @@ class UserAccessPanel(ctk.CTkFrame):
             row,
             text=video_text,
             text_color=video_color,
-            font=ctk.CTkFont(size=12),
+            font=self._fuente_etiqueta,
             anchor="w",
             justify="left",
         ).grid(row=2, column=0, padx=10, pady=(0, 7), sticky="ew")
@@ -427,13 +473,13 @@ class UserAccessPanel(ctk.CTkFrame):
             login_frame,
             text="Usuario",
             text_color=TEXT_MUTED,
-            font=ctk.CTkFont(size=11, weight="bold"),
+            font=self._fuente_campo,
         ).grid(row=0, column=0, padx=(0, 7), sticky="w")
         login_entry = ctk.CTkEntry(
             login_frame,
             height=28,
             corner_radius=8,
-            font=ctk.CTkFont(size=12),
+            font=self._fuente_etiqueta,
             placeholder_text="ej: salem",
         )
         login_entry.insert(0, user.login_id)
@@ -445,7 +491,7 @@ class UserAccessPanel(ctk.CTkFrame):
             height=28,
             width=72,
             corner_radius=8,
-            font=ctk.CTkFont(size=12),
+            font=self._fuente_etiqueta,
             fg_color=NEUTRAL_BUTTON,
             hover_color=NEUTRAL_BUTTON_HOVER,
             text_color=TEXT_PRIMARY,
@@ -461,7 +507,7 @@ class UserAccessPanel(ctk.CTkFrame):
             height=30,
             width=82,
             corner_radius=9,
-            font=ctk.CTkFont(size=12),
+            font=self._fuente_etiqueta,
             fg_color=ACCENT,
             text_color=ON_ACCENT,
             hover_color=ACCENT_HOVER,
@@ -474,7 +520,7 @@ class UserAccessPanel(ctk.CTkFrame):
             height=30,
             width=98,
             corner_radius=9,
-            font=ctk.CTkFont(size=12),
+            font=self._fuente_etiqueta,
             fg_color=NEUTRAL_BUTTON,
             hover_color=NEUTRAL_BUTTON_HOVER,
             text_color=TEXT_PRIMARY,
@@ -489,7 +535,7 @@ class UserAccessPanel(ctk.CTkFrame):
             height=30,
             width=98,
             corner_radius=9,
-            font=ctk.CTkFont(size=12),
+            font=self._fuente_etiqueta,
             fg_color=ACCENT,
             text_color=ON_ACCENT,
             hover_color=ACCENT_HOVER,
@@ -502,7 +548,7 @@ class UserAccessPanel(ctk.CTkFrame):
             height=30,
             width=98,
             corner_radius=9,
-            font=ctk.CTkFont(size=12),
+            font=self._fuente_etiqueta,
             fg_color=NEUTRAL_BUTTON,
             hover_color=NEUTRAL_BUTTON_HOVER,
             text_color=TEXT_PRIMARY,
@@ -518,12 +564,43 @@ class UserAccessPanel(ctk.CTkFrame):
             height=30,
             width=98,
             corner_radius=9,
-            font=ctk.CTkFont(size=12),
+            font=self._fuente_etiqueta,
             fg_color=NEUTRAL_BUTTON,
             hover_color=NEUTRAL_BUTTON_HOVER,
             text_color=TEXT_PRIMARY,
             state="disabled" if user.disabled or str(user.role).strip().lower() == "admin" else "normal",
         ).grid(row=2, column=0, columnspan=2, pady=(8, 0), sticky="ew")
+        es_admin = str(user.role).strip().lower() == "admin"
+        ctk.CTkButton(
+            actions,
+            text="Quitar admin" if es_admin else "Hacer admin",
+            command=lambda current=user, admin=es_admin: self._run_action(
+                "revoke_admin" if admin else "make_admin",
+                current,
+            ),
+            height=30,
+            width=98,
+            corner_radius=9,
+            font=self._fuente_etiqueta,
+            fg_color=NEUTRAL_BUTTON,
+            hover_color=NEUTRAL_BUTTON_HOVER,
+            text_color=TEXT_PRIMARY,
+            state="disabled" if user.disabled else "normal",
+        ).grid(row=3, column=0, padx=(0, 8), pady=(8, 0), sticky="ew")
+        soy_yo = bool(self._mi_user_id) and user.id == self._mi_user_id
+        ctk.CTkButton(
+            actions,
+            text="Borrar",
+            command=lambda current=user: self._run_action("delete", current),
+            height=30,
+            width=98,
+            corner_radius=9,
+            font=self._fuente_etiqueta,
+            fg_color=ERROR,
+            hover_color=ERROR,
+            text_color=ON_ACCENT,
+            state="disabled" if soy_yo else "normal",
+        ).grid(row=3, column=1, pady=(8, 0), sticky="ew")
         return row
 
     def _run_login_id_update(self, user: UserAccessRecord, login_id: str) -> None:
@@ -553,9 +630,40 @@ class UserAccessPanel(ctk.CTkFrame):
             "Se rechazara el video de {who}; quedara sin acceso hasta que suba otro.",
             "Puedes aprobar el siguiente video que suba, o eximirlo del requisito.",
         ),
+        "revoke_admin": (
+            "Quitar administrador",
+            "{who} dejara de ser administrador y perdera el panel de admin.",
+            "Puedes volver a darselo con 'Hacer admin' en esta misma lista.",
+        ),
     }
 
+    # Este NO es reversible desde el panel, y por eso va aparte: el dialogo no
+    # debe decir que se puede deshacer.
+    _CONFIRMACION_BORRADO = (
+        "Borrar usuario",
+        "Se borrara el perfil de {who} y sus videos requeridos. Perdera el "
+        "acceso de inmediato.\n\nSu cuenta seguira existiendo en Supabase "
+        "(la app no puede borrarla), asi que ese email quedara ocupado y no "
+        "podra volver a registrarse con el mismo correo.",
+    )
+
     def _run_action(self, action: str, user: UserAccessRecord) -> None:
+        who = user.login_id or user.email or user.id
+        if action == "delete":
+            title, template = self._CONFIRMACION_BORRADO
+            if not confirm_destructive_action(
+                title=title,
+                what=template.format(who=who),
+                reversible=False,
+                parent=self,
+            ):
+                return
+            self.status_label.configure(text="Borrando usuario...", text_color=TEXT_MUTED)
+            threading.Thread(
+                target=lambda: self._action_worker(action, user),
+                daemon=True,
+            ).start()
+            return
         confirmation = self._CONFIRMATIONS.get(action)
         if confirmation is not None:
             title, template, undo_hint = confirmation
@@ -585,6 +693,12 @@ class UserAccessPanel(ctk.CTkFrame):
                 self._service.set_video_exempt(user.id, True)
             elif action == "require_video":
                 self._service.set_video_exempt(user.id, False)
+            elif action == "make_admin":
+                self._service.make_admin(user.id)
+            elif action == "revoke_admin":
+                self._service.revoke_admin(user.id)
+            elif action == "delete":
+                self._service.delete_user(user.id)
             else:
                 self._service.enable_user(user.id)
             self.after(0, self.refresh)

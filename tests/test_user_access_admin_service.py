@@ -159,3 +159,132 @@ def test_require_video_revokes_admin_exemption_batches() -> None:
     assert sink["in"] == ("status", ["processing", "pending_review", "accepted", "reviewed"])
     assert sink["updates"][1]["video_exempt"] is False
     assert user.video_exempt is False
+
+
+class _FakeBorradoTable:
+    """Tabla que registra borrados y devuelve lo que se le diga."""
+
+    def __init__(self, sink: dict, devuelve: list[dict]) -> None:
+        self._sink = sink
+        self._devuelve = devuelve
+
+    def delete(self):
+        self._sink.setdefault("deletes", []).append(self._sink.get("tabla_actual"))
+        return self
+
+    def eq(self, column: str, value: str):
+        self._sink.setdefault("delete_filters", []).append((column, value))
+        return self
+
+    def execute(self):
+        return SimpleNamespace(data=self._devuelve)
+
+
+class _FakeBorradoProvider:
+    def __init__(self, sink: dict, *, perfil_borrado: bool = True) -> None:
+        self.sink = sink
+        self._perfil_borrado = perfil_borrado
+        provider = self
+
+        class _Cliente:
+            def table(self, table_name: str):
+                provider.sink["tabla_actual"] = table_name
+                devuelve = (
+                    [{"id": "u1"}]
+                    if table_name == "profiles" and provider._perfil_borrado
+                    else []
+                )
+                return _FakeBorradoTable(provider.sink, devuelve)
+
+        self.client = _Cliente()
+
+    def execute(self, operation):
+        return list(getattr(operation.execute(), "data", []) or [])
+
+
+def _servicio_de_borrado(provider) -> UserAccessAdminService:
+    service = UserAccessAdminService.__new__(UserAccessAdminService)
+    service._client_provider = provider  # noqa: SLF001
+    service._settings = SimpleNamespace()  # noqa: SLF001
+    service._table = "profiles"  # noqa: SLF001
+    service._batches_table = "photo_ingest_batches"  # noqa: SLF001
+    return service
+
+
+def test_borrar_usuario_quita_sus_lotes_antes_que_el_perfil() -> None:
+    # Si los lotes quedaran colgados, el usuario no existe pero su video
+    # requerido si, y el panel de revision lo seguiria mostrando.
+    sink: dict = {}
+    _servicio_de_borrado(_FakeBorradoProvider(sink)).delete_user("u1")
+
+    assert sink["deletes"] == ["photo_ingest_batches", "profiles"]
+    assert sink["delete_filters"] == [("user_id", "u1"), ("id", "u1")]
+
+
+def test_borrar_usuario_avisa_cuando_la_base_no_borro_nada() -> None:
+    # Sin la politica de DELETE aplicada, PostgREST devuelve cero filas y NO
+    # lanza error: dar eso por bueno le diria al admin que borro cuando no.
+    import pytest
+
+    servicio = _servicio_de_borrado(_FakeBorradoProvider({}, perfil_borrado=False))
+    with pytest.raises(RuntimeError, match="021_admin_delete_profiles"):
+        servicio.delete_user("u1")
+
+
+def test_borrar_usuario_exige_un_id() -> None:
+    import pytest
+
+    with pytest.raises(ValueError):
+        _servicio_de_borrado(_FakeBorradoProvider({})).delete_user("   ")
+
+
+def test_quitar_admin_deja_el_rol_en_miembro() -> None:
+    sink: dict = {}
+    service = UserAccessAdminService.__new__(UserAccessAdminService)
+    service._client_provider = _FakeProvider(sink)  # noqa: SLF001
+    service._settings = SimpleNamespace()  # noqa: SLF001
+    service._table = "profiles"  # noqa: SLF001
+    service._batches_table = "photo_ingest_batches"  # noqa: SLF001
+    service._latest_weekly_video = lambda _user_id: None  # type: ignore[method-assign]  # noqa: SLF001
+
+    registro = service.revoke_admin("u1")
+
+    assert sink["update"]["role"] == "member"
+    assert registro.role == "member"
+
+
+def test_listar_usuarios_no_vuelve_a_pedir_la_politica_si_ya_se_la_dan() -> None:
+    # Era una ida y vuelta de red entera antes de poder pintar la lista.
+    class _TablaLectura:
+        def select(self, *_args):
+            return self
+
+        def order(self, *_args, **_kwargs):
+            return self
+
+        def limit(self, *_args):
+            return self
+
+    class _ProveedorLectura:
+        client = SimpleNamespace(table=lambda _nombre: _TablaLectura())
+
+        def execute(self, _operation):
+            return []
+
+    service = UserAccessAdminService.__new__(UserAccessAdminService)
+    service._client_provider = _ProveedorLectura()  # noqa: SLF001
+    service._settings = SimpleNamespace()  # noqa: SLF001
+    service._table = "profiles"  # noqa: SLF001
+    service._batches_table = "photo_ingest_batches"  # noqa: SLF001
+    service._latest_weekly_videos = lambda _ids, cutoff_iso: {}  # type: ignore[method-assign]  # noqa: SLF001
+
+    veces: list[int] = []
+
+    def _politica():
+        veces.append(1)
+        return SimpleNamespace(max_days=7, days=7)
+
+    service.get_video_requirement_policy = _politica  # type: ignore[method-assign]
+    service.list_users(policy=SimpleNamespace(max_days=7, days=7))
+
+    assert veces == [], "la politica ya venia dada: no debe volver a pedirse"

@@ -322,3 +322,35 @@ def test_register_member_rejects_invalid_login_id_before_network_calls() -> None
     provider = service._client_provider  # noqa: SLF001
     assert provider.client.rpc_calls == []
     assert provider.client.auth.sign_up_payloads == []
+
+
+def test_el_correo_de_restablecimiento_va_al_email_del_usuario() -> None:
+    # El agente escribe su usuario, no su email: hay que traducirlo con el
+    # mismo RPC que usa el login, porque aqui todavia no hay sesion.
+    from types import SimpleNamespace
+
+    enviados: list[str] = []
+
+    service = AccessService.__new__(AccessService)
+    service._resolve_login_email = lambda identifier: "agente@example.com"  # type: ignore[method-assign]  # noqa: SLF001
+    service._client_provider = SimpleNamespace(  # noqa: SLF001
+        client=SimpleNamespace(
+            auth=SimpleNamespace(
+                reset_password_for_email=lambda email: enviados.append(email)
+            )
+        )
+    )
+
+    destino = service.send_password_reset("  Agente  ")
+
+    assert enviados == ["agente@example.com"]
+    assert destino == "ag****@example.com"
+    assert "agente@" not in destino, "el email completo no debe volver a pantalla"
+
+
+def test_el_restablecimiento_exige_un_identificador() -> None:
+    import pytest
+
+    service = AccessService.__new__(AccessService)
+    with pytest.raises(ValueError):
+        service.send_password_reset("   ")

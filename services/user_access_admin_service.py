@@ -54,8 +54,16 @@ class UserAccessAdminService:
         self._table = self._settings.supabase_profiles_table
         self._batches_table = self._settings.supabase_photo_batches_table
 
-    def list_users(self, *, limit: int = 100) -> list[UserAccessRecord]:
-        policy = self.get_video_requirement_policy()
+    def list_users(
+        self,
+        *,
+        limit: int = 100,
+        policy: VideoRequirementPolicy | None = None,
+    ) -> list[UserAccessRecord]:
+        # La politica se puede pasar ya consultada: el panel la pide igual para
+        # pintar sus controles, y volver a pedirla aqui era una ida y vuelta de
+        # red entera antes de poder mostrar la lista.
+        policy = policy if policy is not None else self.get_video_requirement_policy()
         cutoff_iso = self._policy_cutoff_iso(policy)
         rows = self._client_provider.execute(
             self._client_provider.client.table(self._table)
@@ -139,6 +147,44 @@ class UserAccessAdminService:
 
     def make_admin(self, user_id: str) -> UserAccessRecord:
         return self._update_user(user_id, {"role": "admin", "approved": True, "disabled": False})
+
+    def revoke_admin(self, user_id: str) -> UserAccessRecord:
+        return self._update_user(user_id, {"role": "member"})
+
+    def delete_user(self, user_id: str) -> None:
+        """Borra el perfil del usuario y sus lotes de video.
+
+        No borra la cuenta de autenticacion de Supabase: eso solo lo puede
+        hacer la clave de servicio, que la app no lleva. Sin perfil el login
+        queda bloqueado igualmente ("Tu usuario no tiene perfil de acceso"),
+        pero ese email sigue ocupado en Supabase.
+
+        Si la politica de borrado no esta aplicada en la base, PostgREST
+        devuelve cero filas sin error: hay que decirlo, no dar por hecho que
+        se borro.
+        """
+
+        normalized = str(user_id or "").strip()
+        if not normalized:
+            raise ValueError("Falta el id del usuario.")
+
+        # Primero los lotes: si quedaran colgados, el usuario no existe pero su
+        # video requerido si, y el panel de revision los seguiria mostrando.
+        self._client_provider.execute(
+            self._client_provider.client.table(self._batches_table)
+            .delete()
+            .eq("user_id", normalized)
+        )
+        rows = self._client_provider.execute(
+            self._client_provider.client.table(self._table)
+            .delete()
+            .eq("id", normalized)
+        )
+        if not rows:
+            raise RuntimeError(
+                "La base no borro el perfil. Falta aplicar la politica de "
+                "borrado (sql/021_admin_delete_profiles.sql)."
+            )
 
     def set_video_exempt(self, user_id: str, exempt: bool) -> UserAccessRecord:
         if exempt:
