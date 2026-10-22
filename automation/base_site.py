@@ -26,18 +26,29 @@ class BaseSite(ABC):
         return self
 
     def _capture_extension_debug_if_useful(self, session, **kwargs):
-        """Costura de version para el diagnostico de extension.
+        """Captura el diagnostico de la extension solo si hay extension.
 
-        La v1 se comporta exactamente como antes: llama a
-        `session.capture_extension_debug(**kwargs)` tal cual. Lo unico que se
-        anade es no reventar con AttributeError si no hay sesion o si la
-        sesion no expone el metodo, casos en los que hoy habria excepcion.
+        `capture_extension_debug` recorre TODOS los frames cuatro veces por
+        llamada (marcador, marcadores de contenido, ping, listado de frames,
+        este ultimo leyendo el innerText de cada uno) y hace tres copias
+        profundas del resultado. Las automatizaciones la llaman 7-8 veces por
+        corrida.
 
-        `AutomationV2Mixin` redefine este metodo para saltarse la captura
-        cuando no hay extension cargada (ver automation/v2/mixins.py).
+        Hasta ahora no habia ningun corte util: el unico era `if snapshot is
+        None`, que no se cumple nunca, porque el evaluate tiene exito igual
+        aunque no haya ninguna extension (devuelve un dict con nulos). Con el
+        motor tradicional -que es el que corre de verdad- se pagaban asi
+        decenas de evaluaciones de DOM por corrida para rellenar un
+        diagnostico que nadie iba a mirar.
+
+        El corte lo tenia `AutomationV2Mixin`, pero `DEFAULT_AUTOMATION_VERSION`
+        es "v1", asi que no lo aplicaba nadie. Vive aqui, que es donde pasan
+        las corridas reales.
         """
 
         if session is None:
+            return None
+        if not getattr(session, "extension_enabled", False):
             return None
         capture = getattr(session, "capture_extension_debug", None)
         if not callable(capture):

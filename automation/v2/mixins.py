@@ -35,25 +35,7 @@ class AutomationV2Mixin:
     # Diagnostico de extension
     # ------------------------------------------------------------------
 
-    def _capture_extension_debug_if_useful(self, session, **kwargs):
-        """Solo captura el diagnostico si la extension esta activa.
-
-        `capture_extension_debug` recorre TODOS los frames tres veces por
-        llamada, y las automatizaciones la llaman 7-8 veces por corrida. La v1
-        no la condiciona a nada util: su unico corte es `if snapshot is None`,
-        que no se cumple nunca, porque el evaluate tiene exito igual aunque no
-        haya extension (devuelve un dict con nulos).
-
-        Resultado en la v1: con el motor tradicional, sin ninguna extension
-        cargada, se pagan decenas de evaluaciones de DOM por corrida para
-        rellenar un diagnostico que nadie va a mirar.
-
-        Cuando SI hay extension, delega en la v1 para no divergir: misma
-        llamada, mismos errores, mismo valor de retorno.
-        """
-
-        if session is None:
-            return None
-        if not getattr(session, "extension_enabled", False):
-            return None
-        return super()._capture_extension_debug_if_useful(session, **kwargs)
+    # El corte por `extension_enabled` que vivia aqui se subio a BaseSite: la
+    # v1 es la que corre de verdad y era justo la que no lo tenia. Mantener una
+    # copia aqui solo garantizaria que la proxima correccion se aplique a una
+    # de las dos.
