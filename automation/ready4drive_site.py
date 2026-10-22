@@ -1681,10 +1681,15 @@ class Ready4DriveSite(BaseSite):
                     )
                     attempt += 1
                     continue
-                raise
-            except Ready4DriveFlowError:
-                # Antes este `raise` desnudo salia sin liberar nada, y el llamador
-                # tampoco podia: su reserved_photo solo se liga al retorno exitoso.
+                # Cualquier otro fallo de flujo (timeout de bloque, no aparece
+                # Continuar, el modal no avanza) sale por aqui. Antes salia con
+                # un `raise` desnudo y la foto reservada se quedaba en RESERVED
+                # para siempre: el llamador tampoco podia liberarla, porque su
+                # reserved_photo solo se liga al retorno exitoso.
+                #
+                # El `except Ready4DriveFlowError` que habia debajo hacia esta
+                # limpieza, pero era inalcanzable: Python entra siempre en el
+                # primer except que casa con el tipo, y es este.
                 self._cleanup_after_failed_attempt(
                     reserved_photo,
                     prepared_photo,
@@ -3466,8 +3471,16 @@ class Ready4DriveSite(BaseSite):
             normalized_text = self._normalized_root_text(root)
             if filename_marker and filename_marker in normalized_text:
                 return True
-            if self._find_best_text_candidate(root, self._selectors.continue_texts) is not None:
-                return True
+            # Aqui habia una tercera condicion: dar la foto por subida si existia
+            # un boton "Continuar". Ese boton ya esta en pantalla ANTES de subir
+            # nada, asi que confirmaba siempre. Si set_input_files fallaba en
+            # silencio (React reemplaza el input, el sitio rechaza el archivo),
+            # se pulsaba Continuar sin foto y el fallo aparecia mucho despues,
+            # como retorno a selfie o timeout de bloque, con la foto ya gastada.
+            #
+            # Las dos pruebas que quedan miran el hecho, no el entorno: que el
+            # input tenga un archivo, o que el nombre del archivo aparezca en la
+            # pantalla.
             self._wait_interval(root, self._POLL_MS)
         return False
 

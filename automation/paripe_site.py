@@ -2155,11 +2155,14 @@ class ParipeSite(BaseSite):
                     )
                     attempt += 1
                     continue
-                raise
-            except ParipeFlowError:
-                # Antes este `raise` desnudo salia sin liberar nada, y el llamador
-                # tampoco podia: su reserved_photo seguia en None. La fila quedaba
-                # RESERVED para siempre y el temporal en disco.
+                # Cualquier otro fallo de flujo sale por aqui. Antes salia con un
+                # `raise` desnudo y la foto reservada se quedaba en RESERVED para
+                # siempre, con su temporal en disco: el llamador tampoco podia
+                # liberarla, porque su reserved_photo seguia en None.
+                #
+                # El `except ParipeFlowError` que habia debajo hacia esta limpieza,
+                # pero era inalcanzable: Python entra siempre en el primer except
+                # que casa con el tipo, y es este.
                 self._cleanup_after_failed_attempt(
                     reserved_photo,
                     prepared_photo,
