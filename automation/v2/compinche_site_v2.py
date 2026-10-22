@@ -1,6 +1,7 @@
 """Compinche v2: hereda los arreglos comunes de la v2.
 
-La v1 (`automation/compinche_site.py`) NO se toca.
+La v1 (`automation/sitio_de_bloques.py`, compartida con el otro sitio
+de bloques) NO se toca.
 
 Aqui vivia un arreglo de `_wait_for_uploaded_file_input`, que en la v1 llamaba
 a `self._wait_interval(150)` contra una firma de dos parametros obligatorios y

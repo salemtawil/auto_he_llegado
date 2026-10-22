@@ -71,7 +71,8 @@ def _codigo(func: object) -> str:
 
 @pytest.mark.parametrize(
     "ruta",
-    ["automation/paripe_site.py", "automation/compinche_site.py", "automation/ready4drive_site.py"],
+    # Compinche y Ready4Drive comparten implementacion desde la unificacion.
+    ["automation/paripe_site.py", "automation/sitio_de_bloques.py"],
 )
 def test_los_archivos_v1_no_saben_nada_de_la_v2(ruta: str) -> None:
     """Ni un import, ni una condicion. La v1 ignora que la v2 existe."""
@@ -262,7 +263,7 @@ def test_el_limitador_de_logs_solo_cambia_en_v2() -> None:
 # pruebas pasaban en verde y la corrida no cambiaba nada. Ya paso una vez.
 # ---------------------------------------------------------------------------
 
-_V1_SITIOS = ("paripe_site.py", "compinche_site.py", "ready4drive_site.py")
+_V1_SITIOS = ("paripe_site.py", "sitio_de_bloques.py")
 
 
 def _fuente_v1(nombre: str) -> str:

@@ -7,7 +7,8 @@ diagnostico de extension condicionado, agrupado de logs) y existe como clase
 propia para que elegir "v2" en la configuracion signifique lo mismo en los tres
 sitios, sin excepciones que haya que recordar.
 
-La v1 (`automation/ready4drive_site.py`) NO se toca.
+La v1 (`automation/sitio_de_bloques.py`, compartida con el otro sitio
+de bloques) NO se toca.
 """
 
 from __future__ import annotations

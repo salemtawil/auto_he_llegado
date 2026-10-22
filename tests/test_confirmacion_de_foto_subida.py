@@ -21,8 +21,8 @@ import pytest
 
 RAIZ = Path(__file__).resolve().parents[1]
 MODULOS_DE_FLUJO = (
-    "automation/compinche_site.py",
-    "automation/ready4drive_site.py",
+    # Compinche y Ready4Drive comparten implementacion desde la unificacion.
+    "automation/sitio_de_bloques.py",
     "automation/paripe_site.py",
     "automation/base_site.py",
 )
@@ -91,9 +91,9 @@ class _SitioDePrueba:
 
 
 def _esperar(sitio, *, nombre="selfie_123.jpg", timeout_ms=30):
-    from automation.compinche_site import CompincheSite
+    from automation.sitio_de_bloques import SitioDeBloques
 
-    return CompincheSite._wait_for_uploaded_photo(
+    return SitioDeBloques._wait_for_uploaded_photo(
         sitio,
         object(),
         object(),
@@ -179,8 +179,7 @@ CASOS = [
     ("modulo", "funcion"),
     [
         ("automation/paripe_site.py", "_contiene_marcador"),
-        ("automation/compinche_site.py", "_contains_any"),
-        ("automation/ready4drive_site.py", "_contains_any"),
+        ("automation/sitio_de_bloques.py", "_contains_any"),
     ],
 )
 def test_los_marcadores_respetan_los_limites_de_palabra(modulo: str, funcion: str) -> None:
