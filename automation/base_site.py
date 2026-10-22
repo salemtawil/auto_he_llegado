@@ -406,6 +406,196 @@ class BaseSite(ABC):
 
         return bool(getattr(self, "_final_submit_already_clicked", False)) or self._final_click_done_recorded()
 
+
+    # JS que mira QUE hay encima del centro de un elemento y lo neutraliza.
+    # Sube hasta el contenedor flotante real, porque los chats suelen ser un
+    # iframe dentro de un div con position:fixed, y ocultar solo el iframe deja
+    # el div capturando los clicks igual.
+    _JS_APARTAR_ESTORBO = r"""(el) => {
+        const r = el.getBoundingClientRect();
+        if (!r.width || !r.height) return null;
+        const x = r.left + r.width / 2;
+        const y = r.top + r.height / 2;
+        const encima = document.elementFromPoint(x, y);
+        if (!encima || encima === el || el.contains(encima) || encima.contains(el)) {
+            return null;
+        }
+        let nodo = encima;
+        for (let i = 0; i < 6 && nodo && nodo !== document.body; i++) {
+            const pos = getComputedStyle(nodo).position;
+            if (pos === 'fixed' || pos === 'sticky') break;
+            nodo = nodo.parentElement;
+        }
+        const objetivo = (nodo && nodo !== document.body) ? nodo : encima;
+        const clases = typeof objetivo.className === 'string'
+            ? objetivo.className.trim().split(/\s+/).slice(0, 2).join('.')
+            : '';
+        const descripcion = objetivo.tagName.toLowerCase()
+            + (objetivo.id ? '#' + objetivo.id : '')
+            + (clases ? '.' + clases : '');
+        objetivo.style.setProperty('pointer-events', 'none', 'important');
+        objetivo.style.setProperty('visibility', 'hidden', 'important');
+        return descripcion;
+    }"""
+
+    def _apartar_lo_que_tape(self, locator: Locator) -> str | None:
+        """Oculta lo que este cubriendo el centro del elemento. Nunca lanza.
+
+        El caso real: el chat del sitio recibe un mensaje, su burbuja crece y
+        tapa el boton Continuar. El click normal falla -Playwright comprueba
+        que el elemento reciba el puntero- y la escalada a force=True disparaba
+        en esas coordenadas, o sea EN EL CHAT: se abria el chat y la corrida se
+        quedaba ahi.
+
+        Se usa visibility+pointer-events y no display:none a proposito: asi el
+        estorbo deja de recibir clicks pero no se recoloca la pagina, y el
+        boton sigue donde estaba.
+        """
+
+        try:
+            return locator.evaluate(self._JS_APARTAR_ESTORBO)
+        except Exception:  # noqa: BLE001 - apartar es un extra, nunca un bloqueo
+            return None
+
+    # ------------------------------------------------------------------
+    # Selector "Cuenta prestada" / "Cuenta propia"
+    # ------------------------------------------------------------------
+    #
+    # Aparece en dos sitios: en el panel de Paripe nada mas entrar, y en el
+    # iframe de Compinche/Ready4Drive al pulsar "He llegado". El proceso solo
+    # va bien con "Cuenta prestada", asi que hay que dejarlo ahi siempre.
+    #
+    # El control es un switch de Headless UI:
+    #
+    #   <button role="switch" aria-checked="false" ...>
+    #
+    # y NO se usa `aria-checked` para decidir, a proposito: en el panel real,
+    # con "Cuenta prestada" activa, el switch vale aria-checked="false". Esa
+    # inversion es una decision del sitio que puede cambiar sin avisar. Lo que
+    # no cambia es lo que ve el agente: el lado activo esta `disabled` (no
+    # puedes elegir el que ya tienes) y pintado con la clase de acento,
+    # mientras el otro va en gris. Eso es lo que se lee.
+
+    _CUENTA_PRESTADA_RE = r"cuenta\s+prestada|borrowed\s+account|conta\s+emprestada"
+    _CUENTA_PROPIA_RE = r"cuenta\s+propia|own\s+account|personal\s+account|conta\s+pr[oó]pria"
+
+    _JS_ESTADO_DE_CUENTA = r"""([rePrestada, rePropia]) => {
+        const prestada = new RegExp(rePrestada, 'i');
+        const propia = new RegExp(rePropia, 'i');
+        const texto = (e) => (e && e.textContent) || '';
+        const cajas = [...document.querySelectorAll('div, section, fieldset')]
+            .filter((d) => prestada.test(texto(d)) && propia.test(texto(d)));
+        if (!cajas.length) return { encontrado: false };
+        // La mas interna: la que menos descendientes tiene sigue conteniendo
+        // las dos etiquetas y el switch, sin arrastrar media pagina.
+        cajas.sort((a, b) => a.querySelectorAll('*').length - b.querySelectorAll('*').length);
+        const caja = cajas[0];
+        const interruptor = caja.querySelector('[role="switch"], input[type="checkbox"]');
+        const botones = [...caja.querySelectorAll('button, label, [role="radio"]')];
+        const lado = botones.find((b) => prestada.test(texto(b)) && !propia.test(texto(b)));
+        if (!interruptor || !lado) return { encontrado: false };
+        const clases = typeof lado.className === 'string' ? lado.className : '';
+        const activa = Boolean(lado.disabled)
+            || /text-primary|font-semibold/.test(clases)
+            || lado.getAttribute('aria-checked') === 'true';
+        return {
+            encontrado: true,
+            prestada: activa,
+            aria: interruptor.getAttribute('aria-checked'),
+        };
+    }"""
+
+    # Cuanto se espera a que el switch refleje el cambio tras pulsarlo.
+    CUENTA_SWITCH_TIMEOUT_MS = 2_500
+
+    def _leer_estado_de_cuenta(self, root) -> dict:
+        """Dice si el selector esta en 'Cuenta prestada'. Nunca lanza."""
+
+        try:
+            estado = root.evaluate(
+                self._JS_ESTADO_DE_CUENTA,
+                [self._CUENTA_PRESTADA_RE, self._CUENTA_PROPIA_RE],
+            )
+        except Exception:  # noqa: BLE001 - si no se puede mirar, no hay paso que dar
+            return {"encontrado": False}
+        return estado if isinstance(estado, dict) else {"encontrado": False}
+
+    def _asegurar_cuenta_prestada(self, root, *, progress_callback=None) -> str:
+        """Deja el selector en 'Cuenta prestada'. Devuelve que hizo.
+
+        Tres respuestas posibles: "ausente" (no hay selector en esta pantalla,
+        que es lo normal en la mayoria de pasos), "ya_estaba" y "cambiado". Si
+        el selector esta y NO se consigue dejarlo en prestada, lanza: seguir
+        con la cuenta propia hace que el proceso falle mas adelante, y mas
+        vale decirlo aqui, donde se entiende.
+        """
+
+        estado = self._leer_estado_de_cuenta(root)
+        if not estado.get("encontrado"):
+            return "ausente"
+        if estado.get("prestada"):
+            self._record_run_stat("cuenta_prestada_ya_activa", aria=estado.get("aria"))
+            return "ya_estaba"
+
+        self.emit_progress(
+            progress_callback,
+            phase="account_selection",
+            message="El selector esta en 'Cuenta propia'. Cambiando a 'Cuenta prestada'...",
+        )
+        interruptor = self._localizar_interruptor_de_cuenta(root)
+        if interruptor is None:
+            raise RuntimeError(
+                "Se vio el selector de cuenta en 'Cuenta propia', pero no se "
+                "encontro el interruptor para cambiarlo."
+            )
+        self._click_locator_resilient(
+            interruptor,
+            phase="account_selection",
+            error_message="No se pudo pulsar el interruptor de cuenta prestada/propia.",
+        )
+
+        limite = monotonic() + self.CUENTA_SWITCH_TIMEOUT_MS / 1000
+        while monotonic() < limite:
+            if self._leer_estado_de_cuenta(root).get("prestada"):
+                # La linea de tiempo la define cada sitio, no la base.
+                registrar = getattr(self, "_record_timeline_event", None)
+                if callable(registrar):
+                    registrar("cuenta_prestada_activada")
+                self._record_run_stat("cuenta_prestada_activada")
+                self.emit_progress(
+                    progress_callback,
+                    phase="account_selection",
+                    message="Selector puesto en 'Cuenta prestada'.",
+                )
+                return "cambiado"
+            with suppress(Exception):
+                root.wait_for_timeout(100)
+        raise RuntimeError(
+            "Se pulso el interruptor pero el selector no quedo en 'Cuenta "
+            "prestada'. El proceso no funciona con la cuenta propia."
+        )
+
+    def _localizar_interruptor_de_cuenta(self, root):
+        """El switch, como localizador de Playwright para poder pulsarlo bien."""
+
+        import re as _re
+
+        with suppress(Exception):
+            caja = (
+                root.locator("div")
+                .filter(has_text=_re.compile(self._CUENTA_PRESTADA_RE, _re.I))
+                .filter(has_text=_re.compile(self._CUENTA_PROPIA_RE, _re.I))
+                .last
+            )
+            interruptor = caja.locator('[role="switch"], input[type="checkbox"]').first
+            if interruptor.count() > 0:
+                return interruptor
+        with suppress(Exception):
+            suelto = root.locator('[role="switch"]').first
+            if suelto.count() > 0:
+                return suelto
+        return None
+
     def _dispatch_final_click_once(self, button, *, progress_callback=None) -> Exception | None:
         """Despacha el click final exactamente una vez.
 

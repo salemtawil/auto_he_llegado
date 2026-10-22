@@ -1679,6 +1679,10 @@ class SitioDeBloques(BaseSite):
         progress_callback: ProgressCallback | None,
         timeout_ms: int,
     ) -> Page | Frame | Locator:
+        # En estos sitios el selector cuenta prestada/propia sale DENTRO del
+        # iframe, al pulsar "He llegado". Se mira antes que nada: si no esta
+        # -lo normal en la mayoria de vueltas- no cuesta mas que un evaluate.
+        self._asegurar_cuenta_prestada(root, progress_callback=progress_callback)
         if self._has_photo_input_now(root):
             return root
         start_button = self._find_fast_text_button(root, self._selectors.verification_start_texts)
@@ -2846,56 +2850,6 @@ class SitioDeBloques(BaseSite):
                 return
             self._wait_interval(locator, self._POLL_MS)
         raise ErrorDeFlujo(phase, error_message)
-
-    # JS que mira QUE hay encima del centro de un elemento y lo neutraliza.
-    # Sube hasta el contenedor flotante real, porque los chats suelen ser un
-    # iframe dentro de un div con position:fixed, y ocultar solo el iframe deja
-    # el div capturando los clicks igual.
-    _JS_APARTAR_ESTORBO = r"""(el) => {
-        const r = el.getBoundingClientRect();
-        if (!r.width || !r.height) return null;
-        const x = r.left + r.width / 2;
-        const y = r.top + r.height / 2;
-        const encima = document.elementFromPoint(x, y);
-        if (!encima || encima === el || el.contains(encima) || encima.contains(el)) {
-            return null;
-        }
-        let nodo = encima;
-        for (let i = 0; i < 6 && nodo && nodo !== document.body; i++) {
-            const pos = getComputedStyle(nodo).position;
-            if (pos === 'fixed' || pos === 'sticky') break;
-            nodo = nodo.parentElement;
-        }
-        const objetivo = (nodo && nodo !== document.body) ? nodo : encima;
-        const clases = typeof objetivo.className === 'string'
-            ? objetivo.className.trim().split(/\s+/).slice(0, 2).join('.')
-            : '';
-        const descripcion = objetivo.tagName.toLowerCase()
-            + (objetivo.id ? '#' + objetivo.id : '')
-            + (clases ? '.' + clases : '');
-        objetivo.style.setProperty('pointer-events', 'none', 'important');
-        objetivo.style.setProperty('visibility', 'hidden', 'important');
-        return descripcion;
-    }"""
-
-    def _apartar_lo_que_tape(self, locator: Locator) -> str | None:
-        """Oculta lo que este cubriendo el centro del elemento. Nunca lanza.
-
-        El caso real: el chat del sitio recibe un mensaje, su burbuja crece y
-        tapa el boton Continuar. El click normal falla -Playwright comprueba
-        que el elemento reciba el puntero- y la escalada a force=True disparaba
-        en esas coordenadas, o sea EN EL CHAT: se abria el chat y la corrida se
-        quedaba ahi.
-
-        Se usa visibility+pointer-events y no display:none a proposito: asi el
-        estorbo deja de recibir clicks pero no se recoloca la pagina, y el
-        boton sigue donde estaba.
-        """
-
-        try:
-            return locator.evaluate(self._JS_APARTAR_ESTORBO)
-        except Exception:  # noqa: BLE001 - apartar es un extra, nunca un bloqueo
-            return None
 
     def _click_locator_resilient(self, locator: Locator, *, phase: str, error_message: str) -> None:
         try:

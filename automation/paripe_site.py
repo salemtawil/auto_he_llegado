@@ -953,6 +953,10 @@ class ParipeSite(BaseSite):
                 self._record_run_stat("owner_selfie_primary_upload_enabled", path=str(owner_selfie_path))
                 self.emit_progress(progress_callback, phase="photo_prepare", message="Selfie titular activa: se usara esa foto en el input principal.")
 
+            # El selector cuenta prestada/propia esta en el panel, antes de
+            # cualquier accion. El proceso solo va bien con "Cuenta prestada".
+            self._asegurar_cuenta_prestada(page, progress_callback=progress_callback)
+
             action_spec = self._get_action_spec(request.action_name)
             self.emit_progress(progress_callback, phase="initial_action", message=f"Ejecutando accion '{action_spec.ui_name}'...")
             self._mark_phase_timing("initial_action_started", action=action_spec.ui_name)
@@ -2844,6 +2848,18 @@ class ParipeSite(BaseSite):
             return
         except Exception:
             pass
+        # Antes de forzar nada: mirar si hay algo encima y apartarlo. Forzar
+        # con un estorbo delante no es "insistir mas", es pulsar OTRA COSA: el
+        # chat del sitio tapando el boton se llevaba el click.
+        estorbo = self._apartar_lo_que_tape(locator)
+        if estorbo is not None:
+            self._record_timeline_event("estorbo_apartado", phase=phase, elemento=estorbo)
+            self._record_run_stat("estorbo_apartado", phase=phase, elemento=estorbo)
+            try:
+                locator.click(timeout=2_000)
+                return
+            except Exception:
+                pass
         try:
             locator.click(timeout=2_000, force=True)
             return
