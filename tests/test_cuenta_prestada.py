@@ -158,12 +158,29 @@ def test_el_radio_marcado_solo_con_data_checked_tambien_cuenta() -> None:
 
 def test_el_aria_label_no_sirve_para_distinguir_las_opciones() -> None:
     # Las DOS tarjetas llevan aria-label="borrowed-account": es el nombre del
-    # grupo. Si alguien lo usa como selector, marca la equivocada.
+    # GRUPO. Nombrarlo en un comentario o un docstring esta bien -explica la
+    # trampa-; usarlo como selector marca la opcion equivocada.
     assert HTML_REAL_RADIOGRUPO.count('aria-label="borrowed-account"') == 2
-    fuente = (RAIZ / "automation" / "base_site.py").read_text(encoding="utf-8")
-    assert "borrowed-account" not in fuente, (
-        "ese aria-label esta en las dos opciones: no puede usarse para elegir"
-    )
+
+    arbol = ast.parse((RAIZ / "automation" / "base_site.py").read_text(encoding="utf-8"))
+    docstrings = {
+        id(n.body[0].value)
+        for n in ast.walk(arbol)
+        if isinstance(n, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef))
+        and n.body
+        and isinstance(n.body[0], ast.Expr)
+        and isinstance(n.body[0].value, ast.Constant)
+        and isinstance(n.body[0].value.value, str)
+    }
+    usados = [
+        n.value
+        for n in ast.walk(arbol)
+        if isinstance(n, ast.Constant)
+        and isinstance(n.value, str)
+        and id(n) not in docstrings
+        and "borrowed-account" in n.value
+    ]
+    assert usados == [], f"ese aria-label no puede usarse para elegir: {usados}"
 
 
 class _Sitio(BaseSite):
