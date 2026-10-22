@@ -490,7 +490,14 @@ class BaseSite(ABC):
         // las dos etiquetas y el switch, sin arrastrar media pagina.
         cajas.sort((a, b) => a.querySelectorAll('*').length - b.querySelectorAll('*').length);
         const caja = cajas[0];
-        const interruptor = caja.querySelector('[role="switch"], input[type="checkbox"]');
+        // El checkbox "Permitirme subir una selfie del propietario" vive en
+        // este mismo modal en Compinche. NO es el selector de cuenta, y
+        // pulsarlo activaria una opcion que el agente no pidio.
+        const esDelPropietario = (e) => /propietario|owner\s*selfie|titular/i.test(
+            (e.closest('label, div, fieldset') || e).textContent || ''
+        );
+        const interruptor = [...caja.querySelectorAll('[role="switch"], input[type="checkbox"]')]
+            .find((c) => !esDelPropietario(c)) || null;
         const botones = [...caja.querySelectorAll('button, label, [role="radio"]')];
         const lado = botones.find((b) => prestada.test(texto(b)) && !propia.test(texto(b)));
         if (!interruptor || !lado) return { encontrado: false };
@@ -587,7 +594,13 @@ class BaseSite(ABC):
                 .filter(has_text=_re.compile(self._CUENTA_PROPIA_RE, _re.I))
                 .last
             )
-            interruptor = caja.locator('[role="switch"], input[type="checkbox"]').first
+            interruptor = (
+                caja.locator('[role="switch"], input[type="checkbox"]')
+                # Mismo motivo que en el JS: el checkbox de la selfie del
+                # propietario esta en el mismo modal y no es este control.
+                .filter(has_not_text=_re.compile("propietario|titular|owner", _re.I))
+                .first
+            )
             if interruptor.count() > 0:
                 return interruptor
         with suppress(Exception):
