@@ -14,8 +14,12 @@ import ast
 import re
 from pathlib import Path
 
+import pytest
+
 RAIZ = Path(__file__).resolve().parents[1]
 FLUJO = (RAIZ / "automation" / "sitio_de_bloques.py").read_text(encoding="utf-8")
+# El ayudante de apartar estorbos vive en la base: lo usan los tres sitios.
+BASE = (RAIZ / "automation" / "base_site.py").read_text(encoding="utf-8")
 
 
 def _cuerpo(nombre: str, fuente: str = FLUJO) -> str:
@@ -51,7 +55,7 @@ def test_el_click_final_nunca_fuerza() -> None:
 
 
 def test_apartar_devuelve_que_estorbaba_y_nunca_lanza() -> None:
-    cuerpo = _cuerpo("_apartar_lo_que_tape")
+    cuerpo = _cuerpo("_apartar_lo_que_tape", BASE)
     assert "except Exception" in cuerpo, "apartar es un extra, no puede tumbar la corrida"
     assert "return None" in cuerpo
 
@@ -59,7 +63,7 @@ def test_apartar_devuelve_que_estorbaba_y_nunca_lanza() -> None:
 def test_el_js_oculta_el_contenedor_flotante_no_solo_el_iframe() -> None:
     # Los chats son un iframe dentro de un div position:fixed. Ocultar solo el
     # iframe deja el div capturando los clicks igual.
-    js = re.search(r'_JS_APARTAR_ESTORBO = r?"""(.*?)"""', FLUJO, re.S).group(1)
+    js = re.search(r'_JS_APARTAR_ESTORBO = r?"""(.*?)"""', BASE, re.S).group(1)
     assert "position" in js and "fixed" in js
     assert "pointer-events" in js
     # visibility y no display: display recoloca la pagina y mueve el boton.
@@ -89,3 +93,14 @@ def test_el_aviso_de_deepfake_lleva_la_cuenta() -> None:
     assert "deepfakescore x" in cuerpo, (
         "el agente mira este chip: tiene que decir cuantos reintentos lleva"
     )
+
+
+@pytest.mark.parametrize(
+    "modulo", ["automation/sitio_de_bloques.py", "automation/paripe_site.py"]
+)
+def test_ningun_sitio_fuerza_el_click_sin_apartar_antes(modulo: str) -> None:
+    # Paripe tenia su propia copia de _click_locator_resilient y se quedo sin
+    # el arreglo la primera vez.
+    fuente = (RAIZ / modulo).read_text(encoding="utf-8")
+    cuerpo = _cuerpo("_click_locator_resilient", fuente)
+    assert cuerpo.index("_apartar_lo_que_tape") < cuerpo.index("force=True"), modulo
