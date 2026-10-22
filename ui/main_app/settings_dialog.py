@@ -31,6 +31,8 @@ class SettingsDialog(ctk.CTkToplevel):
                 "v2 (optimizada)" if config.automation_version == "v2" else "v1 (estable)"
             ),
             "keep_browser_open": "si" if config.keep_browser_open else "no",
+            "browser_window": f"{config.browser_window_width}x{config.browser_window_height}",
+            "browser_zoom": f"{config.browser_zoom_percent}%",
             "browser_extension_overlay": "si" if config.browser_extension_overlay else "no",
             "page_timeout_seconds": str(config.page_timeout_seconds),
             "action_timeout_seconds": str(config.action_timeout_seconds),
@@ -111,6 +113,24 @@ class SettingsDialog(ctk.CTkToplevel):
         # de Chrome desechable por corrida. Se quita del menu para que nadie lo
         # active sin querer; `LocalConfigService` ademas devuelve a
         # "traditional" cualquier configuracion que lo tuviera guardado.
+
+        self.browser_window_entry = self._build_entry(
+            body,
+            row=22,
+            label="tamano del navegador (ancho x alto)",
+            placeholder="1440x960",
+        )
+        self.browser_window_entry.insert(
+            0, f"{config.browser_window_width}x{config.browser_window_height}"
+        )
+
+        self.browser_zoom_menu = self._build_option_menu(
+            body,
+            row=24,
+            label="zoom del navegador",
+            values=["100%", "90%", "80%", "75%", "67%", "63%", "50%"],
+        )
+        self.browser_zoom_menu.set(f"{config.browser_zoom_percent}%")
 
         self.automation_version_menu = self._build_option_menu(
             body,
@@ -300,6 +320,8 @@ class SettingsDialog(ctk.CTkToplevel):
     def _wire_dirty_tracking(self) -> None:
         self.agent_entry.bind("<KeyRelease>", self._handle_dirty_state_change)
         self.keep_browser_open_menu.configure(command=self._handle_theme_change)
+        self.browser_window_entry.bind("<KeyRelease>", self._handle_dirty_state_change)
+        self.browser_zoom_menu.configure(command=self._handle_theme_change)
         self.automation_version_menu.configure(command=self._handle_theme_change)
         self.browser_extension_overlay_menu.configure(command=self._handle_theme_change)
         self.page_timeout_entry.bind("<KeyRelease>", self._handle_dirty_state_change)
@@ -325,6 +347,8 @@ class SettingsDialog(ctk.CTkToplevel):
             "agent_name": self.agent_entry.get(),
             "automation_version": self.automation_version_menu.get(),
             "keep_browser_open": self.keep_browser_open_menu.get(),
+            "browser_window": self.browser_window_entry.get(),
+            "browser_zoom": self.browser_zoom_menu.get(),
             "browser_extension_overlay": self.browser_extension_overlay_menu.get(),
             "page_timeout_seconds": self.page_timeout_entry.get(),
             "action_timeout_seconds": self.action_timeout_entry.get(),

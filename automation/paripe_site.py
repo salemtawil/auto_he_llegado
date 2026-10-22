@@ -862,6 +862,11 @@ class ParipeSite(BaseSite):
             keep_open=local_config.keep_browser_open,
             enable_extension=extension_engine_requested,
             extension_overlay=local_config.browser_extension_overlay,
+            window_size=(
+                local_config.browser_window_width,
+                local_config.browser_window_height,
+            ),
+            zoom_percent=local_config.browser_zoom_percent,
         )
         self._mark_phase_timing("browser_open_done", extension_loaded=session.extension_loaded)
         self._record_run_stat("browser_open_done", extension_loaded=session.extension_loaded)

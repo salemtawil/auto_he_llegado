@@ -302,6 +302,13 @@ class LocalConfig(DomainModel):
     # `config/machine_profile.py` segun la RAM y los nucleos; la interfaz no
     # ofrece mas de dos paneles, asi que el valor util es 1 o 2.
     max_concurrent_processes: int = 2
+    # Tamano del navegador de la automatizacion y zoom, en porcentaje. El zoom
+    # se aplica con --force-device-scale-factor, asi que al 63% cabe mas
+    # pagina en una ventana mas chica: es lo que permite tener la app y el
+    # navegador a la vista a la vez en pantallas pequenas.
+    browser_window_width: int = 1440
+    browser_window_height: int = 960
+    browser_zoom_percent: int = 100
     # Firma del equipo con el que se calcularon los valores de arriba. Si al
     # arrancar no coincide con la del equipo actual, se recalculan: asi un
     # config copiado de otra maquina no le impone sus limites a esta.

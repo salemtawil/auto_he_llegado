@@ -1062,6 +1062,10 @@ class BrowserManager:
     _BROWSER_CHANNEL = "chrome"
     _DEFAULT_WINDOW_WIDTH = 1440
     _DEFAULT_WINDOW_HEIGHT = 960
+    # Suelo: por debajo de esto el sitio pasa a su diseno movil, que es otro
+    # HTML y romperia todos los selectores de las automatizaciones.
+    _MIN_WINDOW_WIDTH = 900
+    _MIN_WINDOW_HEIGHT = 600
     _sessions: list[BrowserSession] = []
     _sessions_lock = threading.Lock()
     _REAPER_INTERVAL_SECONDS = 5.0
@@ -1117,6 +1121,8 @@ class BrowserManager:
         enable_extension: bool = False,
         extension_overlay: bool = True,
         operator_owned: bool = False,
+        window_size: tuple[int, int] | None = None,
+        zoom_percent: int | None = None,
     ) -> BrowserSession:
         run_id = self.current_run_id()
         try:
@@ -1182,11 +1188,16 @@ class BrowserManager:
                 self._build_extension_launch_args(
                     extension_path,
                     extension_overlay=extension_overlay,
-                )
+                ),
+                window_size=window_size,
+                zoom_percent=zoom_percent,
             )
         else:
             chrome_executable_path = self._get_optional_real_chrome_executable_path()
-            browser_launch_args = self._build_browser_launch_args()
+            browser_launch_args = self._build_browser_launch_args(
+                window_size=window_size,
+                zoom_percent=zoom_percent,
+            )
 
         if enable_extension and extension_mode == "unpacked" and manifest_path is not None and not manifest_path.exists():
             self.remember_extension_debug(
@@ -1447,12 +1458,16 @@ class BrowserManager:
         keep_open: bool = False,
         extension_overlay: bool = True,
         operator_owned: bool = False,
+        window_size: tuple[int, int] | None = None,
+        zoom_percent: int | None = None,
     ) -> BrowserSession:
         return self.open_clean_session(
             keep_open=keep_open,
             enable_extension=True,
             extension_overlay=extension_overlay,
             operator_owned=operator_owned,
+            window_size=window_size,
+            zoom_percent=zoom_percent,
         )
 
     def prepare_chrome_extension_profile(self) -> BrowserSession:
@@ -2104,14 +2119,47 @@ class BrowserManager:
         return any(str(arg).startswith(prefix) for arg in args)
 
     @classmethod
-    def _build_browser_launch_args(cls, extra_args: list[str] | None = None) -> list[str]:
+    def _build_browser_launch_args(
+        cls,
+        extra_args: list[str] | None = None,
+        *,
+        window_size: tuple[int, int] | None = None,
+        zoom_percent: int | None = None,
+    ) -> list[str]:
+        ancho, alto = window_size or (cls._DEFAULT_WINDOW_WIDTH, cls._DEFAULT_WINDOW_HEIGHT)
         args = [
-            f"--window-size={cls._DEFAULT_WINDOW_WIDTH},{cls._DEFAULT_WINDOW_HEIGHT}",
+            f"--window-size={max(int(ancho), cls._MIN_WINDOW_WIDTH)},"
+            f"{max(int(alto), cls._MIN_WINDOW_HEIGHT)}",
             "--window-position=40,40",
         ]
+        escala = cls._escala_de_zoom(zoom_percent)
+        if escala is not None:
+            # Es el zoom del navegador: al 63% cabe mas pagina en la misma
+            # ventana, que es justo lo que permite achicarla sin perder de
+            # vista los botones. Playwright sigue trabajando en pixeles CSS,
+            # asi que los clicks no se descolocan.
+            args.append(f"--force-device-scale-factor={escala}")
         if extra_args:
             args.extend(extra_args)
         return args
+
+    @classmethod
+    def _escala_de_zoom(cls, zoom_percent: int | None) -> float | None:
+        """Convierte un zoom en porcentaje al factor de escala, o None.
+
+        Fuera de 25-200 no se aplica nada: un valor absurdo en la
+        configuracion no puede dejar al agente con un navegador inusable.
+        """
+
+        if zoom_percent is None:
+            return None
+        try:
+            porcentaje = int(zoom_percent)
+        except (TypeError, ValueError):
+            return None
+        if porcentaje == 100 or not (25 <= porcentaje <= 200):
+            return None
+        return round(porcentaje / 100, 4)
 
     @staticmethod
     def _emit_launch_diagnostics(

@@ -2426,8 +2426,44 @@ class MainAppWindow(ctk.CTk):
     def _get_local_device_name() -> str:
         return os.getenv("COMPUTERNAME") or platform.node().strip() or "UNKNOWN_DEVICE"
 
+    @staticmethod
+    def _parse_browser_window(raw_value: str, actual: tuple[int, int]) -> tuple[int, int]:
+        """Lee "1440x960". Si no se entiende, se queda lo que habia.
+
+        Un tamano a medio escribir no puede dejar al agente con un navegador
+        de 3 pixeles, asi que tambien se aplica un suelo: por debajo de
+        900x600 los sitios cambian a su diseno movil, que es otro HTML y
+        romperia todos los selectores.
+        """
+
+        texto = str(raw_value or "").lower().replace(" ", "")
+        for separador in ("x", "*", ","):
+            if separador in texto:
+                ancho_txt, _, alto_txt = texto.partition(separador)
+                try:
+                    return max(int(ancho_txt), 900), max(int(alto_txt), 600)
+                except ValueError:
+                    return actual
+        return actual
+
+    @staticmethod
+    def _parse_zoom(raw_value: str) -> int:
+        texto = str(raw_value or "").replace("%", "").strip()
+        try:
+            porcentaje = int(texto)
+        except ValueError:
+            return 100
+        return porcentaje if 25 <= porcentaje <= 200 else 100
+
     def _extract_local_config(self, data: dict[str, str] | None = None) -> LocalConfig:
         source = data or {}
+        ancho_navegador, alto_navegador = self._parse_browser_window(
+            source.get("browser_window", ""),
+            (
+                self._current_config.browser_window_width,
+                self._current_config.browser_window_height,
+            ),
+        )
         return LocalConfig(
             agent_name=validate_non_empty_string(source["agent_name"], "agent_name"),
             agent_name_confirmed=True,
@@ -2457,6 +2493,9 @@ class MainAppWindow(ctk.CTk):
             # su valor de fabrica y la app volveria a medir el equipo en el
             # siguiente arranque, pisando lo que el agente acaba de elegir.
             paripe_block_wait_seconds=self._current_config.paripe_block_wait_seconds,
+            browser_window_width=ancho_navegador,
+            browser_window_height=alto_navegador,
+            browser_zoom_percent=self._parse_zoom(source.get("browser_zoom", "100%")),
             max_concurrent_processes=self._current_config.max_concurrent_processes,
             hardware_signature=self._current_config.hardware_signature,
             hardware_profile=self._current_config.hardware_profile,
