@@ -246,9 +246,9 @@ class SitioDeBloques(BaseSite):
         """Clona manteniendo la clase real, sea Compinche, Ready4Drive o una v2.
 
         Antes cada sitio codificaba su clase a mano (`return CompincheSite(...)`),
-        y por eso `AutomationV2Mixin` tenia que sobrescribirlo: una v2 clonada
-        devolvia una instancia v1 y la corrida usaba la automatizacion
-        equivocada en silencio. `type(self)` lo resuelve de raiz.
+        y cualquier subclase clonada devolvia una instancia de la clase padre:
+        la corrida acababa usando una automatizacion distinta de la elegida, en
+        silencio. `type(self)` lo resuelve de raiz.
         """
 
         return type(self)(

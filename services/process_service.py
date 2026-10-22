@@ -681,7 +681,10 @@ class ProcessService:
             return self._finish_process_log(run_context, log_service_lock, **campos)
         except Exception as primer_fallo:  # noqa: BLE001
             try:
-                servicio_limpio = LogService()
+                # Por la MISMA fabrica que creo el servicio de la corrida, no
+                # construyendo un LogService a pelo: a pelo ignora cualquier
+                # doble inyectado y acaba hablando con la Supabase de verdad.
+                servicio_limpio = self._create_run_log_service()
                 return servicio_limpio.finish_process(run_context.log_record_id, **campos)
             except Exception as segundo_fallo:  # noqa: BLE001
                 avisar(

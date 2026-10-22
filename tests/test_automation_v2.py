@@ -286,17 +286,36 @@ def test_el_diagnostico_de_extension_pasa_por_la_costura() -> None:
         assert "snapshot = session.capture_extension_debug(" in _fuente_v1(nombre), nombre
 
 
-def test_la_costura_base_llama_igual_que_la_v1() -> None:
-    """La v1 no debe cambiar de comportamiento: misma llamada, mismo retorno."""
+def test_la_costura_base_no_captura_si_no_hay_extension() -> None:
+    """El corte vive ahora en BaseSite, no solo en el mixin de la v2.
 
-    sitio = ParipeSite()
+    Antes esta prueba exigia lo contrario -que la v1 llamara igual que
+    siempre-, porque el corte solo lo tenia AutomationV2Mixin. Pero
+    DEFAULT_AUTOMATION_VERSION es "v1": con el motor tradicional se pagaban
+    cuatro recorridos de todos los frames y tres copias profundas, 7-8 veces
+    por corrida, para una funcionalidad muerta. El corte se subio a BaseSite.
+    """
+
     recibido: list[dict] = []
     sesion = SimpleNamespace(
         extension_enabled=False,
         capture_extension_debug=lambda **kw: recibido.append(kw) or "snapshot",
     )
 
-    assert sitio._capture_extension_debug_if_useful(  # noqa: SLF001
+    assert ParipeSite()._capture_extension_debug_if_useful(  # noqa: SLF001
+        sesion, page="PAGE", note="login_page_opened"
+    ) is None
+    assert recibido == [], "sin extension no debe recorrerse ni un frame"
+
+
+def test_la_costura_base_si_captura_cuando_hay_extension() -> None:
+    recibido: list[dict] = []
+    sesion = SimpleNamespace(
+        extension_enabled=True,
+        capture_extension_debug=lambda **kw: recibido.append(kw) or "snapshot",
+    )
+
+    assert ParipeSite()._capture_extension_debug_if_useful(  # noqa: SLF001
         sesion, page="PAGE", note="login_page_opened"
     ) == "snapshot"
     assert recibido == [{"page": "PAGE", "note": "login_page_opened"}]

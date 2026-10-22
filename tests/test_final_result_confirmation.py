@@ -21,14 +21,14 @@ from pathlib import Path
 
 import pytest
 
-import automation.compinche_site as compinche_mod
 import automation.paripe_site as paripe_mod
-import automation.ready4drive_site as r4d_mod
+import automation.sitio_de_bloques as bloques_mod
 
+# Compinche y Ready4Drive comparten una sola implementacion desde la
+# unificacion, asi que basta con revisarla una vez.
 SITIOS = [
     ("paripe", paripe_mod),
-    ("compinche", compinche_mod),
-    ("ready4drive", r4d_mod),
+    ("bloques", bloques_mod),
 ]
 
 

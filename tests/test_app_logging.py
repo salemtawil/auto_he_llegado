@@ -80,8 +80,15 @@ def test_es_idempotente(entorno_limpio: Path) -> None:
 
     assert primera == segunda
     logger = logging.getLogger(registro.LOGGER_NAME)
-    # Dos llamadas no pueden dejar el mensaje duplicado en el archivo.
-    assert len([h for h in logger.handlers if hasattr(h, "baseFilename")]) == 1
+    # Dos llamadas no pueden dejar el mensaje duplicado en el archivo. Se
+    # cuentan solo los manejadores de ESTA prueba: si otro archivo de pruebas
+    # dejo uno puesto, el fallo debe salir en su guardia, no aqui disfrazado.
+    mios = [
+        h
+        for h in logger.handlers
+        if str(getattr(h, "baseFilename", "")).startswith(str(entorno_limpio))
+    ]
+    assert len(mios) == 1, f"manejadores de esta prueba: {mios}"
 
 
 def test_el_print_suelto_acaba_en_el_log(entorno_limpio: Path) -> None:
