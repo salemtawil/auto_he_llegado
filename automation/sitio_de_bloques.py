@@ -1611,11 +1611,16 @@ class SitioDeBloques(BaseSite):
                 if exc.final_status == "selfie_retry":
                     self._observe_flow_state(current_root, page, "error:return_to_selfie")
                     self.emit_progress(progress_callback, phase="selfie_retry_if_needed", message="Retorno a selfie detectado.")
-                    if not deepfakescore_activated:
-                        self.emit_progress(progress_callback, phase="selfie_retry_if_needed", message="deepfakescore activado | reintentos: 1")
-                        deepfakescore_activated = True
-                    else:
-                        self.emit_progress(progress_callback, phase="selfie_retry_if_needed", message=f"deepfakescore activado | reintentos: {attempt}")
+                    # Un solo mensaje, con el contador de verdad. Antes el
+                    # primero anunciaba "reintentos: 1" escrito a mano y los
+                    # siguientes usaban `attempt`: dos fuentes para el mismo
+                    # numero, y la primera no era un contador.
+                    deepfakescore_activated = True
+                    self.emit_progress(
+                        progress_callback,
+                        phase="selfie_retry_if_needed",
+                        message=f"deepfakescore activado | reintentos: {attempt}",
+                    )
                     self.emit_progress(progress_callback, phase="selfie_retry_if_needed", message=exc.message)
                     self.emit_progress(progress_callback, phase="selfie_retry_if_needed", message="Reintentando con nueva foto.")
                     self._finalize_reserved_photo(reserved_photo, progress_callback=progress_callback)
@@ -2837,6 +2842,56 @@ class SitioDeBloques(BaseSite):
             self._wait_interval(locator, self._POLL_MS)
         raise ErrorDeFlujo(phase, error_message)
 
+    # JS que mira QUE hay encima del centro de un elemento y lo neutraliza.
+    # Sube hasta el contenedor flotante real, porque los chats suelen ser un
+    # iframe dentro de un div con position:fixed, y ocultar solo el iframe deja
+    # el div capturando los clicks igual.
+    _JS_APARTAR_ESTORBO = r"""(el) => {
+        const r = el.getBoundingClientRect();
+        if (!r.width || !r.height) return null;
+        const x = r.left + r.width / 2;
+        const y = r.top + r.height / 2;
+        const encima = document.elementFromPoint(x, y);
+        if (!encima || encima === el || el.contains(encima) || encima.contains(el)) {
+            return null;
+        }
+        let nodo = encima;
+        for (let i = 0; i < 6 && nodo && nodo !== document.body; i++) {
+            const pos = getComputedStyle(nodo).position;
+            if (pos === 'fixed' || pos === 'sticky') break;
+            nodo = nodo.parentElement;
+        }
+        const objetivo = (nodo && nodo !== document.body) ? nodo : encima;
+        const clases = typeof objetivo.className === 'string'
+            ? objetivo.className.trim().split(/\s+/).slice(0, 2).join('.')
+            : '';
+        const descripcion = objetivo.tagName.toLowerCase()
+            + (objetivo.id ? '#' + objetivo.id : '')
+            + (clases ? '.' + clases : '');
+        objetivo.style.setProperty('pointer-events', 'none', 'important');
+        objetivo.style.setProperty('visibility', 'hidden', 'important');
+        return descripcion;
+    }"""
+
+    def _apartar_lo_que_tape(self, locator: Locator) -> str | None:
+        """Oculta lo que este cubriendo el centro del elemento. Nunca lanza.
+
+        El caso real: el chat del sitio recibe un mensaje, su burbuja crece y
+        tapa el boton Continuar. El click normal falla -Playwright comprueba
+        que el elemento reciba el puntero- y la escalada a force=True disparaba
+        en esas coordenadas, o sea EN EL CHAT: se abria el chat y la corrida se
+        quedaba ahi.
+
+        Se usa visibility+pointer-events y no display:none a proposito: asi el
+        estorbo deja de recibir clicks pero no se recoloca la pagina, y el
+        boton sigue donde estaba.
+        """
+
+        try:
+            return locator.evaluate(self._JS_APARTAR_ESTORBO)
+        except Exception:  # noqa: BLE001 - apartar es un extra, nunca un bloqueo
+            return None
+
     def _click_locator_resilient(self, locator: Locator, *, phase: str, error_message: str) -> None:
         try:
             locator.wait_for(state="visible", timeout=1_000)
@@ -2857,6 +2912,17 @@ class SitioDeBloques(BaseSite):
             return
         except Exception:
             pass
+        # Antes de forzar nada: mirar si hay algo encima y apartarlo. Forzar
+        # con un estorbo delante no es "insistir mas", es pulsar OTRA COSA.
+        estorbo = self._apartar_lo_que_tape(locator)
+        if estorbo is not None:
+            self._record_timeline_event("estorbo_apartado", phase=phase, elemento=estorbo)
+            self._record_run_stat("estorbo_apartado", phase=phase, elemento=estorbo)
+            try:
+                locator.click(timeout=1_500)
+                return
+            except Exception:
+                pass
         try:
             locator.click(timeout=1_500, force=True)
             return

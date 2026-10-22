@@ -2190,9 +2190,15 @@ class MainAppWindow(ctk.CTk):
                 return
             slot = self._get_slot(slot_id)
             lowered = message.lower()
-            if "deepfakescore" in lowered:
-                slot.panel.status_panel.set_persistent_alert("deepfakescore")
             retry_match = re.search(r"reintentos(?: de selfie)?:\s*(\d+)", lowered)
+            if "deepfakescore" in lowered:
+                # El numero va DENTRO del aviso. Estaba solo en el otro chip, y
+                # el agente mira este: veia "deepfakescore" a secas y no sabia
+                # si llevaba un reintento o siete.
+                intentos = retry_match.group(1) if retry_match is not None else None
+                slot.panel.status_panel.set_persistent_alert(
+                    f"deepfakescore x{intentos}" if intentos else "deepfakescore"
+                )
             if retry_match is not None:
                 slot.panel.status_panel.set_retry_indicator(f"reintentos selfie: {retry_match.group(1)} [OK]")
             elif "marca de multiples selfies activada" in lowered or "selfie subida mas de una vez" in lowered:
