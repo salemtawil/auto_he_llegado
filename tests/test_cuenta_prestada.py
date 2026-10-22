@@ -35,6 +35,137 @@ HTML_REAL_PRESTADA = (
 )
 
 
+# Radiogroup real del iframe de Compinche. Las dos opciones comparten
+# aria-label="borrowed-account": es el nombre del GRUPO, no de la opcion, y
+# quien se fie de el marca la equivocada.
+HTML_REAL_RADIOGRUPO = (
+    '<div class="mt-6 grid grid-cols-2 gap-x-4" id="headlessui-radiogroup-:r0:" role="radiogroup">'
+    '<span aria-label="borrowed-account" role="radio" aria-checked="false" tabindex="-1"'
+    ' id="headlessui-radio-:r1:" data-headlessui-state="">'
+    '<span class="block text-sm font-medium text-gray-900">Cuenta propia</span>'
+    '<span class="text-sm text-gray-700">Selecciona si eres el dueno de la cuenta</span></span>'
+    '<span aria-label="borrowed-account" role="radio" aria-checked="true" tabindex="0"'
+    ' id="headlessui-radio-:r2:" data-headlessui-state="checked" data-checked="">'
+    '<span class="block text-sm font-medium text-gray-900">Cuenta prestada</span>'
+    '<span class="text-sm text-gray-700">Selecciona para generar una foto</span></span></div>'
+)
+
+
+class _Opcion:
+    """Imita un locator de Playwright sobre una tarjeta del grupo."""
+
+    def __init__(self, texto: str, *, aria: str | None, data: str | None) -> None:
+        self.texto = texto
+        self.atributos = {"aria-checked": aria, "data-checked": data}
+        self.pulsada = False
+
+    def get_attribute(self, nombre: str):
+        return self.atributos.get(nombre)
+
+    def marcar(self) -> None:
+        self.pulsada = True
+        self.atributos = {"aria-checked": "true", "data-checked": ""}
+
+
+class _Grupo:
+    def __init__(self, opciones: list[_Opcion]) -> None:
+        self.opciones = opciones
+
+    def filter(self, has_text=None, has_not_text=None):
+        quedan = [o for o in self.opciones if has_text is None or has_text.search(o.texto)]
+        if has_not_text is not None:
+            quedan = [o for o in quedan if not has_not_text.search(o.texto)]
+        return _Grupo(quedan)
+
+    @property
+    def first(self):
+        return _Grupo(self.opciones[:1])
+
+    def count(self) -> int:
+        return len(self.opciones)
+
+    def get_attribute(self, nombre: str):
+        return self.opciones[0].get_attribute(nombre)
+
+
+class _RaizConRadios:
+    def __init__(self, opciones: list[_Opcion]) -> None:
+        self.opciones = opciones
+
+    def locator(self, selector: str):
+        return _Grupo(self.opciones if selector == '[role="radio"]' else [])
+
+    def evaluate(self, *_args, **_kwargs):
+        raise RuntimeError("esta pantalla no tiene switch")
+
+    def wait_for_timeout(self, _ms) -> None:
+        pass
+
+
+def _tarjetas(prestada_marcada: bool) -> list[_Opcion]:
+    return [
+        _Opcion("Cuenta propia Selecciona si eres el dueno", aria="false", data=None),
+        _Opcion(
+            "Cuenta prestada Selecciona para generar una foto",
+            aria="true" if prestada_marcada else "false",
+            data="" if prestada_marcada else None,
+        ),
+    ]
+
+
+class _SitioConRadios(BaseSite):
+    def execute(self, *args, **kwargs):  # pragma: no cover - abstracto
+        raise NotImplementedError
+
+    def __init__(self) -> None:
+        self.pulsada: _Opcion | None = None
+
+    def _click_locator_resilient(self, locator, *, phase: str, error_message: str) -> None:
+        self.pulsada = locator.opciones[0]
+        self.pulsada.marcar()
+
+    def emit_progress(self, _callback, *, phase: str, message: str) -> None:  # type: ignore[override]
+        pass
+
+    def _record_run_stat(self, event: str, **detalles) -> None:
+        pass
+
+
+def test_en_el_radiogrupo_ya_marcado_no_se_pulsa_nada() -> None:
+    sitio = _SitioConRadios()
+
+    assert sitio._asegurar_cuenta_prestada(_RaizConRadios(_tarjetas(True))) == "ya_estaba"  # noqa: SLF001
+    assert sitio.pulsada is None, "volver a pulsar lo dejaria en cuenta propia"
+
+
+def test_en_el_radiogrupo_se_pulsa_la_tarjeta_prestada_no_la_otra() -> None:
+    sitio = _SitioConRadios()
+    tarjetas = _tarjetas(False)
+
+    assert sitio._asegurar_cuenta_prestada(_RaizConRadios(tarjetas)) == "cambiado"  # noqa: SLF001
+    assert sitio.pulsada is tarjetas[1], "se pulso la tarjeta equivocada"
+    assert "prestada" in sitio.pulsada.texto.lower()
+
+
+def test_el_radio_marcado_solo_con_data_checked_tambien_cuenta() -> None:
+    # Headless UI lo pone vacio: `data-checked=""`. Comparar contra "true"
+    # daria siempre falso y acabariamos pulsando una opcion ya elegida.
+    sitio = _SitioConRadios()
+    solo_data = [_Opcion("Cuenta prestada", aria=None, data="")]
+
+    assert sitio._asegurar_cuenta_prestada(_RaizConRadios(solo_data)) == "ya_estaba"  # noqa: SLF001
+
+
+def test_el_aria_label_no_sirve_para_distinguir_las_opciones() -> None:
+    # Las DOS tarjetas llevan aria-label="borrowed-account": es el nombre del
+    # grupo. Si alguien lo usa como selector, marca la equivocada.
+    assert HTML_REAL_RADIOGRUPO.count('aria-label="borrowed-account"') == 2
+    fuente = (RAIZ / "automation" / "base_site.py").read_text(encoding="utf-8")
+    assert "borrowed-account" not in fuente, (
+        "ese aria-label esta en las dos opciones: no puede usarse para elegir"
+    )
+
+
 class _Sitio(BaseSite):
     def execute(self, *args, **kwargs):  # pragma: no cover - abstracto
         raise NotImplementedError

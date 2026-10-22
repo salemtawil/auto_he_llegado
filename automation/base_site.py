@@ -516,8 +516,28 @@ class BaseSite(ABC):
     CUENTA_SWITCH_TIMEOUT_MS = 2_500
 
     def _leer_estado_de_cuenta(self, root) -> dict:
-        """Dice si el selector esta en 'Cuenta prestada'. Nunca lanza."""
+        """Dice si la cuenta prestada esta elegida. Nunca lanza.
 
+        Hay DOS controles distintos segun el sitio:
+
+        - Compinche/Ready4Drive, dentro del iframe: un `role="radiogroup"` de
+          Headless UI con dos `role="radio"`. El elegido lleva
+          `aria-checked="true"` y `data-checked`. Ojo con el
+          `aria-label="borrowed-account"`: esta en LAS DOS opciones, es el
+          nombre del grupo y no sirve para distinguirlas. Lo que distingue es
+          el texto de cada tarjeta.
+        - Paripe, en el panel: un `role="switch"` con una etiqueta a cada
+          lado. Ahi el estado se lee de las etiquetas, no del switch (ver
+          `_JS_ESTADO_DE_CUENTA`).
+        """
+
+        opcion = self._opcion_prestada_de_radiogrupo(root)
+        if opcion is not None:
+            return {
+                "encontrado": True,
+                "prestada": self._radio_esta_marcado(opcion),
+                "modo": "radio",
+            }
         try:
             estado = root.evaluate(
                 self._JS_ESTADO_DE_CUENTA,
@@ -525,7 +545,37 @@ class BaseSite(ABC):
             )
         except Exception:  # noqa: BLE001 - si no se puede mirar, no hay paso que dar
             return {"encontrado": False}
-        return estado if isinstance(estado, dict) else {"encontrado": False}
+        if not isinstance(estado, dict):
+            return {"encontrado": False}
+        estado["modo"] = "switch"
+        return estado
+
+    def _opcion_prestada_de_radiogrupo(self, root):
+        """La tarjeta "Cuenta prestada" de un grupo de radios, o None."""
+
+        import re as _re
+
+        with suppress(Exception):
+            opcion = (
+                root.locator('[role="radio"]')
+                .filter(has_text=_re.compile(self._CUENTA_PRESTADA_RE, _re.I))
+                .first
+            )
+            if opcion.count() > 0:
+                return opcion
+        return None
+
+    @staticmethod
+    def _radio_esta_marcado(opcion) -> bool:
+        with suppress(Exception):
+            if opcion.get_attribute("aria-checked") == "true":
+                return True
+        with suppress(Exception):
+            # Headless UI lo pone vacio (`data-checked=""`), asi que vale con
+            # que exista: comparar contra "true" daria siempre falso.
+            if opcion.get_attribute("data-checked") is not None:
+                return True
+        return False
 
     def _asegurar_cuenta_prestada(self, root, *, progress_callback=None) -> str:
         """Deja el selector en 'Cuenta prestada'. Devuelve que hizo.
@@ -549,7 +599,7 @@ class BaseSite(ABC):
             phase="account_selection",
             message="El selector esta en 'Cuenta propia'. Cambiando a 'Cuenta prestada'...",
         )
-        interruptor = self._localizar_interruptor_de_cuenta(root)
+        interruptor = self._localizar_control_de_cuenta(root)
         if interruptor is None:
             raise RuntimeError(
                 "Se vio el selector de cuenta en 'Cuenta propia', pero no se "
@@ -582,10 +632,17 @@ class BaseSite(ABC):
             "prestada'. El proceso no funciona con la cuenta propia."
         )
 
-    def _localizar_interruptor_de_cuenta(self, root):
-        """El switch, como localizador de Playwright para poder pulsarlo bien."""
+    def _localizar_control_de_cuenta(self, root):
+        """Lo que hay que pulsar para quedarse en "Cuenta prestada".
+
+        En un grupo de radios es la tarjeta misma; en un switch, el switch.
+        """
 
         import re as _re
+
+        opcion = self._opcion_prestada_de_radiogrupo(root)
+        if opcion is not None:
+            return opcion
 
         with suppress(Exception):
             caja = (
