@@ -122,3 +122,70 @@ def test_un_boton_continuar_ya_no_basta_para_dar_la_foto_por_subida() -> None:
         "no debe preguntarse por el boton Continuar: esta en pantalla antes de subir nada"
     )
     assert sitio.vueltas > 0, "debe haber esperado, no rendirse en seco"
+
+
+# ---------------------------------------------------------------------------
+# Marcadores por palabra completa
+# ---------------------------------------------------------------------------
+
+
+def _matcher(modulo: str, nombre_funcion: str):
+    """Extrae la funcion del fuente y la ejecuta sola.
+
+    El modulo entero no se puede importar en cualquier interprete (depende de
+    playwright y de StrEnum), y lo que se quiere comprobar aqui es logica de
+    texto pura.
+    """
+
+    import re as _re
+    import unicodedata as _unicodedata
+
+    fuente = (RAIZ / modulo).read_text(encoding="utf-8")
+    nodo = next(
+        n
+        for n in ast.walk(ast.parse(fuente))
+        if isinstance(n, ast.FunctionDef) and n.name == nombre_funcion
+    )
+    espacio: dict = {"re": _re}
+    exec(ast.unparse(nodo).replace("@classmethod\n", ""), espacio)  # noqa: S102
+
+    class _Clase:
+        @staticmethod
+        def _normalize_text(texto: str) -> str:
+            limpio = _unicodedata.normalize("NFKD", texto)
+            ascii_texto = limpio.encode("ascii", "ignore").decode("ascii")
+            return _re.sub(r"\s+", " ", ascii_texto).strip().lower()
+
+    funcion = espacio[nombre_funcion]
+    return lambda texto, marcadores: funcion(_Clase, _Clase._normalize_text(texto), marcadores)
+
+
+CASOS = [
+    ("ocurrio un error inesperado", ("error",), True),
+    # El que convertia en fallo una corrida buena:
+    ("el proceso termino sin errores", ("error",), False),
+    ("por favor intenta de nuevo", ("intenta de nuevo",), True),
+    ("bloque asignado correctamente", ("error", "fallo"), False),
+    # El que daba el paso por bueno sin que cambiara la pantalla:
+    ("continuar ahora", ("hora", "time"), False),
+    ("hora de llegada: 08:00", ("hora",), True),
+    ("horario del bloque", ("hora",), False),
+    ("continuar", ("continuar",), True),
+    ("Continuar Ahora", ("continuar",), True),
+]
+
+
+@pytest.mark.parametrize(
+    ("modulo", "funcion"),
+    [
+        ("automation/paripe_site.py", "_contiene_marcador"),
+        ("automation/compinche_site.py", "_contains_any"),
+        ("automation/ready4drive_site.py", "_contains_any"),
+    ],
+)
+def test_los_marcadores_respetan_los_limites_de_palabra(modulo: str, funcion: str) -> None:
+    casa = _matcher(modulo, funcion)
+    for texto, marcadores, esperado in CASOS:
+        assert casa(texto, marcadores) is esperado, (
+            f"{modulo}: {texto!r} contra {marcadores} deberia dar {esperado}"
+        )

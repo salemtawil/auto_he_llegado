@@ -2282,6 +2282,8 @@ class ParipeSite(BaseSite):
         last_discard_signature = ""
         grace_reported = False
         loading_reported = False
+        # Vueltas seguidas en las que se vio un marcador de fallo del sitio.
+        fallos_seguidos = 0
         page_url = self._safe_page_url(page)
         self.emit_progress(
             progress_callback,
@@ -2711,14 +2713,24 @@ class ParipeSite(BaseSite):
                 else:
                     page.wait_for_timeout(self._BLOCK_WAIT_POLL_MS)
                     continue
-            page.wait_for_timeout(self._BLOCK_WAIT_POLL_MS)
-            continue
+            # Aqui habia un `continue` incondicional que dejaba muerto todo lo
+            # que sigue: durante los hasta 300 s de espera de bloque no se
+            # comprobaba NI UN error del sitio. Un error duro de paripe.io se
+            # comia los cinco minutos enteros y se reportaba como timeout.
+            #
+            # Se exige verlo dos vueltas seguidas: el marcador puede aparecer
+            # un instante por un toast de otro modulo, y abortar una corrida
+            # buena cuesta mas que esperar 75 ms mas.
             if self._has_any_text(page, self._selectors.failure_markers):
-                raise ParipeFlowError(
-                    "block_read",
-                    "Paripe.io devolvio un error antes de mostrar la informacion del bloque.",
-                )
-            page.wait_for_timeout(self._SHORT_WAIT_MS)
+                fallos_seguidos += 1
+                if fallos_seguidos >= 2:
+                    raise ParipeFlowError(
+                        "block_read",
+                        "Paripe.io devolvio un error antes de mostrar la informacion del bloque.",
+                    )
+            else:
+                fallos_seguidos = 0
+            page.wait_for_timeout(self._BLOCK_WAIT_POLL_MS)
         raise ParipeFlowError(
             "block_read",
             "No aparecio la informacion del bloque despues de Continuar dentro del mismo contexto del flujo. Ultimo paso exitoso: continue_submit.",
@@ -3102,15 +3114,40 @@ class ParipeSite(BaseSite):
         active = [name for name, enabled in signals.items() if enabled]
         return ", ".join(active) if active else "sin senales activas"
 
+    @classmethod
+    def _contiene_marcador(cls, normalized_text: str, texts: tuple[str, ...]) -> bool:
+        """Busca marcadores respetando los limites de palabra.
+
+        La comparacion por subcadena hacia que `"error"` casara dentro de
+        `"sin errores"`, y `"hora"` dentro de `"ahora"` -una palabra que
+        aparece hasta en los textos del propio boton Continuar-. Un pie de
+        pagina bastaba para convertir en fallo una corrida buena.
+
+        Las frases de varias palabras siguen por subcadena: ahi el riesgo de
+        casar por accidente es despreciable y el texto del sitio puede venir
+        partido.
+        """
+
+        for texto in texts:
+            objetivo = cls._normalize_text(texto)
+            if not objetivo:
+                continue
+            if " " in objetivo:
+                if objetivo in normalized_text:
+                    return True
+            elif re.search(rf"\b{re.escape(objetivo)}\b", normalized_text):
+                return True
+        return False
+
     def _has_any_text(self, page: Page, texts: tuple[str, ...]) -> bool:
         try:
             body_text = self._normalize_text(page.locator("body").inner_text(timeout=400))
         except Exception:
             return False
-        return any(self._normalize_text(text) in body_text for text in texts)
+        return self._contiene_marcador(body_text, texts)
 
     def _normalized_contains_any(self, normalized_text: str, texts: tuple[str, ...]) -> bool:
-        return any(self._normalize_text(text) in normalized_text for text in texts)
+        return self._contiene_marcador(normalized_text, texts)
 
     def _first_visible(self, page: Page, selectors: tuple[str, ...], *, timeout_ms: int) -> Locator:
         for selector in selectors:
@@ -3507,10 +3544,24 @@ class ParipeSite(BaseSite):
                     source="_find_block_context_snapshot",
                 )
                 self.emit_progress(progress_callback, phase="final_submit", message="snapshot block button found")
-                button.click(timeout=500)
+                # Este atajo despachaba con `button.click(timeout=500)` fuera de
+                # try/except y ANTES de marcar que ya se pulso, saltandose el
+                # contrato de "un solo despacho" que el resto del metodo cumple.
+                # Si el click llegaba al sitio pero Playwright no lo confirmaba
+                # en 500 ms (re-render, nodo desprendido, navegacion), la
+                # excepcion subia hasta el `except Exception` del pipeline y la
+                # corrida se reportaba como fallo generico CON EL BLOQUE YA
+                # TOMADO; ademas `_after_final_click_done` no llegaba a
+                # ejecutarse, asi que otra ruta podia volver a pulsar.
+                #
+                # `_dispatch_final_click_once` ya resuelve esto: da 2 s, no
+                # reintenta nunca, y devuelve la excepcion en vez de lanzarla
+                # para que sea `_detect_final_result` quien decida mirando el
+                # sitio.
                 self._mark_phase_timing("final_click_done", source="_submit_final_snapshot", url=page_url)
                 self._record_run_stat("final_click_done", source="_submit_final_snapshot", url=page_url)
                 self._after_final_click_done(page=page)
+                self._dispatch_final_click_once(button, progress_callback=progress_callback)
                 return
         if extension_assisted:
             extension_state = self._extension_state(session, page, note="wait_final_submit_ready")
@@ -4195,7 +4246,7 @@ class ParipeSite(BaseSite):
             return None
         if self._detect_no_block_message(normalized_text) is not None:
             return "no_block"
-        if any(self._normalize_text(text) in normalized_text for text in self._selectors.failure_markers):
+        if self._contiene_marcador(normalized_text, self._selectors.failure_markers):
             return "error"
         if any(self._normalize_text(text) in normalized_text for text in self._selectors.success_markers):
             return "success"

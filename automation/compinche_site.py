@@ -3341,7 +3341,31 @@ class CompincheSite(BaseSite):
 
     @classmethod
     def _contains_any(cls, normalized_text: str, texts: tuple[str, ...]) -> bool:
-        return any(cls._normalize_text(text) in normalized_text for text in texts)
+        """Busca marcadores respetando los limites de palabra.
+
+        Antes era subcadena pelada, y eso hacia que `"hora"` casara dentro de
+        `"ahora"` -palabra que aparece hasta en los textos del propio boton
+        Continuar ("Continuar ahora")-. Con eso, `_wait_for_post_continue_change`
+        daba el paso por bueno en la primera vuelta sin que la pantalla hubiera
+        cambiado, y las mismas senales contaminadas alimentaban la decision de
+        "hay bloque", que es la que dispara el click rapido. El mismo defecto
+        hacia que `"error"` casara dentro de `"sin errores"` y convirtiera en
+        fallo una corrida buena.
+
+        Las frases de varias palabras siguen por subcadena: ahi el riesgo de
+        casar por accidente es despreciable.
+        """
+
+        for texto in texts:
+            objetivo = cls._normalize_text(texto)
+            if not objetivo:
+                continue
+            if " " in objetivo:
+                if objetivo in normalized_text:
+                    return True
+            elif re.search(rf"\b{re.escape(objetivo)}\b", normalized_text):
+                return True
+        return False
 
     @staticmethod
     def _normalize_text(text: str) -> str:
