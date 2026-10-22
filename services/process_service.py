@@ -323,13 +323,19 @@ class ProcessService:
             run_context.add_warning(message)
             emit_progress("log_warning", message)
 
-        try:
-            log_record = run_context.log_service.start_process(
+        def crear_registro_de_proceso(*, phase: str, message: str):
+            return run_context.log_service.start_process(
                 site=site_runner.site_host,
                 action=normalized_request.action_name,
                 phone=sanitized_phone,
                 agent_name=normalized_request.agent_name,
                 device_name=self._get_local_device_name(),
+                phase=phase,
+                message=message,
+            )
+
+        try:
+            log_record = crear_registro_de_proceso(
                 phase=initial_phase,
                 message=f"Iniciando automatizacion real de {site_runner.site_host}.",
             )
@@ -494,28 +500,40 @@ class ProcessService:
             )
         except Exception as exc:
             finish_log_updates()
-            message = f"Error durante la automatizacion de {site_runner.site_host}: {exc}"
-            finished_log = None
+            # Una cancelacion voluntaria no es un error de la automatizacion.
+            # Se registraba igual que un fallo inesperado (failed/unexpected),
+            # asi que cerrar la app con una corrida en vuelo ensuciaba las
+            # estadisticas con fallos que nunca existieron.
+            fue_cancelada = run_context.cancel_event.is_set()
+            if fue_cancelada:
+                fase_final = "cancelled"
+                estado_final = "cancelled"
+                message = (
+                    f"Corrida cancelada en {site_runner.site_host} antes de terminar."
+                )
+            else:
+                fase_final = "unexpected"
+                estado_final = "failed"
+                message = f"Error durante la automatizacion de {site_runner.site_host}: {exc}"
             run_context.run_stats.record(
-                "unexpected",
+                fase_final,
                 {
                     "message": message,
                 },
             )
-            if run_context.log_record_id is not None:
-                try:
-                    finished_log = self._finish_process_log(
-                        run_context,
-                        log_service_lock,
-                        phase="unexpected",
-                        final_status="failed",
-                        message=message,
-                        error_message=message,
-                    )
-                except Exception as finish_exc:
-                    register_log_warning(
-                        f"No se pudo cerrar process_logs para esta ejecucion: {finish_exc}"
-                    )
+            finished_log = self._cerrar_registro_remoto(
+                run_context,
+                log_service_lock,
+                crear_registro=lambda: crear_registro_de_proceso(
+                    phase=fase_final,
+                    message=message,
+                ),
+                avisar=register_log_warning,
+                phase=fase_final,
+                final_status=estado_final,
+                message=message,
+                error_message=None if fue_cancelada else message,
+            )
             self._store_process_debug_export(
                 normalized_request.process_id,
                 site_runner.runner,
@@ -530,8 +548,8 @@ class ProcessService:
                 execution_mode=normalized_request.execution_mode,
                 success=False,
                 message=message,
-                final_status="failed",
-                phase="unexpected",
+                final_status=estado_final,
+                phase=fase_final,
                 agent_name=normalized_request.agent_name,
                 completed_at=self._utcnow(),
             )
@@ -555,29 +573,29 @@ class ProcessService:
             },
         )
         finish_log_updates()
-        if run_context.log_record_id is not None:
-            try:
-                finished_log = self._finish_process_log(
-                    run_context,
-                    log_service_lock,
-                    phase=site_result.phase,
-                    final_status=site_result.final_status,
-                    message=self._build_finish_message(
-                        site_result,
-                        run_context=run_context,
-                        runner=site_runner.runner,
-                        process_id=normalized_request.process_id,
-                    ),
-                    station_name=site_result.station_name,
-                    block_price=site_result.block_price,
-                    block_time=site_result.block_time,
-                    error_message=site_result.message if not site_result.success else None,
-                    finished_at=completed_at,
-                )
-            except Exception as finish_exc:
-                register_log_warning(
-                    f"No se pudo cerrar process_logs para esta ejecucion: {finish_exc}"
-                )
+        mensaje_de_cierre = self._build_finish_message(
+            site_result,
+            run_context=run_context,
+            runner=site_runner.runner,
+            process_id=normalized_request.process_id,
+        )
+        finished_log = self._cerrar_registro_remoto(
+            run_context,
+            log_service_lock,
+            crear_registro=lambda: crear_registro_de_proceso(
+                phase=site_result.phase,
+                message=mensaje_de_cierre,
+            ),
+            avisar=register_log_warning,
+            phase=site_result.phase,
+            final_status=site_result.final_status,
+            message=mensaje_de_cierre,
+            station_name=site_result.station_name,
+            block_price=site_result.block_price,
+            block_time=site_result.block_time,
+            error_message=site_result.message if not site_result.success else None,
+            finished_at=completed_at,
+        )
 
         self._store_process_debug_export(
             normalized_request.process_id,
@@ -614,6 +632,64 @@ class ProcessService:
         return result
 
     _LOG_FINISH_LOCK_TIMEOUT_SECONDS = 5.0
+
+    def _cerrar_registro_remoto(
+        self,
+        run_context: ProcessRunContext,
+        log_service_lock: threading.Lock,
+        *,
+        crear_registro,
+        avisar,
+        **campos,
+    ):
+        """Deja la corrida cerrada en process_logs, o dice por que no pudo.
+
+        Cubre los dos caminos por los que lo que ve el agente y lo que queda en
+        Supabase dejaban de coincidir:
+
+        1. Si la fila inicial nunca se creo (Supabase caido en el arranque), la
+           corrida entera terminaba sin dejar rastro: `log_record_id` era None y
+           tanto los updates como el cierre se saltaban por el `is None`. Aqui se
+           intenta crearla ahora, ya con el resultado en la mano. Tarde es mejor
+           que nunca.
+        2. Si el cierre fallaba -tipicamente porque el hilo de drenaje seguia
+           dentro de un update con el candado tomado y los 5s se agotaban- la
+           fila se quedaba en `started` y sin `finished_at` PARA SIEMPRE,
+           mientras el resultado local decia exito. Cualquier informe por estado
+           contaba esa corrida como colgada. Ahora se reintenta una vez con un
+           LogService nuevo: cliente limpio y sin ese candado.
+
+        Devuelve la fila cerrada, o None si no se pudo. Nunca lanza.
+        """
+
+        if run_context.log_record_id is None:
+            try:
+                registro = crear_registro()
+            except Exception as exc:  # noqa: BLE001
+                avisar(
+                    "La corrida termino sin fila en process_logs y tampoco se "
+                    f"pudo crear al cerrar: {exc}"
+                )
+                return None
+            run_context.log_record_id = registro.id
+            avisar(
+                "La fila de process_logs no existia al empezar; se creo al "
+                "terminar, asi que no tiene el detalle del proceso."
+            )
+
+        try:
+            return self._finish_process_log(run_context, log_service_lock, **campos)
+        except Exception as primer_fallo:  # noqa: BLE001
+            try:
+                servicio_limpio = LogService()
+                return servicio_limpio.finish_process(run_context.log_record_id, **campos)
+            except Exception as segundo_fallo:  # noqa: BLE001
+                avisar(
+                    "No se pudo cerrar process_logs para esta ejecucion: "
+                    f"{primer_fallo}. El reintento con un cliente nuevo tambien "
+                    f"fallo: {segundo_fallo}. La fila queda abierta en Supabase."
+                )
+                return None
 
     def _finish_process_log(
         self,

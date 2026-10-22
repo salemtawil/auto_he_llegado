@@ -1442,3 +1442,178 @@ def test_finish_log_updates_does_not_block_forever_when_a_log_write_hangs() -> N
     # Without the bounded wait this call never returns while the write is blocked.
     assert elapsed < 10.0
     assert result.success is True
+
+
+# ---------------------------------------------------------------------------
+# Fidelidad del registro: lo que ve el agente y lo que queda en Supabase
+# ---------------------------------------------------------------------------
+
+
+class _SitioQueSeCancela:
+    """Pide la cancelacion desde dentro de la corrida y luego muere.
+
+    Es lo que pasa de verdad: `request_cancel` solo senaliza, y la corrida se
+    entera en su siguiente punto de control, donde lanza.
+    """
+
+    def __init__(self) -> None:
+        self.service = None
+        self.slot_id = ""
+        self.debug_export: dict = {}
+
+    def execute_traditional(self, request, *, local_config, progress_callback):
+        self.service.request_cancel(self.slot_id)
+        raise RuntimeError("Proceso cancelado por cancel_event.")
+
+    def execute_extension(self, request, *, local_config, progress_callback):
+        return self.execute_traditional(
+            request, local_config=local_config, progress_callback=progress_callback
+        )
+
+    def export_process_debug_state(self):
+        return dict(self.debug_export)
+
+
+def _peticion(slot_id: str | None = None) -> ProcessExecutionRequest:
+    return ProcessExecutionRequest(
+        slot_id=slot_id,
+        page_name="Compinche",
+        action_name="He llegado",
+        phone_number="8095551234",
+        password="secret",
+        agent_name="Agente Local",
+        execution_mode="normal",
+    )
+
+
+def test_cancelar_no_se_registra_como_fallo() -> None:
+    # Cerrar la app con una corrida en vuelo dejaba la fila como failed /
+    # unexpected: un fallo que nunca existio, contaminando las estadisticas.
+    log_service = StubLogService()
+    sitio = _SitioQueSeCancela()
+    service = ProcessService(
+        compinche_site=sitio,
+        log_service_factory=build_log_service_factory(log_service),
+        local_config_service=StubLocalConfigService(),
+        paripe_site=StubParipeSite(
+            SiteExecutionResult(success=True, message="x", final_status="success", phase="final_result")
+        ),
+    )
+    sitio.service = service
+    sitio.slot_id = "slot-1"
+
+    resultado = service.execute(_peticion(slot_id="slot-1"))
+
+    assert resultado.success is False
+    assert resultado.final_status == "cancelled"
+    assert resultado.phase == "cancelled"
+    assert "cancelada" in resultado.message.lower()
+
+    _log_id, campos = log_service.finish_calls[-1]
+    assert campos["final_status"] == "cancelled"
+    assert campos["error_message"] is None, "una cancelacion no lleva mensaje de error"
+
+
+def test_un_fallo_de_verdad_sigue_registrandose_como_fallo() -> None:
+    class _SitioQueRevienta:
+        debug_export: dict = {}
+
+        def execute_traditional(self, request, *, local_config, progress_callback):
+            raise RuntimeError("el selector no aparecio")
+
+        execute_extension = execute_traditional
+
+        def export_process_debug_state(self):
+            return {}
+
+    log_service = StubLogService()
+    service = ProcessService(
+        compinche_site=_SitioQueRevienta(),
+        log_service_factory=build_log_service_factory(log_service),
+        local_config_service=StubLocalConfigService(),
+        paripe_site=StubParipeSite(
+            SiteExecutionResult(success=True, message="x", final_status="success", phase="final_result")
+        ),
+    )
+
+    resultado = service.execute(_peticion(slot_id="slot-1"))
+
+    assert resultado.final_status == "failed"
+    assert resultado.phase == "unexpected"
+    _log_id, campos = log_service.finish_calls[-1]
+    assert campos["error_message"], "un fallo real si debe llevar su mensaje"
+
+
+class _LogQueSeRecupera(StubLogService):
+    """Falla al crear la fila inicial y funciona a partir de ahi."""
+
+    def start_process(self, **kwargs):
+        if not self.start_calls and self.start_error is None:
+            self.start_error = RuntimeError("Server disconnected")
+            raise self.start_error
+        self.start_error = None
+        self.start_calls.append(kwargs)
+        return StubLogRecord(77)
+
+
+def test_si_la_fila_no_se_creo_al_empezar_se_crea_al_cerrar() -> None:
+    # Antes, una caida de Supabase en el arranque hacia que la corrida entera
+    # terminara sin dejar rastro: log_record_id quedaba None y tanto los
+    # updates como el cierre se saltaban por el `is None`.
+    log_service = _LogQueSeRecupera()
+    site = StubCompincheSite(
+        SiteExecutionResult(
+            success=True,
+            message="Proceso completado.",
+            final_status="success",
+            phase="final_result",
+        )
+    )
+    service = ProcessService(
+        log_service_factory=build_log_service_factory(log_service),
+        local_config_service=StubLocalConfigService(),
+        compinche_site=site,
+        paripe_site=StubParipeSite(
+            SiteExecutionResult(success=True, message="x", final_status="success", phase="final_result")
+        ),
+    )
+
+    resultado = service.execute(_peticion())
+
+    assert resultado.success is True
+    assert resultado.process_log_id == 77, "la corrida no puede quedar invisible"
+    assert log_service.finish_calls, "y la fila tiene que quedar cerrada"
+    assert log_service.finish_calls[-1][1]["final_status"] == "success"
+
+
+def test_si_el_cierre_falla_se_reintenta_con_un_cliente_nuevo(monkeypatch) -> None:
+    # El fallo tipico: el hilo de drenaje sigue dentro de un update con el
+    # candado tomado, los 5 s se agotan y la fila se queda en "started" y sin
+    # finished_at para siempre, mientras el resultado local dice exito.
+    log_service = StubLogService()
+    log_service.finish_error = TimeoutError("el cliente sigue ocupado")
+    limpio = StubLogService()
+    monkeypatch.setattr("services.process_service.LogService", lambda: limpio)
+
+    site = StubCompincheSite(
+        SiteExecutionResult(
+            success=True,
+            message="Proceso completado.",
+            final_status="success",
+            phase="final_result",
+        )
+    )
+    service = ProcessService(
+        log_service_factory=build_log_service_factory(log_service),
+        local_config_service=StubLocalConfigService(),
+        compinche_site=site,
+        paripe_site=StubParipeSite(
+            SiteExecutionResult(success=True, message="x", final_status="success", phase="final_result")
+        ),
+    )
+
+    resultado = service.execute(_peticion())
+
+    assert limpio.finish_calls, "el reintento con cliente limpio debe ocurrir"
+    assert limpio.finish_calls[-1][1]["final_status"] == "success"
+    assert resultado.process_log_id == 77, "la fila cerrada es la que vale"

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import os
+import threading
 from pathlib import Path
 
 from config.paths import DEFAULT_LOCAL_DATA_DIR
@@ -12,6 +14,9 @@ class LastResultService:
         self._root_dir = (root_dir or DEFAULT_LOCAL_DATA_DIR / "results").resolve()
         self._latest_general_path = self._root_dir / "latest_general.json"
         self._latest_success_path = self._root_dir / "latest_success.json"
+        # Un mismo servicio lo comparten los dos paneles (process_service lo
+        # pasa a ambos), asi que dos corridas pueden terminar a la vez.
+        self._candado = threading.Lock()
 
     def save_result(self, result: ProcessExecutionResult) -> LastResultSnapshot:
         snapshot = LastResultSnapshot(
@@ -28,10 +33,11 @@ class LastResultService:
             success=result.success,
             message=result.message,
         )
-        self._root_dir.mkdir(parents=True, exist_ok=True)
-        self._write_snapshot(self._latest_general_path, snapshot)
-        if snapshot.success:
-            self._write_snapshot(self._latest_success_path, snapshot)
+        with self._candado:
+            self._root_dir.mkdir(parents=True, exist_ok=True)
+            self._write_snapshot(self._latest_general_path, snapshot)
+            if snapshot.success:
+                self._write_snapshot(self._latest_success_path, snapshot)
         return snapshot
 
     def load_latest(self, *, only_successful: bool = False) -> LastResultSnapshot | None:
@@ -48,4 +54,15 @@ class LastResultService:
             return None
 
     def _write_snapshot(self, target: Path, snapshot: LastResultSnapshot) -> None:
-        target.write_text(snapshot.model_dump_json(indent=2), encoding="utf-8")
+        """Escribe el fichero entero o no lo toca: nunca a medias.
+
+        Antes era un `write_text` directo. Si la app se cerraba a mitad de la
+        escritura, el JSON quedaba truncado; `load_latest` se traga la
+        excepcion y devuelve None, asi que el panel de "ultimo resultado" se
+        quedaba vacio sin decir por que. `os.replace` es atomico dentro del
+        mismo sistema de ficheros: o esta el nuevo, o sigue el anterior.
+        """
+
+        temporal = target.with_suffix(target.suffix + ".tmp")
+        temporal.write_text(snapshot.model_dump_json(indent=2), encoding="utf-8")
+        os.replace(temporal, target)
