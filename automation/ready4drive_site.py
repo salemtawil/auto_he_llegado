@@ -1327,109 +1327,10 @@ class Ready4DriveSite(BaseSite):
             return True
         return False
 
-    def _press_borrowed_account(self, root: Page | Frame | Locator, *, borrowed_title: Locator | None = None) -> None:
-        borrowed_title = borrowed_title or self._require_borrowed_account_title(root)
-        borrowed_container = self._find_borrowed_account_card(borrowed_title)
-        if borrowed_container is None:
-            raise Ready4DriveFlowError("account_select", "Se encontro 'Cuenta prestada', pero no se pudo resolver su contenedor clickable padre.")
-        borrowed_control = self._find_borrowed_account_control(borrowed_container, borrowed_title)
-        if self._try_select_borrowed_account(borrowed_container, borrowed_control):
-            if self._wait_for_borrowed_account_selected(root, borrowed_container, borrowed_control=borrowed_control, timeout_ms=2_500):
-                return
-            raise Ready4DriveFlowError("account_select", "Click enviado pero sin cambio real de selección en 'Cuenta prestada'.")
-        raise Ready4DriveFlowError("account_select", "Se encontro la tarjeta de 'Cuenta prestada', pero no se pudo enviar un click valido sobre su contenedor o control real.")
 
-    def _find_borrowed_account_card(self, title_locator: Locator) -> Locator | None:
-        card_candidates = (
-            "xpath=ancestor::label[1]",
-            "xpath=ancestor::*[@role='radio'][1]",
-            "xpath=ancestor::*[@role='button'][1]",
-            "xpath=ancestor::button[1]",
-            "xpath=ancestor::*[contains(@class, 'cursor-pointer')][1]",
-            "xpath=ancestor::*[contains(@class, 'rounded')][1]",
-            "xpath=ancestor::div[contains(@class, 'border')][1]",
-            "xpath=ancestor::div[2]",
-            "xpath=ancestor::div[1]",
-        )
-        for xpath in card_candidates:
-            try:
-                candidate = title_locator.locator(xpath).first
-                candidate.wait_for(state="visible", timeout=300)
-                candidate_text = self._normalized_locator_text(candidate)
-                if self._contains_any(candidate_text, self._selectors.borrowed_account_texts):
-                    if self._contains_any(candidate_text, self._selectors.borrowed_account_subtitles):
-                        return candidate
-                    return candidate
-            except Exception:
-                continue
-        return self._find_clickable_container_from_title(title_locator)
 
-    def _find_borrowed_account_control(self, card_locator: Locator, title_locator: Locator) -> Locator | None:
-        control_selectors = (
-            "input[type='radio']",
-            "input[type='checkbox']",
-            "[role='radio']",
-            "[data-checked]",
-            "[aria-checked]",
-            "[aria-selected]",
-            "[data-state]",
-        )
-        for root in (card_locator, title_locator):
-            for selector in control_selectors:
-                try:
-                    locator = root.locator(selector).first
-                    locator.wait_for(state="attached", timeout=200)
-                    return locator
-                except Exception:
-                    continue
-        associated_input = self._find_associated_input_from_label(card_locator)
-        if associated_input is not None:
-            return associated_input
-        return None
 
-    def _find_associated_input_from_label(self, card_locator: Locator) -> Locator | None:
-        try:
-            label = card_locator.locator("xpath=ancestor-or-self::label[1]").first
-            label.wait_for(state="attached", timeout=200)
-        except Exception:
-            return None
-        try:
-            associated_id = label.get_attribute("for") or ""
-        except Exception:
-            associated_id = ""
-        if associated_id:
-            try:
-                page = label.page
-                locator = page.locator(f"#{associated_id}").first
-                locator.wait_for(state="attached", timeout=200)
-                return locator
-            except Exception:
-                pass
-        for selector in ("input[type='radio']", "input[type='checkbox']"):
-            try:
-                locator = label.locator(selector).first
-                locator.wait_for(state="attached", timeout=200)
-                return locator
-            except Exception:
-                continue
-        return None
 
-    def _try_select_borrowed_account(self, card_locator: Locator, control_locator: Locator | None) -> bool:
-        candidates: list[Locator] = [card_locator]
-        immediate_parent = self._try_locator(card_locator, "xpath=..")
-        if immediate_parent is not None:
-            candidates.append(immediate_parent)
-        label_candidate = self._try_locator(card_locator, "xpath=ancestor-or-self::label[1]")
-        if label_candidate is not None:
-            candidates.append(label_candidate)
-        if control_locator is not None:
-            candidates.append(control_locator)
-
-        for index, candidate in enumerate(candidates):
-            use_force = index == len(candidates) - 1
-            if self._try_click_candidate(candidate, use_force=use_force):
-                return True
-        return False
 
     def _try_locator(self, locator: Locator, selector: str) -> Locator | None:
         try:
@@ -1836,19 +1737,6 @@ class Ready4DriveSite(BaseSite):
             progress_callback=progress_callback,
         )
 
-    def _release_reserved_photo(
-        self,
-        reserved_photo: ReservedPhoto,
-        *,
-        progress_callback: ProgressCallback | None = None,
-    ) -> None:
-        """Reservada pero aun sin subir: vuelve al pool."""
-
-        self._cleanup_reserved_photo(
-            reserved_photo,
-            uploaded=False,
-            progress_callback=progress_callback,
-        )
 
     def _cleanup_after_failed_attempt(
         self,
@@ -2339,9 +2227,6 @@ class Ready4DriveSite(BaseSite):
             return True
         return False
 
-    def _processing_phase_visible_guard(self, root: Page | Frame | Locator) -> bool:
-        signals = self._collect_processing_signals(root)
-        return any(signals.values()) and not self._selfie_phase_visible(root)
 
     def _selfie_signal_diagnostics(self, root: Page | Frame | Locator) -> dict[str, int | bool]:
         return {
@@ -2884,8 +2769,6 @@ class Ready4DriveSite(BaseSite):
     def _fill_first(self, root: Page | Frame | Locator, selectors: tuple[str, ...], value: str) -> None:
         self._first_locator(root, selectors).fill(value)
 
-    def _click_first(self, root: Page | Frame | Locator, selectors: tuple[str, ...]) -> None:
-        self._first_locator(root, selectors).click()
 
     def _wait_for_enabled(self, locator: Locator, *, timeout_ms: int, phase: str, error_message: str) -> None:
         deadline = monotonic() + (timeout_ms / 1000)
@@ -2944,26 +2827,7 @@ class Ready4DriveSite(BaseSite):
             pass
         self._click_locator_resilient(locator, phase=phase, error_message=error_message)
 
-    def _click_by_text_variants(self, root: Page | Frame | Locator, texts: tuple[str, ...]) -> bool:
-        for selector in self._selectors_for_texts(texts):
-            locator = root.locator(selector).first
-            try:
-                locator.wait_for(state="visible", timeout=500)
-                self._click_locator_resilient(
-                    locator,
-                    phase="text_click",
-                    error_message=f"No se pudo presionar un control equivalente a: {', '.join(texts)}.",
-                )
-                return True
-            except Exception:
-                continue
-        return self._click_best_text_candidate(root, texts)
 
-    def _selectors_for_texts(self, texts: tuple[str, ...]) -> tuple[str, ...]:
-        selectors: list[str] = []
-        for text in texts:
-            selectors.extend((f'button:has-text("{text}")', f'[role="button"]:has-text("{text}")', f'[role="radio"]:has-text("{text}")', f'label:has-text("{text}")', f'div:has-text("{text}")', f'text="{text}"'))
-        return tuple(selectors)
 
     def _find_best_text_candidate(self, root: Page | Frame | Locator, texts: tuple[str, ...]) -> Locator | None:
         candidates = root.locator("button, [role='button'], [role='radio'], [role='option'], label, div")
@@ -3085,105 +2949,12 @@ class Ready4DriveSite(BaseSite):
             pass
         return None
 
-    def _click_best_text_candidate(self, root: Page | Frame | Locator, texts: tuple[str, ...]) -> bool:
-        best_locator = self._find_best_text_candidate(root, texts)
-        if best_locator is None:
-            return False
-        best_locator.click()
-        return True
 
-    def _find_borrowed_account_title(self, root: Page | Frame | Locator) -> Locator | None:
-        candidates = self._borrowed_account_text_candidates(root)
-        for locator in candidates:
-            try:
-                locator.wait_for(state="visible", timeout=500)
-                if self._borrowed_account_subtitle_matches(locator):
-                    return locator
-                return locator
-            except Exception:
-                continue
-        return None
 
-    def _require_borrowed_account_title(self, root: Page | Frame | Locator) -> Locator:
-        borrowed_title = self._find_borrowed_account_title(root)
-        if borrowed_title is None:
-            frame_debug = self._frame_debug_summary(root)
-            raise Ready4DriveFlowError(
-                "account_select",
-                "No se encontro el texto real de 'Cuenta prestada' dentro del frame correcto. "
-                f"{frame_debug}",
-            )
-        return borrowed_title
 
-    def _ensure_borrowed_account_default(self, root: Page | Frame | Locator) -> None:
-        borrowed_title = self._require_borrowed_account_title(root)
-        borrowed_container = self._find_borrowed_account_card(borrowed_title)
-        if borrowed_container is None:
-            raise Ready4DriveFlowError("account_select", "Se encontro 'Cuenta prestada', pero no su contenedor principal para validar el estado por defecto.")
-        borrowed_control = self._find_borrowed_account_control(root, borrowed_container, borrowed_title)
-        if borrowed_control is None:
-            raise Ready4DriveFlowError("account_select", "Se encontro 'Cuenta prestada', pero no el control real para validar que quede activa por defecto.")
-        own_title = self._find_best_text_candidate(root, self._selectors.own_account_texts)
-        own_container = self._find_borrowed_account_card(own_title) if own_title is not None else None
-        own_control = self._find_own_account_control(root, own_container, own_title)
-        if self._wait_for_borrowed_account_selected(
-            root,
-            borrowed_container,
-            borrowed_control=borrowed_control,
-            own_container=own_container,
-            own_control=own_control,
-            timeout_ms=900,
-        ):
-            return
-        raise Ready4DriveFlowError(
-            "account_select",
-            "El sitio no llego con 'Cuenta prestada' seleccionada por defecto. "
-            f"Borrowed={self._selection_state_summary(borrowed_container, borrowed_control)} | "
-            f"Own={self._selection_state_summary(own_container, own_control)}",
-        )
 
-    def _borrowed_account_text_candidates(self, root: Page | Frame | Locator) -> list[Locator]:
-        candidates: list[Locator] = []
-        for text in self._selectors.borrowed_account_texts:
-            candidates.extend(
-                (
-                    root.get_by_text(text, exact=True).first,
-                    root.locator(f"text={text}").first,
-                    root.locator(f"span:has-text('{text}')").first,
-                    root.locator(f"*").filter(has_text=text).first,
-                )
-            )
-        return candidates
 
-    def _borrowed_account_subtitle_matches(self, title_locator: Locator) -> bool:
-        try:
-            parent_stack = title_locator.locator("xpath=ancestor::span[contains(@class, 'flex')][1]").first
-            parent_stack.wait_for(state="attached", timeout=300)
-        except Exception:
-            return False
-        normalized_text = self._normalized_locator_text(parent_stack)
-        return self._contains_any(normalized_text, self._selectors.borrowed_account_subtitles)
 
-    def _find_clickable_container_from_title(self, title_locator: Locator) -> Locator | None:
-        candidate_xpaths = (
-            "xpath=ancestor::*[@role='button'][1]",
-            "xpath=ancestor::button[1]",
-            "xpath=ancestor::label[1]",
-            "xpath=ancestor::*[@tabindex][1]",
-            "xpath=ancestor::*[contains(@class, 'cursor-pointer')][1]",
-            "xpath=ancestor::*[contains(@class, 'rounded')][1]",
-            "xpath=ancestor::div[1]",
-        )
-        for xpath in candidate_xpaths:
-            try:
-                candidate = title_locator.locator(xpath).first
-                candidate.wait_for(state="visible", timeout=300)
-                candidate_text = self._normalized_locator_text(candidate)
-                if self._contains_any(candidate_text, self._selectors.borrowed_account_texts):
-                    return candidate
-            except Exception:
-                continue
-        return None
 
     def _require_photo_input(self, root: Page | Frame | Locator, *, timeout_ms: int) -> Locator:
         file_input = self._find_photo_input(root, timeout_ms=min(timeout_ms, 4_000))
@@ -3197,13 +2968,6 @@ class Ready4DriveSite(BaseSite):
             raise Ready4DriveFlowError("modal_continue", "No se pudo localizar el boton equivalente a 'Continuar' dentro del frame correcto.")
         return continue_button
 
-    def _wait_for_any_text(self, root: Page | Frame | Locator, texts: tuple[str, ...], timeout_ms: int) -> bool:
-        deadline = monotonic() + (timeout_ms / 1000)
-        while monotonic() < deadline:
-            if self._has_any_text_now(root, texts):
-                return True
-            self._wait_interval(root, self._POLL_MS)
-        return False
 
     def _has_any_text_now(self, root: Page | Frame | Locator, texts: tuple[str, ...]) -> bool:
         return self._contains_any(self._normalized_root_text(root), texts)
@@ -3249,218 +3013,15 @@ class Ready4DriveSite(BaseSite):
                 parts.append(self._normalize_text(value))
         return " ".join(part for part in parts if part).strip()
 
-    def _wait_for_borrowed_account_selected(self, root: Page | Frame | Locator, locator: Locator, *, borrowed_control: Locator | None = None, timeout_ms: int) -> bool:
-        deadline = monotonic() + (timeout_ms / 1000)
-        while monotonic() < deadline:
-            if borrowed_control is not None and self._locator_looks_selected(borrowed_control):
-                return True
-            if self._locator_looks_selected(locator):
-                return True
-            own_option = self._find_best_text_candidate(root, self._selectors.own_account_texts)
-            if own_option is not None and self._locator_looks_unselected(own_option):
-                if borrowed_control is not None and self._locator_looks_selected(borrowed_control):
-                    return True
-                if self._locator_looks_selected(locator):
-                    return True
-            if borrowed_control is not None and self._locator_has_check_marker(locator, borrowed_control):
-                return True
-            if self._has_any_selector_now(root, self._selectors.photo_inputs):
-                return True
-            self._wait_interval(root, self._POLL_MS)
-        return False
 
-    def _locator_has_check_marker(self, container: Locator, control: Locator) -> bool:
-        if self._locator_looks_selected(control):
-            return True
-        try:
-            classes = (container.get_attribute("class") or "").lower()
-        except Exception:
-            classes = ""
-        if any(token in classes for token in ("ring", "border-", "outline", "selected", "active", "checked")):
-            return True
-        try:
-            if container.locator("svg, [data-state='checked'], [aria-hidden='false']").count() > 0 and self._locator_looks_selected(control):
-                return True
-        except Exception:
-            pass
-        return False
 
-    def _press_borrowed_account(self, root: Page | Frame | Locator, *, borrowed_title: Locator | None = None) -> None:
-        borrowed_title = borrowed_title or self._require_borrowed_account_title(root)
-        borrowed_container = self._find_borrowed_account_card(borrowed_title)
-        if borrowed_container is None:
-            raise Ready4DriveFlowError("account_select", "Se encontro 'Cuenta prestada', pero no se pudo resolver su contenedor clickable padre.")
-        borrowed_control = self._find_borrowed_account_control(borrowed_container, borrowed_title)
-        if borrowed_control is None:
-            raise Ready4DriveFlowError("account_select", "Se encontro la tarjeta de 'Cuenta prestada', pero no el control real asociado de seleccion.")
-        own_title = self._find_best_text_candidate(root, self._selectors.own_account_texts)
-        own_container = self._find_borrowed_account_card(own_title) if own_title is not None else None
-        own_control = self._find_borrowed_account_control(own_container, own_title) if own_container is not None and own_title is not None else None
-        if self._wait_for_borrowed_account_selected(
-            root,
-            borrowed_container,
-            borrowed_control=borrowed_control,
-            own_container=own_container,
-            own_control=own_control,
-            timeout_ms=700,
-        ):
-            return
-        selection_error = self._select_borrowed_account_control(
-            root,
-            borrowed_container=borrowed_container,
-            borrowed_control=borrowed_control,
-            own_container=own_container,
-            own_control=own_control,
-        )
-        if selection_error is None:
-            return
-        raise Ready4DriveFlowError("account_select", selection_error)
 
-    def _select_borrowed_account_control(
-        self,
-        root: Page | Frame | Locator,
-        *,
-        borrowed_container: Locator,
-        borrowed_control: Locator,
-        own_container: Locator | None,
-        own_control: Locator | None,
-    ) -> str | None:
-        attempts = (
-            ("contenedor clickable", borrowed_container, "click"),
-            ("label asociado", self._try_locator(borrowed_container, "xpath=ancestor-or-self::label[1]"), "click"),
-            ("control real", borrowed_control, "click"),
-            ("control real", borrowed_control, "set_checked"),
-            ("control real", borrowed_control, "press"),
-            ("control real", borrowed_control, "force"),
-        )
-        last_error = "Se encontro el control real de 'Cuenta prestada', pero no cambio su estado."
-        for target_name, candidate, mode in attempts:
-            if candidate is None:
-                continue
-            failure = self._activate_selection_target(candidate, mode=mode, target_name=target_name)
-            if failure is not None:
-                last_error = failure
-                continue
-            if self._wait_for_borrowed_account_selected(
-                root,
-                borrowed_container,
-                borrowed_control=borrowed_control,
-                own_container=own_container,
-                own_control=own_control,
-                timeout_ms=1_200,
-            ):
-                return None
-            last_error = (
-                "Se encontro el control real de 'Cuenta prestada', pero no cambio su estado. "
-                f"Borrowed={self._selection_state_summary(borrowed_container, borrowed_control)} | "
-                f"Own={self._selection_state_summary(own_container, own_control)}"
-            )
-        return last_error
 
-    def _activate_selection_target(self, locator: Locator, *, mode: str, target_name: str) -> str | None:
-        try:
-            locator.scroll_into_view_if_needed(timeout=700)
-        except Exception:
-            pass
-        try:
-            if mode == "click":
-                locator.click(timeout=1_000)
-                return None
-            if mode == "hover_click":
-                locator.hover(timeout=700)
-                locator.click(timeout=1_000)
-                return None
-            if mode == "force":
-                locator.click(timeout=1_000, force=True)
-                return None
-            if mode == "press":
-                locator.press("Space")
-                return None
-            if mode == "set_checked":
-                control_type = (locator.get_attribute("type") or "").strip().lower()
-                role = (locator.get_attribute("role") or "").strip().lower()
-                if control_type not in {"radio", "checkbox"} and role != "radio":
-                    return f"Se encontro el control real, pero no admite set/check programatico ({target_name})."
-                locator.set_checked(True, timeout=1_000)
-                return None
-        except Exception as exc:
-            message = str(exc).lower()
-            if "intercept" in message:
-                return f"El click fue interceptado al intentar activar {target_name} de 'Cuenta prestada'."
-            return f"No se pudo activar {target_name} de 'Cuenta prestada': {exc}"
-        return f"No se pudo activar {target_name} de 'Cuenta prestada'."
 
-    def _wait_for_borrowed_account_selected(
-        self,
-        root: Page | Frame | Locator,
-        locator: Locator,
-        *,
-        borrowed_control: Locator | None = None,
-        own_container: Locator | None = None,
-        own_control: Locator | None = None,
-        timeout_ms: int,
-    ) -> bool:
-        deadline = monotonic() + (timeout_ms / 1000)
-        while monotonic() < deadline:
-            borrowed_selected = False
-            if borrowed_control is not None and self._locator_looks_selected(borrowed_control):
-                borrowed_selected = True
-            elif self._locator_looks_selected(locator):
-                borrowed_selected = True
-            own_unselected = True
-            if own_control is not None:
-                own_unselected = self._locator_looks_unselected(own_control)
-            elif own_container is not None:
-                own_unselected = self._locator_looks_unselected(own_container)
-            if borrowed_selected and own_unselected:
-                return True
-            if borrowed_selected and own_control is None and own_container is None:
-                return True
-            self._wait_interval(root, self._POLL_MS)
-        return False
 
-    def _selection_state_summary(self, container: Locator | None, control: Locator | None) -> str:
-        parts: list[str] = []
-        if control is not None:
-            parts.append(f"control={self._selection_signal_snapshot(control)}")
-        if container is not None:
-            parts.append(f"container={self._selection_signal_snapshot(container)}")
-        return " | ".join(parts) if parts else "sin estado visible"
 
-    def _selection_signal_snapshot(self, locator: Locator) -> str:
-        values: list[str] = []
-        try:
-            values.append(f"type={(locator.get_attribute('type') or '').strip().lower() or '-'}")
-        except Exception:
-            pass
-        for attribute in ("role", "aria-checked", "aria-selected", "data-state", "data-checked", "checked"):
-            try:
-                values.append(f"{attribute}={(locator.get_attribute(attribute) or '').strip().lower() or '-'}")
-            except Exception:
-                continue
-        try:
-            values.append(f"checked={locator.is_checked()}")
-        except Exception:
-            pass
-        try:
-            classes = (locator.get_attribute('class') or '').strip().lower()
-            values.append(f"class={classes[:120] or '-'}")
-        except Exception:
-            pass
-        return ", ".join(values)
 
-    def _safe_get_attribute(self, locator: Locator, name: str) -> str | None:
-        try:
-            value = locator.get_attribute(name)
-        except Exception:
-            return None
-        return value
 
-    def _safe_locator_html(self, locator: Locator) -> str:
-        try:
-            return locator.evaluate("node => node.outerHTML || ''")
-        except Exception:
-            return ""
 
     def _wait_for_uploaded_photo(self, root: Page | Frame | Locator, locator: Locator, *, original_filename: str, timeout_ms: int) -> bool:
         deadline = monotonic() + (timeout_ms / 1000)
@@ -3496,383 +3057,23 @@ class Ready4DriveSite(BaseSite):
             self._wait_interval(root, self._POLL_MS)
         return False
 
-    def _locator_looks_selected(self, locator: Locator) -> bool:
-        try:
-            if locator.is_checked():
-                return True
-        except Exception:
-            pass
-        for attribute in ("aria-checked", "aria-selected", "data-state", "data-checked", "checked"):
-            try:
-                value = (locator.get_attribute(attribute) or "").strip().lower()
-            except Exception:
-                value = ""
-            if value in {"true", "checked", "selected", "active", "on"}:
-                return True
-        try:
-            classes = (locator.get_attribute("class") or "").lower()
-        except Exception:
-            classes = ""
-        return any(token in classes for token in ("selected", "checked", "active", "current"))
 
-    def _locator_looks_unselected(self, locator: Locator) -> bool:
-        try:
-            if locator.is_checked():
-                return False
-        except Exception:
-            pass
-        for attribute in ("aria-checked", "aria-selected", "data-state", "data-checked", "checked"):
-            try:
-                value = (locator.get_attribute(attribute) or "").strip().lower()
-            except Exception:
-                value = ""
-            if value in {"false", "unchecked", "off"}:
-                return True
-        try:
-            classes = (locator.get_attribute("class") or "").lower()
-        except Exception:
-            classes = ""
-        return not any(token in classes for token in ("selected", "checked", "active", "current"))
 
-    def _press_borrowed_account(self, root: Page | Frame | Locator, *, borrowed_title: Locator | None = None) -> None:
-        borrowed_title = borrowed_title or self._require_borrowed_account_title(root)
-        borrowed_container = self._find_borrowed_account_card(borrowed_title)
-        if borrowed_container is None:
-            raise Ready4DriveFlowError("account_select", "Se encontro el texto de 'Cuenta prestada', pero no el contenedor clicable real.")
-        radio_diagnostics = self._enumerate_account_radios(root)
-        borrowed_control = self._find_borrowed_account_control(root, borrowed_container, borrowed_title)
-        if borrowed_control is None:
-            raise Ready4DriveFlowError(
-                "account_select",
-                "Se encontro el contenedor de 'Cuenta prestada', pero no el control real asociado. "
-                f"Container={self._locator_debug_summary(borrowed_container)} | Radios={self._format_radio_diagnostics(radio_diagnostics)}",
-            )
-        own_title = self._find_best_text_candidate(root, self._selectors.own_account_texts)
-        own_container = self._find_borrowed_account_card(own_title) if own_title is not None else None
-        own_control = self._find_own_account_control(root, own_container, own_title)
-        if self._wait_for_borrowed_account_selected(
-            root,
-            borrowed_container,
-            borrowed_control=borrowed_control,
-            own_container=own_container,
-            own_control=own_control,
-            timeout_ms=700,
-        ):
-            return
-        error_message = self._select_borrowed_account_control(
-            root,
-            borrowed_container=borrowed_container,
-            borrowed_control=borrowed_control,
-            own_container=own_container,
-            own_control=own_control,
-        )
-        if error_message is None:
-            return
-        raise Ready4DriveFlowError(
-            "account_select",
-            f"{error_message} | Radios={self._format_radio_diagnostics(radio_diagnostics)} | Clicked={self._locator_debug_summary(borrowed_control)}",
-        )
 
-    def _find_borrowed_account_card(self, title_locator: Locator | None) -> Locator | None:
-        if title_locator is None:
-            return None
-        stack_locator = self._find_borrowed_account_stack(title_locator)
-        candidate_xpaths = (
-            "xpath=ancestor::*[@data-checked][1]",
-            "xpath=ancestor::*[contains(@class, 'group')][1]",
-            "xpath=ancestor::label[1]",
-            "xpath=ancestor::*[@role='radio'][1]",
-            "xpath=ancestor::*[@role='button'][1]",
-            "xpath=ancestor::button[1]",
-            "xpath=ancestor::*[@tabindex][1]",
-            "xpath=ancestor::*[contains(@class, 'cursor-pointer')][1]",
-            "xpath=ancestor::*[contains(@class, 'rounded')][1]",
-            "xpath=ancestor::*[contains(@class, 'border')][1]",
-            "xpath=ancestor::div[1]",
-            "xpath=ancestor::div[2]",
-            "xpath=ancestor::div[3]",
-        )
-        for base in (stack_locator, title_locator):
-            for xpath in candidate_xpaths:
-                try:
-                    candidate = base.locator(xpath).first
-                    candidate.wait_for(state="visible", timeout=250)
-                    candidate_text = self._normalized_locator_text(candidate)
-                    if not self._contains_any(candidate_text, self._selectors.borrowed_account_texts):
-                        continue
-                    if candidate.locator("span.pointer-events-none").count() > 0:
-                        return candidate
-                    if self._contains_any(candidate_text, self._selectors.borrowed_account_subtitles):
-                        return candidate
-                    if candidate.locator("input, [role='radio'], [aria-checked], [aria-selected], [data-checked]").count() > 0:
-                        return candidate
-                except Exception:
-                    continue
-        return self._find_clickable_container_from_title(title_locator)
 
-    def _find_borrowed_account_stack(self, title_locator: Locator) -> Locator:
-        for xpath in (
-            "xpath=ancestor::span[contains(@class, 'flex') and contains(@class, 'flex-col')][1]",
-            "xpath=ancestor::span[contains(@class, 'flex')][1]",
-            "xpath=..",
-        ):
-            try:
-                candidate = title_locator.locator(xpath).first
-                candidate.wait_for(state="attached", timeout=200)
-                return candidate
-            except Exception:
-                continue
-        return title_locator
 
-    def _find_borrowed_account_control(self, root: Page | Frame | Locator, card_locator: Locator | None, title_locator: Locator | None) -> Locator | None:
-        if card_locator is None or title_locator is None:
-            return None
-        root_radio = self._find_account_radio(root, expected_kind="borrowed")
-        if root_radio is not None:
-            return root_radio
-        control_selectors = (
-            "input[type='radio']",
-            "input[type='checkbox']",
-            "[role='radio']",
-            "[aria-checked]",
-            "[aria-selected]",
-            "[data-state]",
-        )
-        for root in (card_locator, self._find_borrowed_account_stack(title_locator), title_locator):
-            for selector in control_selectors:
-                try:
-                    locator = root.locator(selector).first
-                    locator.wait_for(state="attached", timeout=200)
-                    return locator
-                except Exception:
-                    continue
-        return self._find_associated_input_from_label(card_locator)
 
-    def _find_own_account_control(self, root: Page | Frame | Locator, card_locator: Locator | None, title_locator: Locator | None) -> Locator | None:
-        root_radio = self._find_account_radio(root, expected_kind="own")
-        if root_radio is not None:
-            return root_radio
-        if card_locator is None or title_locator is None:
-            return None
-        for selector in ("[role='radio']", "input[type='radio']", "[aria-checked]"):
-            try:
-                locator = card_locator.locator(selector).first
-                locator.wait_for(state="attached", timeout=200)
-                return locator
-            except Exception:
-                continue
-        return self._find_associated_input_from_label(card_locator)
 
-    def _find_account_radio(self, root: Page | Frame | Locator, *, expected_kind: str) -> Locator | None:
-        radios = root.locator("[role='radio']")
-        count = radios.count()
-        best_locator: Locator | None = None
-        best_score = 0
-        for index in range(count):
-            locator = radios.nth(index)
-            if not self._is_visible(locator):
-                continue
-            score = self._score_account_radio(locator, expected_kind=expected_kind)
-            if score > best_score:
-                best_score = score
-                best_locator = locator
-        return best_locator if best_score > 0 else None
 
-    def _score_account_radio(self, locator: Locator, *, expected_kind: str) -> int:
-        aria_label = self._normalize_text((self._safe_get_attribute(locator, "aria-label") or ""))
-        control_text = self._candidate_text(locator)
-        html = self._normalize_text(self._safe_locator_html(locator))
-        combined = " ".join(part for part in (aria_label, control_text, html) if part)
-        score = 0
-        if expected_kind == "borrowed":
-            if "borrowed-account" in combined:
-                score += 200
-            if "cuenta prestada" in combined or "borrowed account" in combined or "conta emprestada" in combined:
-                score += 120
-            if "own-account" in combined or "cuenta propia" in combined or "own account" in combined:
-                score -= 220
-        else:
-            if "own-account" in combined:
-                score += 200
-            if "cuenta propia" in combined or "own account" in combined or "conta propria" in combined:
-                score += 120
-            if "borrowed-account" in combined or "cuenta prestada" in combined or "borrowed account" in combined:
-                score -= 220
-        return score
 
-    def _enumerate_account_radios(self, root: Page | Frame | Locator) -> list[dict[str, str]]:
-        items: list[dict[str, str]] = []
-        radios = root.locator("[role='radio']")
-        try:
-            count = radios.count()
-        except Exception:
-            return items
-        for index in range(count):
-            locator = radios.nth(index)
-            if not self._is_visible(locator):
-                continue
-            items.append(
-                {
-                    "index": str(index),
-                    "aria_label": self._safe_get_attribute(locator, "aria-label") or "",
-                    "aria_checked": self._safe_get_attribute(locator, "aria-checked") or "",
-                    "id": self._safe_get_attribute(locator, "id") or "",
-                    "text": self._candidate_text(locator)[:120],
-                    "html": self._safe_locator_html(locator)[:180],
-                }
-            )
-        return items
 
-    def _format_radio_diagnostics(self, items: list[dict[str, str]]) -> str:
-        if not items:
-            return "sin radios role=radio visibles"
-        parts: list[str] = []
-        for item in items[:6]:
-            parts.append(
-                f"[{item['index']}] aria-label={item['aria_label'] or '-'} aria-checked={item['aria_checked'] or '-'} "
-                f"id={item['id'] or '-'} text={item['text'] or '-'} html={item['html'] or '-'}"
-            )
-        return " || ".join(parts)
 
-    def _select_borrowed_account_control(
-        self,
-        root: Page | Frame | Locator,
-        *,
-        borrowed_container: Locator,
-        borrowed_control: Locator,
-        own_container: Locator | None,
-        own_control: Locator | None,
-    ) -> str | None:
-        attempts = (
-            ("control real", borrowed_control, "click"),
-            ("control real", borrowed_control, "hover_click"),
-            ("contenedor clicable", borrowed_container, "click"),
-            ("control real", borrowed_control, "click"),
-            ("control real", borrowed_control, "set_checked"),
-            ("control real", borrowed_control, "press"),
-            ("control real", borrowed_control, "click"),
-        )
-        last_error = "Se encontro el control real de 'Cuenta prestada', pero aria-checked no cambio a true."
-        for target_name, candidate, mode in attempts:
-            if candidate is None:
-                continue
-            before_checked = self._read_aria_checked(borrowed_control)
-            failure = self._activate_selection_target(candidate, mode=mode, target_name=target_name)
-            if failure is not None:
-                last_error = f"{failure} | aria-checked antes={before_checked or '-'}"
-                continue
-            self._wait_interval(root, 250)
-            if self._wait_for_borrowed_account_selected(root, borrowed_container, borrowed_control=borrowed_control, own_container=own_container, own_control=own_control, timeout_ms=900):
-                return None
-            after_checked = self._read_aria_checked(borrowed_control)
-            last_error = (
-                "Se encontro el control real, pero no cambio aria-checked a true. "
-                f"aria-checked antes={before_checked or '-'} | aria-checked despues={after_checked or '-'} | "
-                f"Borrowed={self._selection_state_summary(borrowed_container, borrowed_control)} | "
-                f"Own={self._selection_state_summary(own_container, own_control)} | "
-                f"Container={self._locator_debug_summary(borrowed_container)}"
-            )
-        return last_error
 
-    def _wait_for_borrowed_account_selected(
-        self,
-        root: Page | Frame | Locator,
-        locator: Locator,
-        *,
-        borrowed_control: Locator | None = None,
-        own_container: Locator | None = None,
-        own_control: Locator | None = None,
-        timeout_ms: int,
-    ) -> bool:
-        deadline = monotonic() + (timeout_ms / 1000)
-        while monotonic() < deadline:
-            borrowed_selected = borrowed_control is not None and self._read_aria_checked(borrowed_control) == "true"
-            own_unselected = True
-            if own_control is not None:
-                own_unselected = self._read_aria_checked(own_control) in {"", "false", None}
-            elif own_container is not None:
-                own_unselected = self._locator_looks_unselected(own_container)
-            if borrowed_selected and own_unselected:
-                return True
-            if borrowed_selected and own_control is None and own_container is None:
-                return True
-            self._wait_interval(root, self._POLL_MS)
-        return False
 
-    def _read_aria_checked(self, locator: Locator | None) -> str | None:
-        if locator is None:
-            return None
-        try:
-            value = (locator.get_attribute("aria-checked") or "").strip().lower()
-        except Exception:
-            return None
-        return value or None
 
-    def _locator_debug_summary(self, locator: Locator) -> str:
-        parts: list[str] = []
-        for attribute in ("tagName", "role", "class", "aria-checked", "aria-selected", "data-state", "data-checked"):
-            try:
-                if attribute == "tagName":
-                    value = locator.evaluate("node => node.tagName.toLowerCase()")
-                else:
-                    value = locator.get_attribute(attribute)
-            except Exception:
-                value = None
-            if value:
-                parts.append(f"{attribute}={str(value)[:120]}")
-        try:
-            html = locator.evaluate("node => node.outerHTML.slice(0, 280)")
-            if html:
-                parts.append(f"html={html}")
-        except Exception:
-            pass
-        return " | ".join(parts) if parts else "sin resumen html"
 
-    def _frame_debug_summary(self, root: Page | Frame | Locator) -> str:
-        if isinstance(root, Locator):
-            return f"Contexto locator. {self._locator_debug_summary(root)}"
-        match_count = self._count_borrowed_account_matches(root)
-        snippets = ", ".join(self._visible_text_snippets(root, limit=6)) or "sin textos visibles"
-        if isinstance(root, Page):
-            return f"page_url={root.url} | cuenta_prestada_matches={match_count} | textos={snippets}"
-        frame_url = (getattr(root, "url", "") or "").strip()
-        frame_title = self._frame_title(root)
-        return (
-            f"frame_url={frame_url or '-'} | frame_title={frame_title or '-'} | "
-            f"frame_accessible=True | cuenta_prestada_matches={match_count} | textos={snippets}"
-        )
 
-    def _count_borrowed_account_matches(self, root: Page | Frame | Locator) -> int:
-        total = 0
-        for text in self._selectors.borrowed_account_texts:
-            for locator in (
-                root.get_by_text(text, exact=True),
-                root.locator(f"text={text}"),
-                root.locator(f"span:has-text('{text}')"),
-                root.locator("*").filter(has_text=text),
-            ):
-                try:
-                    total = max(total, locator.count())
-                except Exception:
-                    continue
-        return total
 
-    def _visible_text_snippets(self, root: Page | Frame | Locator, *, limit: int) -> list[str]:
-        if isinstance(root, Locator):
-            normalized = self._normalized_locator_text(root)
-            return [normalized] if normalized else []
-        try:
-            lines = root.locator("body").inner_text(timeout=600).splitlines()
-        except Exception:
-            return []
-        snippets: list[str] = []
-        for line in lines:
-            compact = self._normalize_text(line)
-            if compact:
-                snippets.append(compact)
-            if len(snippets) >= limit:
-                break
-        return snippets
 
     def _locator_has_uploaded_file(self, locator: Locator) -> bool:
         try:
@@ -4135,20 +3336,6 @@ class Ready4DriveSite(BaseSite):
         else:
             root.wait_for_timeout(milliseconds)
 
-    def _read_labeled_value(self, roots: tuple[Page | Frame | Locator, ...], labels: tuple[str, ...]) -> str:
-        for root in roots:
-            for label in labels:
-                containers = (root.locator(f'text="{label}"').first, root.locator(f'[aria-label*="{label}" i]').first)
-                for container in containers:
-                    try:
-                        container.wait_for(state="visible", timeout=600)
-                        text = container.locator("xpath=..").inner_text().strip()
-                        if ":" in text:
-                            return text.split(":", maxsplit=1)[1].strip() or "N/A"
-                        return text or "N/A"
-                    except Exception:
-                        continue
-        raise Ready4DriveFlowError("block_read", f"No se pudo leer el valor del bloque para etiquetas: {', '.join(labels)}")
 
     @staticmethod
     def _use_extension_engine(local_config: LocalConfig, request: ProcessExecutionRequest) -> bool:

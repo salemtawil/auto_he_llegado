@@ -343,10 +343,6 @@ class ParipeSite(BaseSite):
                 return value
         return ""
 
-    def _snapshot_contains_block_details(self, snapshot_text: str) -> bool:
-        payment, station, schedule, duration = self._read_block_details_from_snapshot_text(snapshot_text)
-        signals = (payment != "N/A", station != "N/A", schedule != "N/A", duration != "N/A")
-        return sum(1 for enabled in signals if enabled) >= 3
 
     def _read_block_details_for_result(
         self,
@@ -1297,97 +1293,8 @@ class ParipeSite(BaseSite):
             page.wait_for_timeout(self._SHORT_WAIT_MS)
         return "timeout"
 
-    def _ensure_borrowed_account_selected(
-        self,
-        page: Page,
-        *,
-        timeout_ms: int,
-        progress_callback: ProgressCallback | None = None,
-    ) -> None:
-        borrowed = self._find_button_by_labels(page.locator("body").first, self._selectors.borrowed_account_texts)
-        own = self._find_button_by_labels(page.locator("body").first, self._selectors.own_account_texts)
-        switch = page.locator(self._selectors.account_switch).first
-        if borrowed is None or own is None:
-            raise ParipeFlowError("account_selection", "No se localizaron las opciones de cuenta en paripe.io.")
-        borrowed.wait_for(state="visible", timeout=timeout_ms)
-        own.wait_for(state="visible", timeout=timeout_ms)
-        switch.wait_for(state="visible", timeout=timeout_ms)
-        initial_state = self._account_selection_state(page)
-        self.emit_progress(
-            progress_callback,
-            phase="account_selection",
-            message=f"Cuenta detectada inicialmente: {initial_state}.",
-        )
-        if initial_state == "borrowed":
-            return
-        self.emit_progress(
-            progress_callback,
-            phase="account_selection",
-            message="Intento de cambio a Cuenta prestada.",
-        )
-        targets = [borrowed, switch]
-        for target in targets:
-            try:
-                self._click_locator_resilient(
-                    target,
-                    phase="account_selection",
-                    error_message="No se pudo seleccionar Cuenta prestada en paripe.io.",
-                )
-            except Exception:
-                continue
-            try:
-                self._wait_for(
-                    lambda: self._account_selection_state(page) == "borrowed",
-                    timeout_ms=min(timeout_ms, 2_000),
-                    phase="account_selection",
-                    error_message="retry",
-                )
-                break
-            except ParipeFlowError:
-                continue
-        self._wait_for(
-            lambda: self._account_selection_state(page) == "borrowed",
-            timeout_ms=timeout_ms,
-            phase="account_selection",
-            error_message=(
-                "No se pudo confirmar la seleccion de 'Cuenta prestada'. "
-                "Selector fino a revisar: button[role='switch'] y estados visuales de la tarjeta."
-            ),
-        )
-        self.emit_progress(
-            progress_callback,
-            phase="account_selection",
-            message="Validacion final del cambio: Cuenta prestada activa.",
-        )
 
-    def _is_borrowed_account_selected(self, page: Page) -> bool:
-        return self._account_selection_state(page) == "borrowed"
 
-    def _account_selection_state(self, page: Page) -> str:
-        switch = page.locator(self._selectors.account_switch).first
-        borrowed = self._find_button_by_labels(page.locator("body").first, self._selectors.borrowed_account_texts)
-        own = self._find_button_by_labels(page.locator("body").first, self._selectors.own_account_texts)
-        if borrowed is None or own is None:
-            return "unknown"
-        try:
-            switch_state = (switch.get_attribute("aria-checked") or "").strip().lower()
-        except Exception:
-            switch_state = ""
-        borrowed_classes = self._normalize_text(borrowed.get_attribute("class") or "")
-        own_classes = self._normalize_text(own.get_attribute("class") or "")
-        if (
-            switch_state == "false"
-            or "text-primary-500" in borrowed_classes
-            or ("font-semibold" in borrowed_classes and "text-gray-500" in own_classes)
-        ):
-            return "borrowed"
-        if (
-            switch_state == "true"
-            or "text-primary-500" in own_classes
-            or ("font-semibold" in own_classes and "text-gray-500" in borrowed_classes)
-        ):
-            return "own"
-        return "unknown"
 
     def _click_initial_action(self, page: Page, action_name: str, *, timeout_ms: int) -> None:
         action_spec = self._get_action_spec(action_name)
@@ -1545,22 +1452,6 @@ class ParipeSite(BaseSite):
             pass
         return self._find_photo_phase_dialog(page) or previous_dialog
 
-    def _wait_for_selfie_dialog(self, page: Page, *, timeout_ms: int) -> Locator:
-        deadline = monotonic() + (timeout_ms / 1000)
-        while monotonic() < deadline:
-            dialog = page.locator(self._selectors.selfie_dialog).filter(
-                has=page.locator(self._selectors.file_input)
-            ).last
-            try:
-                dialog.wait_for(state="visible", timeout=400)
-                return dialog
-            except Exception:
-                pass
-            page.wait_for_timeout(self._SHORT_WAIT_MS)
-        raise ParipeFlowError(
-            "photo_upload",
-            "No aparecieron el input file y el boton Continuar despues de la accion inicial.",
-        )
 
     def _wait_for_photo_phase(
         self,
@@ -2231,19 +2122,6 @@ class ParipeSite(BaseSite):
             progress_callback=progress_callback,
         )
 
-    def _release_reserved_photo(
-        self,
-        reserved_photo: ReservedPhoto,
-        *,
-        progress_callback: ProgressCallback | None = None,
-    ) -> None:
-        """Reservada pero aun sin subir: vuelve al pool."""
-
-        self._cleanup_reserved_photo(
-            reserved_photo,
-            uploaded=False,
-            progress_callback=progress_callback,
-        )
     def _fast_mark_block_context_from_button(self, page: Page) -> Locator | None:
         if not hasattr(page, "evaluate") or not hasattr(page, "locator"):
             return None
@@ -3986,17 +3864,6 @@ class ParipeSite(BaseSite):
         has_structured_container = signals.get("block_card", False)
         return has_price and has_station and has_time_detail and has_structured_container
 
-    def _count_block_candidates(self, flow_context: Locator, page: Page) -> int:
-        total = 1 if self._context_looks_like_block(flow_context) else 0
-        dialogs = page.locator(self._selectors.details_dialog)
-        try:
-            count = dialogs.count()
-        except Exception:
-            count = 0
-        for index in range(count):
-            if self._context_looks_like_block(dialogs.nth(index)):
-                total += 1
-        return total
 
     def _count_definition_terms(self, context: Locator) -> int:
         try:
@@ -4175,93 +4042,6 @@ class ParipeSite(BaseSite):
         self._record_timeline_event("final_button_candidate_found", **payload)
         return payload
 
-    def _fast_final_button_probe(self, page: Page, *, click: bool) -> dict[str, object]:
-        return page.evaluate(
-            """
-            ({ labels, click }) => {
-                const normalize = (value) =>
-                    (value || "")
-                        .normalize("NFKD")
-                        .replace(/[\\u0300-\\u036f]/g, "")
-                        .replace(/\\s+/g, " ")
-                        .trim()
-                        .toLowerCase();
-                const hasAnyText = (text, tokens) => tokens.some((token) => text.includes(normalize(token)));
-                const normalizedLabels = labels.map((label) => normalize(label)).filter(Boolean);
-                const isVisible = (element) => {
-                    if (!element) {
-                        return false;
-                    }
-                    const style = window.getComputedStyle(element);
-                    if (!style || style.visibility === "hidden" || style.display === "none") {
-                        return false;
-                    }
-                    const rect = element.getBoundingClientRect();
-                    return rect.width >= 2 && rect.height >= 2;
-                };
-                const candidates = Array.from(
-                    document.querySelectorAll("button, [role='button'], input[type='button'], input[type='submit'], a")
-                );
-                let best = null;
-                let bestScore = 0;
-                for (const element of candidates) {
-                    if (!isVisible(element)) {
-                        continue;
-                    }
-                    const text = normalize(
-                        element.innerText || element.value || element.getAttribute("aria-label") || element.textContent || ""
-                    );
-                    if (!text) {
-                        continue;
-                    }
-                    let score = 0;
-                    for (const label of normalizedLabels) {
-                        if (text === label) {
-                            score = Math.max(score, 100);
-                        } else if (text.includes(label)) {
-                            score = Math.max(score, 90);
-                        }
-                    }
-                    if (score > bestScore) {
-                        bestScore = score;
-                        best = { element, text };
-                    }
-                }
-                if (!best) {
-                    return { found: false, clicked: false, text: "" };
-                }
-                const contextElement =
-                    best.element.closest("[role='dialog'][aria-modal='true'], dl, section, article, main") || document.body;
-                const contextText = (contextElement.innerText || "").trim();
-                const normalizedContextText = normalize(contextText);
-                const bbox = best.element.getBoundingClientRect();
-                const hasPrice = hasAnyText(normalizedContextText, ["pago", "precio", "price", "valor", "monto"]);
-                const hasStation = hasAnyText(normalizedContextText, ["estacion", "station", "estacao"]);
-                const hasTimeDetail = hasAnyText(normalizedContextText, ["horario", "hora", "schedule", "time", "fecha", "slot", "duracion", "duration", "horas", "hours"]);
-                const hasBlockCard = contextElement.querySelectorAll("dt").length > 0;
-                const invalidDashboardCandidate = contextElement === document.body && !(hasPrice && hasStation && hasTimeDetail && hasBlockCard);
-                if (click) {
-                    best.element.click();
-                }
-                return {
-                    found: true,
-                    clicked: Boolean(click),
-                    text: (best.element.innerText || best.element.value || best.element.getAttribute("aria-label") || best.element.textContent || "").trim(),
-                    outer_html: (best.element.outerHTML || "").slice(0, 300),
-                    bounding_box: {
-                        x: Math.round(bbox.x),
-                        y: Math.round(bbox.y),
-                        width: Math.round(bbox.width),
-                        height: Math.round(bbox.height),
-                    },
-                    context_text: contextText.slice(0, 500),
-                    url: window.location.href,
-                    invalid_dashboard_candidate: invalidDashboardCandidate,
-                };
-            }
-            """,
-            {"labels": ["He llegado", "I'm here", "I've arrived", "Eu cheguei"], "click": click},
-        )
 
     def _find_final_submit_button(self, context: Locator, page: Page | None = None) -> Locator | None:
         if self._final_submit_resolved():
@@ -4448,12 +4228,6 @@ class ParipeSite(BaseSite):
             return "Paripe.io reporto que no hay bloque disponible para completar el flujo."
         return None
 
-    def _is_same_final_step(self, dialog: Locator) -> bool:
-        try:
-            button = self._find_final_submit_button(dialog)
-            return button is not None and button.is_visible()
-        except Exception:
-            return False
 
     def _result_signature(self, dialog: Locator, page: Page) -> str:
         dialog_text = self._safe_normalized_text(dialog)
