@@ -1629,6 +1629,7 @@ def test_si_el_candado_esta_ocupado_no_se_escribe_por_otra_via() -> None:
     """
 
     import threading as _threading
+    from types import SimpleNamespace as _SimpleNamespace
 
     log_service = StubLogService()
     service = ProcessService(
@@ -1644,7 +1645,7 @@ def test_si_el_candado_esta_ocupado_no_se_escribe_por_otra_via() -> None:
 
     candado = _threading.Lock()
     candado.acquire()  # como si el worker siguiera dentro de un update
-    contexto = SimpleNamespace(log_record_id=77, log_service=log_service)
+    contexto = _SimpleNamespace(log_record_id=77, log_service=log_service)
     avisos: list[str] = []
 
     original = ProcessService._LOG_FINISH_LOCK_TIMEOUT_SECONDS

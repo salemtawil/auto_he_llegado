@@ -3,7 +3,9 @@ from __future__ import annotations
 import json
 import os
 import threading
+from contextlib import suppress
 from pathlib import Path
+from time import sleep
 
 from config.paths import DEFAULT_LOCAL_DATA_DIR
 from core.models import LastResultSnapshot, ProcessExecutionResult
@@ -53,6 +55,13 @@ class LastResultService:
         except Exception:
             return None
 
+    # Reintentos del reemplazo atomico. En Windows, con la carpeta dentro de
+    # OneDrive, `os.replace` sobre un fichero que el sincronizador o el
+    # antivirus tiene abierto devuelve WinError 5 (acceso denegado). Es un
+    # bloqueo de milisegundos: reintentar lo resuelve.
+    _INTENTOS_DE_REEMPLAZO = 4
+    _ESPERA_ENTRE_INTENTOS = 0.05
+
     def _write_snapshot(self, target: Path, snapshot: LastResultSnapshot) -> None:
         """Escribe el fichero entero o no lo toca: nunca a medias.
 
@@ -61,8 +70,24 @@ class LastResultService:
         excepcion y devuelve None, asi que el panel de "ultimo resultado" se
         quedaba vacio sin decir por que. `os.replace` es atomico dentro del
         mismo sistema de ficheros: o esta el nuevo, o sigue el anterior.
+
+        Si el reemplazo no hay manera -OneDrive sosteniendo el fichero mas de
+        lo normal- se escribe directo sobre el destino. Se pierde la garantia
+        de atomicidad en ese caso concreto, pero perderla es mucho menos grave
+        que no guardar el resultado de la corrida.
         """
 
+        contenido = snapshot.model_dump_json(indent=2)
         temporal = target.with_suffix(target.suffix + ".tmp")
-        temporal.write_text(snapshot.model_dump_json(indent=2), encoding="utf-8")
-        os.replace(temporal, target)
+        temporal.write_text(contenido, encoding="utf-8")
+        for intento in range(self._INTENTOS_DE_REEMPLAZO):
+            try:
+                os.replace(temporal, target)
+                return
+            except OSError:
+                if intento == self._INTENTOS_DE_REEMPLAZO - 1:
+                    break
+                sleep(self._ESPERA_ENTRE_INTENTOS)
+        target.write_text(contenido, encoding="utf-8")
+        with suppress(OSError):
+            temporal.unlink()
