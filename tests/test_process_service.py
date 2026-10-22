@@ -1586,14 +1586,14 @@ def test_si_la_fila_no_se_creo_al_empezar_se_crea_al_cerrar() -> None:
     assert log_service.finish_calls[-1][1]["final_status"] == "success"
 
 
-def test_si_el_cierre_falla_se_reintenta_con_un_cliente_nuevo(monkeypatch) -> None:
-    # El fallo tipico: el hilo de drenaje sigue dentro de un update con el
-    # candado tomado, los 5 s se agotan y la fila se queda en "started" y sin
-    # finished_at para siempre, mientras el resultado local dice exito.
-    log_service = StubLogService()
-    log_service.finish_error = TimeoutError("el cliente sigue ocupado")
+def test_si_el_cliente_de_logs_falla_se_reintenta_con_uno_nuevo() -> None:
+    # Si el cliente revienta (conexion rota, sesion caducada), la fila se
+    # quedaba en "started" y sin finished_at para siempre, mientras el
+    # resultado local decia exito.
+    roto = StubLogService()
+    roto.finish_error = RuntimeError("Server disconnected")
     limpio = StubLogService()
-    monkeypatch.setattr("services.process_service.LogService", lambda: limpio)
+    servicios = iter([roto, limpio])
 
     site = StubCompincheSite(
         SiteExecutionResult(
@@ -1604,7 +1604,7 @@ def test_si_el_cierre_falla_se_reintenta_con_un_cliente_nuevo(monkeypatch) -> No
         )
     )
     service = ProcessService(
-        log_service_factory=build_log_service_factory(log_service),
+        log_service_factory=lambda: next(servicios),
         local_config_service=StubLocalConfigService(),
         compinche_site=site,
         paripe_site=StubParipeSite(
@@ -1614,6 +1614,53 @@ def test_si_el_cierre_falla_se_reintenta_con_un_cliente_nuevo(monkeypatch) -> No
 
     resultado = service.execute(_peticion())
 
-    assert limpio.finish_calls, "el reintento con cliente limpio debe ocurrir"
+    assert limpio.finish_calls, "el reintento con un cliente nuevo debe ocurrir"
     assert limpio.finish_calls[-1][1]["final_status"] == "success"
     assert resultado.process_log_id == 77, "la fila cerrada es la que vale"
+
+
+def test_si_el_candado_esta_ocupado_no_se_escribe_por_otra_via() -> None:
+    """Un update en vuelo no puede quedar DESPUES del cierre.
+
+    Si el hilo de drenaje sigue dentro de un update, escribir el cierre por
+    otro cliente haria que ese update aterrizara despues y pisara el estado
+    final con una fase intermedia. Una fila abierta es visiblemente
+    incompleta; una fila pisada miente.
+    """
+
+    import threading as _threading
+
+    log_service = StubLogService()
+    service = ProcessService(
+        log_service_factory=build_log_service_factory(log_service),
+        local_config_service=StubLocalConfigService(),
+        compinche_site=StubCompincheSite(
+            SiteExecutionResult(success=True, message="ok", final_status="success", phase="final_result")
+        ),
+        paripe_site=StubParipeSite(
+            SiteExecutionResult(success=True, message="x", final_status="success", phase="final_result")
+        ),
+    )
+
+    candado = _threading.Lock()
+    candado.acquire()  # como si el worker siguiera dentro de un update
+    contexto = SimpleNamespace(log_record_id=77, log_service=log_service)
+    avisos: list[str] = []
+
+    original = ProcessService._LOG_FINISH_LOCK_TIMEOUT_SECONDS
+    ProcessService._LOG_FINISH_LOCK_TIMEOUT_SECONDS = 0.05
+    try:
+        devuelto = service._cerrar_registro_remoto(  # noqa: SLF001
+            contexto,
+            candado,
+            crear_registro=lambda: StubLogRecord(77),
+            avisar=avisos.append,
+            final_status="success",
+        )
+    finally:
+        ProcessService._LOG_FINISH_LOCK_TIMEOUT_SECONDS = original
+        candado.release()
+
+    assert devuelto is None
+    assert log_service.finish_calls == [], "no debe escribirse saltandose el candado"
+    assert avisos and "queda abierta" in avisos[0]

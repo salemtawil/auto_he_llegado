@@ -38,6 +38,10 @@ def test_request_admin_access_blocks_cancel_from_dialog_factory() -> None:
 def test_app_uploader_does_not_open_window_if_admin_fails(monkeypatch) -> None:
     calls: list[str] = []
 
+    # main() monta el registro a archivo, y eso cambia el logging global
+    # para todo el proceso de pruebas: dejaba propagate=False y
+    # test_ui_confirmations se quedaba sin ver nada con caplog.
+    monkeypatch.setattr(app_uploader, "configure_logging", lambda: None)
     monkeypatch.setattr(app_uploader, "setup_theme", lambda: calls.append("theme"))
     monkeypatch.setattr(app_uploader, "request_app_access", lambda: _session())
     monkeypatch.setattr(app_uploader, "request_admin_access", lambda: False)
@@ -58,6 +62,10 @@ def test_app_uploader_opens_window_if_admin_succeeds(monkeypatch) -> None:
         def mainloop(self) -> None:
             calls.append("mainloop")
 
+    # main() monta el registro a archivo, y eso cambia el logging global
+    # para todo el proceso de pruebas: dejaba propagate=False y
+    # test_ui_confirmations se quedaba sin ver nada con caplog.
+    monkeypatch.setattr(app_uploader, "configure_logging", lambda: None)
     monkeypatch.setattr(app_uploader, "setup_theme", lambda: calls.append("theme"))
     monkeypatch.setattr(app_uploader, "request_app_access", lambda: _session())
     monkeypatch.setattr(app_uploader, "request_admin_access", lambda: True)
@@ -71,6 +79,10 @@ def test_app_uploader_opens_window_if_admin_succeeds(monkeypatch) -> None:
 def test_app_uploader_does_not_request_admin_if_login_fails(monkeypatch) -> None:
     calls: list[str] = []
 
+    # main() monta el registro a archivo, y eso cambia el logging global
+    # para todo el proceso de pruebas: dejaba propagate=False y
+    # test_ui_confirmations se quedaba sin ver nada con caplog.
+    monkeypatch.setattr(app_uploader, "configure_logging", lambda: None)
     monkeypatch.setattr(app_uploader, "setup_theme", lambda: calls.append("theme"))
     monkeypatch.setattr(app_uploader, "request_app_access", lambda: None)
     monkeypatch.setattr(app_uploader, "request_admin_access", lambda: calls.append("admin"))
@@ -84,6 +96,10 @@ def test_app_uploader_does_not_request_admin_if_login_fails(monkeypatch) -> None
 def test_app_uploader_does_not_request_admin_if_user_is_not_admin(monkeypatch) -> None:
     calls: list[str] = []
 
+    # main() monta el registro a archivo, y eso cambia el logging global
+    # para todo el proceso de pruebas: dejaba propagate=False y
+    # test_ui_confirmations se quedaba sin ver nada con caplog.
+    monkeypatch.setattr(app_uploader, "configure_logging", lambda: None)
     monkeypatch.setattr(app_uploader, "setup_theme", lambda: calls.append("theme"))
     monkeypatch.setattr(app_uploader, "request_app_access", lambda: _session(is_admin=False))
     monkeypatch.setattr(app_uploader, "request_admin_access", lambda: calls.append("admin"))
@@ -97,6 +113,10 @@ def test_app_uploader_does_not_request_admin_if_user_is_not_admin(monkeypatch) -
 def test_app_debug_inspector_does_not_open_window_if_admin_fails(monkeypatch) -> None:
     calls: list[str] = []
 
+    # main() monta el registro a archivo, y eso cambia el logging global
+    # para todo el proceso de pruebas: dejaba propagate=False y
+    # test_ui_confirmations se quedaba sin ver nada con caplog.
+    monkeypatch.setattr(app_debug_inspector, "configure_logging", lambda: None)
     monkeypatch.setattr(app_debug_inspector, "setup_theme", lambda: calls.append("theme"))
     monkeypatch.setattr(app_debug_inspector, "request_app_access", lambda: _session())
     monkeypatch.setattr(app_debug_inspector, "request_admin_access", lambda: False)
@@ -117,6 +137,10 @@ def test_app_debug_inspector_opens_window_if_admin_succeeds(monkeypatch) -> None
         def mainloop(self) -> None:
             calls.append("mainloop")
 
+    # main() monta el registro a archivo, y eso cambia el logging global
+    # para todo el proceso de pruebas: dejaba propagate=False y
+    # test_ui_confirmations se quedaba sin ver nada con caplog.
+    monkeypatch.setattr(app_debug_inspector, "configure_logging", lambda: None)
     monkeypatch.setattr(app_debug_inspector, "setup_theme", lambda: calls.append("theme"))
     monkeypatch.setattr(app_debug_inspector, "request_app_access", lambda: _session())
     monkeypatch.setattr(app_debug_inspector, "request_admin_access", lambda: True)
@@ -130,6 +154,10 @@ def test_app_debug_inspector_opens_window_if_admin_succeeds(monkeypatch) -> None
 def test_app_debug_inspector_does_not_request_admin_if_login_fails(monkeypatch) -> None:
     calls: list[str] = []
 
+    # main() monta el registro a archivo, y eso cambia el logging global
+    # para todo el proceso de pruebas: dejaba propagate=False y
+    # test_ui_confirmations se quedaba sin ver nada con caplog.
+    monkeypatch.setattr(app_debug_inspector, "configure_logging", lambda: None)
     monkeypatch.setattr(app_debug_inspector, "setup_theme", lambda: calls.append("theme"))
     monkeypatch.setattr(app_debug_inspector, "request_app_access", lambda: None)
     monkeypatch.setattr(app_debug_inspector, "request_admin_access", lambda: calls.append("admin"))
@@ -143,6 +171,10 @@ def test_app_debug_inspector_does_not_request_admin_if_login_fails(monkeypatch) 
 def test_app_debug_inspector_does_not_request_admin_if_user_is_not_admin(monkeypatch) -> None:
     calls: list[str] = []
 
+    # main() monta el registro a archivo, y eso cambia el logging global
+    # para todo el proceso de pruebas: dejaba propagate=False y
+    # test_ui_confirmations se quedaba sin ver nada con caplog.
+    monkeypatch.setattr(app_debug_inspector, "configure_logging", lambda: None)
     monkeypatch.setattr(app_debug_inspector, "setup_theme", lambda: calls.append("theme"))
     monkeypatch.setattr(app_debug_inspector, "request_app_access", lambda: _session(is_admin=False))
     monkeypatch.setattr(app_debug_inspector, "request_admin_access", lambda: calls.append("admin"))

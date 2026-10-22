@@ -679,13 +679,31 @@ class ProcessService:
 
         try:
             return self._finish_process_log(run_context, log_service_lock, **campos)
+        except TimeoutError as sin_candado:
+            # No se consiguio el candado: hay un update TODAVIA EN VUELO dentro
+            # del cliente de logs. Escribir ahora por otro cliente seria peor
+            # que no escribir: ese update aterrizaria despues del cierre y
+            # pisaria el estado final con una fase intermedia. La fila se queda
+            # abierta, que al menos es visiblemente incompleta en vez de
+            # mentir.
+            avisar(
+                "No se pudo cerrar process_logs para esta ejecucion: "
+                f"{sin_candado} La fila queda abierta en Supabase."
+            )
+            return None
         except Exception as primer_fallo:  # noqa: BLE001
+            # Aqui el candado SI se tomo y se solto: el que fallo fue el
+            # cliente. Un cliente nuevo -por la misma fabrica, no un
+            # LogService a pelo, que ignoraria cualquier doble inyectado-
+            # tiene una posibilidad real, y sigue pasando por el candado,
+            # asi que el orden de escritura se respeta.
             try:
-                # Por la MISMA fabrica que creo el servicio de la corrida, no
-                # construyendo un LogService a pelo: a pelo ignora cualquier
-                # doble inyectado y acaba hablando con la Supabase de verdad.
-                servicio_limpio = self._create_run_log_service()
-                return servicio_limpio.finish_process(run_context.log_record_id, **campos)
+                return self._finish_process_log(
+                    run_context,
+                    log_service_lock,
+                    log_service=self._create_run_log_service(),
+                    **campos,
+                )
             except Exception as segundo_fallo:  # noqa: BLE001
                 avisar(
                     "No se pudo cerrar process_logs para esta ejecucion: "
@@ -698,6 +716,8 @@ class ProcessService:
         self,
         run_context: ProcessRunContext,
         log_service_lock: threading.Lock,
+        *,
+        log_service=None,
         **fields,
     ):
         """Write the final process_logs row, serialised against the drain worker.
@@ -714,7 +734,8 @@ class ProcessService:
                 f"despues de {self._LOG_FINISH_LOCK_TIMEOUT_SECONDS:.0f}s."
             )
         try:
-            return run_context.log_service.finish_process(run_context.log_record_id, **fields)
+            servicio = log_service or run_context.log_service
+            return servicio.finish_process(run_context.log_record_id, **fields)
         finally:
             log_service_lock.release()
 
