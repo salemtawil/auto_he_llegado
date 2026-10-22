@@ -12,6 +12,7 @@ agente: el lado activo esta `disabled` y pintado con la clase de acento.
 
 from __future__ import annotations
 
+import ast
 import re
 from pathlib import Path
 
@@ -197,7 +198,7 @@ class _Sitio(BaseSite):
     def _leer_estado_de_cuenta(self, _root) -> dict:
         return self._estados.pop(0) if len(self._estados) > 1 else self._estados[0]
 
-    def _localizar_interruptor_de_cuenta(self, _root):
+    def _localizar_control_de_cuenta(self, _root):
         return "interruptor"
 
     def _click_locator_resilient(self, locator, *, phase: str, error_message: str) -> None:
@@ -256,7 +257,7 @@ def test_el_estado_no_se_decide_por_aria_checked() -> None:
     # "simplifica" esto leyendo el aria, invierte el comportamiento.
     fuente = (RAIZ / "automation" / "base_site.py").read_text(encoding="utf-8")
     js = re.search(r'_JS_ESTADO_DE_CUENTA = r"""(.*?)"""', fuente, re.S).group(1)
-    decision = js[js.index("const activa"):js.index("return {")]
+    decision = js[js.index("const activa") : js.rindex("return {")]
     assert "aria-checked" not in decision or "lado.getAttribute" in decision
     assert "disabled" in decision, "el lado activo se reconoce porque esta deshabilitado"
     assert "text-primary" in decision, "y porque lleva la clase de acento"
