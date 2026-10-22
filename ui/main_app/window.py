@@ -2425,7 +2425,10 @@ class MainAppWindow(ctk.CTk):
         return LocalConfig(
             agent_name=validate_non_empty_string(source["agent_name"], "agent_name"),
             agent_name_confirmed=True,
-            flow_engine="extension" if source.get("flow_engine", "Tradicional") == "Extension" else "traditional",
+            # El selector de motor ya no existe en Ajustes: el motor de
+            # extension esta muerto. Se fija aqui en vez de leerlo del
+            # formulario para que no dependa de una clave que ya nadie envia.
+            flow_engine="traditional",
             automation_version=(
                 "v2"
                 if str(source.get("automation_version", "")).strip().lower().startswith("v2")

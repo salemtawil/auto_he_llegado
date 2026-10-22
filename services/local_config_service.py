@@ -33,6 +33,13 @@ class LocalConfigService:
         if "flow_engine" not in data:
             data["flow_engine"] = "traditional"
             should_migrate = True
+        if str(data.get("flow_engine") or "").strip().lower() == "extension":
+            # El motor de extension esta muerto y su opcion ya no esta en
+            # Ajustes. Un agente que lo dejara guardado seguiria pagando los 5
+            # segundos de espera del service worker en cada lanzamiento, sin
+            # poder volver atras desde la interfaz.
+            data["flow_engine"] = "traditional"
+            should_migrate = True
         if "enable_browser_extension" not in data:
             data["enable_browser_extension"] = True
             should_migrate = True

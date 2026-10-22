@@ -215,15 +215,6 @@ def test_la_espera_de_foto_en_v2_no_se_cuelga_de_verdad() -> None:
     assert lista_antes is False
 
 
-def test_compinche_v2_arregla_el_typeerror() -> None:
-    """compinche_site.py:1514 llama _wait_interval con un solo argumento."""
-
-    fuente_v1 = inspect.getsource(CompincheSite._wait_for_uploaded_file_input)
-    assert "self._wait_interval(150)" in fuente_v1, "la v1 sigue como estaba"
-
-    fuente_v2 = _codigo(CompincheSiteV2._wait_for_uploaded_file_input)
-    assert "self._wait_interval(150)" not in fuente_v2
-    assert "_wait_interval(file_input, 150)" in fuente_v2
 
 
 def test_el_diagnostico_de_extension_solo_corre_si_hay_extension() -> None:

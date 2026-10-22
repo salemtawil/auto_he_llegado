@@ -27,7 +27,6 @@ class SettingsDialog(ctk.CTkToplevel):
         self._on_launch_updater = on_launch_updater
         self._initial_data = {
             "agent_name": config.agent_name,
-            "flow_engine": "Extension" if config.flow_engine == "extension" else "Tradicional",
             "automation_version": (
                 "v2 (optimizada)" if config.automation_version == "v2" else "v1 (estable)"
             ),
@@ -105,13 +104,13 @@ class SettingsDialog(ctk.CTkToplevel):
         )
         self.keep_browser_open_menu.set("si" if config.keep_browser_open else "no")
 
-        self.flow_engine_menu = self._build_option_menu(
-            body,
-            row=6,
-            label="motor de flujo",
-            values=["Tradicional", "Extension"],
-        )
-        self.flow_engine_menu.set("Extension" if config.flow_engine == "extension" else "Tradicional")
+        # Aqui habia un selector "motor de flujo" con la opcion "Extension".
+        # El motor de extension esta muerto: elegirlo no cambia el resultado
+        # (acaba cayendo al tradicional) pero si cuesta 5 segundos fijos de
+        # espera del service worker en cada lanzamiento, y arrastra un perfil
+        # de Chrome desechable por corrida. Se quita del menu para que nadie lo
+        # active sin querer; `LocalConfigService` ademas devuelve a
+        # "traditional" cualquier configuracion que lo tuviera guardado.
 
         self.automation_version_menu = self._build_option_menu(
             body,
@@ -301,7 +300,6 @@ class SettingsDialog(ctk.CTkToplevel):
     def _wire_dirty_tracking(self) -> None:
         self.agent_entry.bind("<KeyRelease>", self._handle_dirty_state_change)
         self.keep_browser_open_menu.configure(command=self._handle_theme_change)
-        self.flow_engine_menu.configure(command=self._handle_theme_change)
         self.automation_version_menu.configure(command=self._handle_theme_change)
         self.browser_extension_overlay_menu.configure(command=self._handle_theme_change)
         self.page_timeout_entry.bind("<KeyRelease>", self._handle_dirty_state_change)
@@ -325,7 +323,6 @@ class SettingsDialog(ctk.CTkToplevel):
     def _collect_form_data(self) -> dict[str, str]:
         return {
             "agent_name": self.agent_entry.get(),
-            "flow_engine": self.flow_engine_menu.get(),
             "automation_version": self.automation_version_menu.get(),
             "keep_browser_open": self.keep_browser_open_menu.get(),
             "browser_extension_overlay": self.browser_extension_overlay_menu.get(),
