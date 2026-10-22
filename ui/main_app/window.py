@@ -117,8 +117,8 @@ class MainAppWindow(ctk.CTk):
         self._is_closing = False
         self._slots: dict[str, ProcessSlotRuntime] = {}
         self._process_to_slot: dict[str, str] = {}
-        self._active_slot_id = "slot_1"
-        self._latest_debug_slot_id = "slot_1"
+        self._active_slot_id = self.SLOT_IDS[0]
+        self._latest_debug_slot_id = self.SLOT_IDS[0]
         self._pending_admin_tab: str | None = None
         self._auth_session = get_current_session()
         self._access_snapshot: AccessSnapshot | None = None
@@ -413,38 +413,25 @@ class MainAppWindow(ctk.CTk):
         self.main_column = self.slots_scroll
         self.main_column.grid_columnconfigure(0, weight=1)
 
-        slot_1_panel = ProcessSlotPanel(
-            self.main_column,
-            title="Proceso 1",
-            on_start=lambda: self._handle_run_button("slot_1"),
-            on_clear=lambda: self.clear_form("slot_1"),
-            on_export_state=lambda: self.export_extension_state("slot_1"),
-            on_open_diagnostics=self._open_diagnostics_panel,
-            on_open_extensions=lambda: self.open_extension_test_browser("slot_1"),
-            on_open_browser=lambda: self.open_manual_browser("slot_1"),
-            on_owner_selfie_toggle=lambda enabled: self._handle_owner_selfie_toggle("slot_1", enabled),
-            on_owner_selfie_select=lambda: self._handle_owner_selfie_select("slot_1"),
-            on_owner_selfie_remove=lambda: self._handle_owner_selfie_remove("slot_1"),
-        )
-
-        slot_2_panel = ProcessSlotPanel(
-            self.main_column,
-            title="Proceso 2",
-            on_start=lambda: self._handle_run_button("slot_2"),
-            on_clear=lambda: self.clear_form("slot_2"),
-            on_export_state=lambda: self.export_extension_state("slot_2"),
-            on_open_diagnostics=self._open_diagnostics_panel,
-            on_open_extensions=lambda: self.open_extension_test_browser("slot_2"),
-            on_open_browser=lambda: self.open_manual_browser("slot_2"),
-            on_owner_selfie_toggle=lambda enabled: self._handle_owner_selfie_toggle("slot_2", enabled),
-            on_owner_selfie_select=lambda: self._handle_owner_selfie_select("slot_2"),
-            on_owner_selfie_remove=lambda: self._handle_owner_selfie_remove("slot_2"),
-        )
-
-        self._slots = {
-            "slot_1": ProcessSlotRuntime(slot_id="slot_1", panel=slot_1_panel),
-            "slot_2": ProcessSlotRuntime(slot_id="slot_2", panel=slot_2_panel),
-        }
+        # Cuatro paneles, en una rejilla de 2x2. Antes eran dos construcciones
+        # escritas a mano y treinta y dos referencias literales a "slot_1" y
+        # "slot_2" repartidas por el archivo: anadir uno era tocar todo eso.
+        self._slots = {}
+        for slot_id in self.SLOT_IDS:
+            panel = ProcessSlotPanel(
+                self.main_column,
+                title=self.slot_title(slot_id),
+                on_start=lambda sid=slot_id: self._handle_run_button(sid),
+                on_clear=lambda sid=slot_id: self.clear_form(sid),
+                on_export_state=lambda sid=slot_id: self.export_extension_state(sid),
+                on_open_diagnostics=self._open_diagnostics_panel,
+                on_open_extensions=lambda sid=slot_id: self.open_extension_test_browser(sid),
+                on_open_browser=lambda sid=slot_id: self.open_manual_browser(sid),
+                on_owner_selfie_toggle=lambda enabled, sid=slot_id: self._handle_owner_selfie_toggle(sid, enabled),
+                on_owner_selfie_select=lambda sid=slot_id: self._handle_owner_selfie_select(sid),
+                on_owner_selfie_remove=lambda sid=slot_id: self._handle_owner_selfie_remove(sid),
+            )
+            self._slots[slot_id] = ProcessSlotRuntime(slot_id=slot_id, panel=panel)
 
         self._sync_primary_slot_refs()
 
@@ -1019,25 +1006,41 @@ class MainAppWindow(ctk.CTk):
         return
 
     def _layout_slots(self, mode: str) -> None:
-        slot_1 = self._slots["slot_1"].panel
-        slot_2 = self._slots["slot_2"].panel
-
         for slot in self._slots.values():
             slot.panel.grid_forget()
             slot.panel.set_secondary_visual(False)
             slot.panel.set_compact_layout(False)
 
         self._sync_primary_slot_refs()
-        self.main_column.grid_columnconfigure(0, weight=1)
-        self.main_column.grid_columnconfigure(1, weight=0)
-        # sticky="ew" y sin weight en las filas: cada tarjeta ocupa su altura natural
-        # dentro del area desplazable. Antes se repartia el alto disponible a partes
-        # iguales ("uniform"), asi que en una ventana baja ambas tarjetas recibian
-        # menos de lo que su contenido necesita y la fila de botones quedaba cortada.
-        self.main_column.grid_rowconfigure(0, weight=0)
-        self.main_column.grid_rowconfigure(1, weight=0)
-        slot_1.grid(row=0, column=0, pady=(0, 10), sticky="ew")
-        slot_2.grid(row=1, column=0, pady=(0, 4), sticky="ew")
+
+        # Rejilla de SLOT_COLUMNS columnas. Con 4 paneles y 2 columnas quedan
+        # 2x2: simetrico y sin barra de desplazamiento, que es lo que se pidio.
+        #
+        # sticky="ew" y filas sin weight: cada tarjeta ocupa su altura natural.
+        # Antes se repartia el alto a partes iguales ("uniform") y en una
+        # ventana baja ninguna recibia lo que su contenido necesita, con lo que
+        # la fila de botones quedaba cortada.
+        columnas = max(1, self.SLOT_COLUMNS)
+        for columna in range(columnas):
+            # uniform: las columnas miden lo mismo, si no la primera tarjeta se
+            # queda con todo el ancho y la de al lado sale espachurrada.
+            self.main_column.grid_columnconfigure(
+                columna, weight=1, uniform="slots"
+            )
+        total_filas = (len(self.SLOT_IDS) + columnas - 1) // columnas
+        for fila in range(total_filas):
+            self.main_column.grid_rowconfigure(fila, weight=0)
+
+        for indice, slot_id in enumerate(self.SLOT_IDS):
+            fila, columna = divmod(indice, columnas)
+            ultima_fila = fila == total_filas - 1
+            self._slots[slot_id].panel.grid(
+                row=fila,
+                column=columna,
+                padx=(0, 10) if columna < columnas - 1 else 0,
+                pady=(0, 4) if ultima_fila else (0, 10),
+                sticky="ew",
+            )
 
         self._refresh_header_summary()
         self._safe_after(0, self._apply_slot_widths)
@@ -1045,6 +1048,32 @@ class MainAppWindow(ctk.CTk):
 
     # Anchos por debajo de los cuales el resumen de cabecera se recorta por partes.
     _HEADER_PART_BREAKPOINTS = (1180, 1000, 860)
+
+    # Los paneles de proceso. Para anadir o quitar uno basta con tocar esto:
+    # la construccion, la rejilla, el tope de procesos y los diagnosticos
+    # salen todos de aqui.
+    SLOT_IDS = ("slot_1", "slot_2", "slot_3", "slot_4")
+    # Columnas de la rejilla. Con 2 columnas y 4 paneles quedan 2x2, que es
+    # simetrico y cabe sin barra de desplazamiento.
+    SLOT_COLUMNS = 2
+
+    @classmethod
+    def slot_title(cls, slot_id: str) -> str:
+        """"slot_3" -> "Proceso 3". Un solo sitio donde se decide el nombre."""
+
+        try:
+            return f"Proceso {cls.SLOT_IDS.index(slot_id) + 1}"
+        except ValueError:
+            return str(slot_id)
+
+    @classmethod
+    def slot_id_por_titulo(cls, titulo: str) -> str:
+        """El camino de vuelta, para los diagnosticos que vienen por nombre."""
+
+        for slot_id in cls.SLOT_IDS:
+            if cls.slot_title(slot_id) == titulo:
+                return slot_id
+        return cls.SLOT_IDS[0]
 
     @staticmethod
     def build_header_summary(parts: list[str], width: int) -> str:
@@ -1120,7 +1149,7 @@ class MainAppWindow(ctk.CTk):
         primary_panel = (
             self._slots[self._active_slot_id].panel
             if self._active_slot_id in self._slots
-            else self._slots["slot_1"].panel
+            else self._slots[self.SLOT_IDS[0]].panel
         )
         self.form_panel = primary_panel.form_panel
         self.status_panel = primary_panel.status_panel
@@ -1142,10 +1171,10 @@ class MainAppWindow(ctk.CTk):
     def _refresh_header_summary(self) -> None:
         if not hasattr(self, "header_meta_label") or not self._slots:
             return
-        primary_slot_id = self._active_slot_id if self._active_slot_id in self._slots else "slot_1"
+        primary_slot_id = self._active_slot_id if self._active_slot_id in self._slots else self.SLOT_IDS[0]
         primary_slot = self._get_slot(primary_slot_id)
         page_name = primary_slot.panel.form_panel.page_menu.get() or "N/A"
-        slot_title = "Proceso 1" if primary_slot_id == "slot_1" else "Proceso 2"
+        slot_title = self.slot_title(primary_slot_id)
         engine_label = self._flow_engine_label(self._current_config.flow_engine)
         self._header_meta_parts = [
             f"Motor: {engine_label}",
@@ -1210,7 +1239,7 @@ class MainAppWindow(ctk.CTk):
             tope = int(self._current_config.max_concurrent_processes)
         except (TypeError, ValueError):
             return 1
-        return max(1, min(2, tope))
+        return max(1, min(len(self.SLOT_IDS), tope))
 
     def _slot_process_count_label(self) -> str:
         return (
@@ -1593,7 +1622,7 @@ class MainAppWindow(ctk.CTk):
         slot.thread = None
         self._process_to_slot.pop(process_id, None)
         if self._latest_debug_slot_id == slot_id and self._active_process_count() == 0:
-            self._latest_debug_slot_id = "slot_1"
+            self._latest_debug_slot_id = self.SLOT_IDS[0]
         self._sync_run_button_state()
         self._layout_slots(self._layout_mode or "wide")
         return elapsed_seconds
@@ -2005,7 +2034,7 @@ class MainAppWindow(ctk.CTk):
         self._set_slot_status(slot_id, f"Estado del proceso exportado a {target}", color=SUCCESS)
 
     def _handle_admin_export_debug(self, slot_name: str) -> None:
-        slot_id = "slot_1" if slot_name == "Proceso 1" else "slot_2"
+        slot_id = self.slot_id_por_titulo(slot_name)
         self.export_extension_state(slot_id)
 
     def _refresh_admin_diagnostics_if_open(self) -> None:
@@ -2017,7 +2046,7 @@ class MainAppWindow(ctk.CTk):
     def _build_admin_diagnostics_payload(self) -> dict[str, dict]:
         payload: dict[str, dict] = {}
         for slot_id, slot in self._slots.items():
-            payload["Proceso 1" if slot_id == "slot_1" else "Proceso 2"] = self._build_slot_diagnostic_snapshot(slot_id)
+            payload[self.slot_title(slot_id)] = self._build_slot_diagnostic_snapshot(slot_id)
         return payload
 
     def _build_slot_diagnostic_snapshot(self, slot_id: str) -> dict:

@@ -3,6 +3,7 @@ from __future__ import annotations
 import pytest
 
 from config.machine_profile import (
+    MAX_PROCESOS_SOPORTADOS,
     MachineResources,
     _procesos_que_caben,
     derivar_perfil,
@@ -52,19 +53,22 @@ def test_la_firma_distingue_equipos_distintos():
 @pytest.mark.parametrize(
     ("ram_mb", "cpus", "esperado"),
     [
-        (4096, 4, 1),   # 2 GB utiles: solo cabe una corrida
-        (8192, 4, 2),   # 6 GB utiles y cuatro nucleos
-        (16384, 2, 1),  # RAM de sobra, pero dos nucleos no dan para dos Chrome
-        (16384, 8, 2),
-        (2048, 8, 1),   # nunca por debajo de una
+        (4096, 4, 1),    # 2 GB utiles: solo cabe una corrida
+        (8192, 4, 2),    # 6 GB utiles y cuatro nucleos
+        (16384, 2, 1),   # RAM de sobra, pero dos nucleos no dan ni para dos
+        (16384, 8, 4),   # aqui si caben los cuatro paneles
+        (16384, 4, 2),   # la misma RAM con la mitad de nucleos: dos
+        (32768, 6, 3),   # tres nucleos de a dos -> tres corridas
+        (2048, 8, 1),    # nunca por debajo de una
     ],
 )
 def test_cuantas_corridas_caben(ram_mb, cpus, esperado):
     assert _procesos_que_caben(equipo(ram_mb, cpus)) == esperado
 
 
-def test_nunca_propone_mas_de_dos_porque_la_interfaz_solo_tiene_dos_paneles():
-    assert _procesos_que_caben(equipo(131072, 64)) == 2
+def test_nunca_propone_mas_paneles_de_los_que_tiene_la_interfaz():
+    # La rejilla es de 2x2: por mucha maquina que haya, cuatro.
+    assert _procesos_que_caben(equipo(131072, 64)) == MAX_PROCESOS_SOPORTADOS
 
 
 @pytest.mark.parametrize(

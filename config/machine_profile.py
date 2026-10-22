@@ -24,8 +24,8 @@ _LOGGER = logging.getLogger("auto_he_llegado.machine")
 # Medido en los equipos de los agentes, no estimado.
 RAM_POR_CORRIDA_MB = 1400
 
-# Limite duro de la interfaz: hay dos paneles, no mas.
-MAX_PROCESOS_SOPORTADOS = 2
+# Limite duro de la interfaz: hay cuatro paneles, en una rejilla de 2x2.
+MAX_PROCESOS_SOPORTADOS = 4
 
 
 @dataclass(frozen=True)
@@ -142,9 +142,11 @@ def _procesos_que_caben(recursos: MachineResources) -> int:
     reserva_so_mb = 2048
     util = recursos.total_ram_mb - reserva_so_mb
     por_ram = int(util // RAM_POR_CORRIDA_MB) if util > 0 else 0
-    # Cada corrida ocupa su hilo y el Chrome que levanta: con dos nucleos,
-    # dos corridas se pelean el procesador y las dos van lentas.
-    por_cpu = MAX_PROCESOS_SOPORTADOS if recursos.logical_cpus >= 4 else 1
+    # Cada corrida ocupa su hilo y el Chrome que levanta, y Chrome por si solo
+    # usa varios procesos. Dos nucleos por corrida es lo que evita que se
+    # peleen y vayan todas lentas: con cuatro nucleos caben dos, con ocho
+    # cuatro. Mas vale una corrida menos que cuatro arrastrandose.
+    por_cpu = max(1, recursos.logical_cpus // 2)
     return max(1, min(MAX_PROCESOS_SOPORTADOS, por_ram, por_cpu))
 
 
