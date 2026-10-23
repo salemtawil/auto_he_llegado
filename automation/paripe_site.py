@@ -955,7 +955,12 @@ class ParipeSite(BaseSite):
 
             # El selector cuenta prestada/propia esta en el panel, antes de
             # cualquier accion. El proceso solo va bien con "Cuenta prestada".
-            self._asegurar_cuenta_prestada(page, progress_callback=progress_callback)
+            # Aqui se le da tiempo a aparecer: acabamos de entrar y el panel
+            # todavia se esta pintando. No es el camino critico -el click
+            # viene despues- asi que esperar sale mas barato que leer mal.
+            self._asegurar_cuenta_prestada(
+                page, progress_callback=progress_callback, busqueda_ms=2_000
+            )
 
             action_spec = self._get_action_spec(request.action_name)
             self.emit_progress(progress_callback, phase="initial_action", message=f"Ejecutando accion '{action_spec.ui_name}'...")

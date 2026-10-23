@@ -617,6 +617,11 @@ class BaseSite(ABC):
     # entonces no hay forma de saber cual esta activa. Esperar a que el sitio
     # termine es la diferencia entre leer bien y pulsar a ciegas.
     CUENTA_LECTURA_TIMEOUT_MS = 3_000
+    # Y cuanto se espera cuando NO hay ni rastro del selector. Tiene que ser
+    # corto: este paso esta en el camino del boton de verificacion, y gastar
+    # ahi el presupuesto largo retrasa el click varios segundos en pantallas
+    # donde el selector sencillamente no existe, que son la mayoria.
+    CUENTA_BUSQUEDA_TIMEOUT_MS = 300
 
     def _leer_estado_de_cuenta(self, root) -> dict:
         """En que lado esta el selector de cuenta. Nunca lanza.
@@ -685,25 +690,37 @@ class BaseSite(ABC):
             return False
         return None
 
-    def _esperar_estado_de_cuenta(self, root) -> dict:
+    def _esperar_estado_de_cuenta(self, root, *, busqueda_ms: int | None = None) -> dict:
         """Lee el selector hasta poder decir en que lado esta, o se rinde.
 
         Devuelve la primera lectura concluyente; si no la hay, la ultima que
         consiguio, para que quede en el log tal cual se vio.
         """
 
-        limite = monotonic() + self.CUENTA_LECTURA_TIMEOUT_MS / 1000
+        ahora = monotonic()
+        # Dos presupuestos: uno corto para encontrarlo y otro largo para
+        # leerlo. Mientras no aparezca se espera poco, porque lo normal es
+        # que no este; en cuanto aparece se le da tiempo a terminar de
+        # pintarse, que es cuando merece la pena esperar.
+        if busqueda_ms is None:
+            busqueda_ms = self.CUENTA_BUSQUEDA_TIMEOUT_MS
+        limite = ahora + busqueda_ms / 1000
+        largo = ahora + self.CUENTA_LECTURA_TIMEOUT_MS / 1000
         ultimo: dict = {"encontrado": False, "motivo": "sin_lectura"}
         while True:
             ultimo = self._leer_estado_de_cuenta(root)
-            if ultimo.get("encontrado") and ultimo.get("prestada") is not None:
-                return ultimo
+            if ultimo.get("encontrado"):
+                if ultimo.get("prestada") is not None:
+                    return ultimo
+                limite = largo
             if monotonic() >= limite:
                 return ultimo
             with suppress(Exception):
                 root.wait_for_timeout(150)
 
-    def _asegurar_cuenta_prestada(self, root, *, progress_callback=None) -> str:
+    def _asegurar_cuenta_prestada(
+        self, root, *, progress_callback=None, busqueda_ms: int | None = None
+    ) -> str:
         """Intenta dejar el selector en 'Cuenta prestada'. NUNCA lanza.
 
         Respuestas: "ausente" (no hay selector en esta pantalla, que es lo
@@ -720,7 +737,7 @@ class BaseSite(ABC):
         la lectura estaba equivocada, la corrida se salva.
         """
 
-        estado = self._esperar_estado_de_cuenta(root)
+        estado = self._esperar_estado_de_cuenta(root, busqueda_ms=busqueda_ms)
         if not estado.get("encontrado"):
             # Se anota aunque no haya nada: distinguir "no hay selector en esta
             # pantalla" de "lo hay y no lo vi" es justo lo que hace falta para

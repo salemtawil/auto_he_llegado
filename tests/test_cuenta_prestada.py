@@ -15,6 +15,7 @@ from __future__ import annotations
 import ast
 import re
 from pathlib import Path
+from time import monotonic
 
 import pytest
 
@@ -187,6 +188,7 @@ def test_el_aria_label_no_sirve_para_distinguir_las_opciones() -> None:
 class _Sitio(BaseSite):
     # Las pruebas no esperan al navegador: la espera se cubre aparte.
     CUENTA_LECTURA_TIMEOUT_MS = 0
+    CUENTA_BUSQUEDA_TIMEOUT_MS = 0
 
     def execute(self, *args, **kwargs):  # pragma: no cover - abstracto
         raise NotImplementedError
@@ -374,6 +376,7 @@ def test_se_espera_a_que_el_panel_termine_de_pintarse() -> None:
 
     class _SitioLento(_Sitio):
         CUENTA_LECTURA_TIMEOUT_MS = 2_000
+        CUENTA_BUSQUEDA_TIMEOUT_MS = 0
 
     lecturas = [
         {"encontrado": True, "prestada": None, "modo": "switch"},
@@ -389,6 +392,7 @@ def test_se_espera_a_que_el_panel_termine_de_pintarse() -> None:
 def test_la_espera_se_rinde_y_devuelve_lo_ultimo_que_vio() -> None:
     class _SitioCorto(_Sitio):
         CUENTA_LECTURA_TIMEOUT_MS = 120
+        CUENTA_BUSQUEDA_TIMEOUT_MS = 0
 
     sitio = _SitioCorto([{"encontrado": True, "prestada": None, "modo": "switch"}])
 
@@ -408,3 +412,56 @@ def test_la_radiografia_del_control_llega_al_log_en_una_linea() -> None:
     assert isinstance(detalles["radiografia"], str)
     assert "acento" in detalles["radiografia"]
     assert "\n" not in detalles["radiografia"]
+
+
+def test_si_el_selector_no_esta_no_se_espera_el_presupuesto_largo() -> None:
+    """Este paso esta en el camino del boton de verificacion.
+
+    En la mayoria de pantallas el selector no existe, y gastar ahi los tres
+    segundos de la espera larga retrasa el click. La espera larga es para
+    cuando el selector YA aparecio pero todavia no se puede leer.
+    """
+
+    class _SitioSinSelector(_Sitio):
+        CUENTA_BUSQUEDA_TIMEOUT_MS = 150
+        CUENTA_LECTURA_TIMEOUT_MS = 10_000
+
+    sitio = _SitioSinSelector([{"encontrado": False, "motivo": "sin_caja"}])
+    arranque = monotonic()
+
+    assert sitio._asegurar_cuenta_prestada(_Raiz()) == "ausente"  # noqa: SLF001
+    assert monotonic() - arranque < 1.0, "se quedo esperando un selector que no esta"
+
+
+def test_en_cuanto_aparece_se_le_da_tiempo_a_terminar_de_pintarse() -> None:
+    class _SitioQueAparece(_Sitio):
+        CUENTA_BUSQUEDA_TIMEOUT_MS = 0
+        CUENTA_LECTURA_TIMEOUT_MS = 2_000
+
+    sitio = _SitioQueAparece([
+        {"encontrado": True, "prestada": None, "modo": "switch"},
+        {"encontrado": True, "prestada": None, "modo": "switch"},
+        {"encontrado": True, "prestada": True, "aria": "false", "modo": "switch"},
+    ])
+
+    # Aunque el presupuesto de busqueda sea 0, al estar encontrado se sigue
+    # mirando con el presupuesto largo hasta poder leerlo.
+    assert sitio._asegurar_cuenta_prestada(_Raiz()) == "ya_estaba"  # noqa: SLF001
+    assert sitio.clicks == []
+
+
+def test_paripe_le_da_tiempo_al_panel_y_compinche_no() -> None:
+    """Los dos sitios llaman al mismo paso, pero no desde el mismo sitio.
+
+    En Paripe se mira tras entrar, con el click todavia por delante: ahi
+    esperar a que el panel aparezca sale barato. En Compinche se mira dentro
+    del iframe, justo antes de pulsar "Iniciar verificacion": ahi cada
+    milisegundo de espera retrasa el click, y el selector casi nunca esta.
+    """
+
+    fuente = (RAIZ / "automation" / "paripe_site.py").read_text(encoding="utf-8")
+    assert "busqueda_ms=2_000" in fuente
+
+    bloques = (RAIZ / "automation" / "sitio_de_bloques.py").read_text(encoding="utf-8")
+    llamada = bloques[bloques.index("_complete_pre_selfie_account_step") :][:1200]
+    assert "busqueda_ms" not in llamada, "el camino del click usa el presupuesto corto"
