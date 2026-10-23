@@ -1006,10 +1006,13 @@ class MainAppWindow(ctk.CTk):
         return
 
     def _layout_slots(self, mode: str) -> None:
+        # Con mas de dos tarjetas van en rejilla y cada una ocupa media
+        # ventana: ahi tienen que ir apretadas o no caben las dos filas.
+        apretadas = len(self.SLOT_IDS) > 2
         for slot in self._slots.values():
             slot.panel.grid_forget()
             slot.panel.set_secondary_visual(False)
-            slot.panel.set_compact_layout(False)
+            slot.panel.set_compact_layout(apretadas)
 
         self._sync_primary_slot_refs()
 

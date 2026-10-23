@@ -124,13 +124,20 @@ class StatusPanel(ctk.CTkFrame):
         self.chips_row.grid_remove()
         self.set_compact_layout(False)
 
-    def set_compact_layout(self, compact: bool) -> None:
+    def set_compact_layout(self, compact: bool, *, alto_mensaje: int | None = None) -> None:
+        """`alto_mensaje` permite apretar mas la caja cuando hay cuatro tarjetas.
+
+        Es el elemento que mas alto ocupa del panel, asi que es el primero que
+        hay que tocar para que cuatro tarjetas quepan sin barra.
+        """
+
         self._compact = compact
         self.title_label.configure(text="Seguimiento", font=ctk.CTkFont(size=10 if compact else 11, weight="bold"))
         self.phase_chip.configure(font=ctk.CTkFont(size=9 if compact else 10, weight="bold"))
         self.alert_chip.configure(font=ctk.CTkFont(size=9 if compact else 10, weight="bold"))
         self.retry_chip.configure(font=ctk.CTkFont(size=9 if compact else 10, weight="bold"))
-        self.message_box.configure(height=108 if compact else 116)
+        alto = alto_mensaje if alto_mensaje is not None else (108 if compact else 116)
+        self.message_box.configure(height=max(int(alto), 56))
         self.compact_message_label.configure(wraplength=320 if compact else 520)
 
     def set_message(self, message: str, *, color: str | None = None) -> None:

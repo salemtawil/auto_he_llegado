@@ -13,11 +13,20 @@ class ProcessSlotPanel(ctk.CTkFrame):
     # (grid_rowconfigure(minsize=...)), nunca una altura fija de la tarjeta: fijarla
     # fue la causa del recorte de los botones.
     _MIN_CARD_HEIGHT = 304
+    # Con cuatro tarjetas en 2x2 el suelo baja: dos filas de 304 no caben en
+    # una ventana de 760 px ni contando solo los bordes.
+    _MIN_CARD_HEIGHT_DENSE = 248
     # Ancho minimo que el formulario necesita para que sus tres botones quepan.
     _FORM_MIN_WIDTH = 330
     # Por debajo de este ancho de tarjeta, el panel de seguimiento pasa debajo del
     # formulario en vez de competir por el ancho con el.
-    _STACK_BREAKPOINT = 700
+    # Por debajo de esto el panel de seguimiento se coloca DEBAJO del
+    # formulario, y la tarjeta casi dobla de alto. A media anchura (unos 620 px
+    # en una ventana normal) estabamos justo por debajo del umbral anterior
+    # (700), asi que poner las tarjetas en dos columnas las hacia mas ALTAS, lo
+    # contrario de lo que se buscaba. El formulario pide 330 px y el
+    # seguimiento cabe en lo que queda.
+    _STACK_BREAKPOINT = 560
 
     def __init__(
         self,
@@ -292,38 +301,43 @@ class ProcessSlotPanel(ctk.CTkFrame):
         """Altura que la tarjeta necesita para mostrar todo su contenido."""
 
         self.update_idletasks()
-        return max(self.winfo_reqheight(), self._MIN_CARD_HEIGHT)
+        suelo = self._MIN_CARD_HEIGHT_DENSE if self._compact else self._MIN_CARD_HEIGHT
+        return max(self.winfo_reqheight(), suelo)
 
     def set_summary(self, text: str) -> None:
         self.summary_label.configure(text=text or "")
 
     def _apply_visual_layout(self) -> None:
-        header_padx = 10
-        header_pady = (8, 2)
-        body_padx = 10
-        body_pady = (0, 8)
+        # `self._compact` no se miraba: la tarjeta se pintaba igual con dos
+        # paneles que con cuatro. Ahora aprieta de verdad -margenes, fuentes,
+        # botones y, sobre todo, la caja de mensajes, que es lo mas alto del
+        # panel de seguimiento-. No se quita nada: se ve lo mismo, mas junto.
+        apretada = bool(self._compact)
+        header_padx = 8 if apretada else 10
+        header_pady = (5, 1) if apretada else (8, 2)
+        body_padx = 8 if apretada else 10
+        body_pady = (0, 5) if apretada else (0, 8)
+        alto_boton = 24 if apretada else 28
+        fuente_boton = 9 if apretada else 10
 
-        self.configure(corner_radius=18)
+        self.configure(corner_radius=14 if apretada else 18)
         self.header.grid_configure(padx=header_padx, pady=header_pady)
         self.body.grid_configure(padx=body_padx, pady=body_pady)
-        self.eyebrow.configure(font=ctk.CTkFont(size=12, weight="bold"))
+        self.eyebrow.configure(font=ctk.CTkFont(size=11 if apretada else 12, weight="bold"))
         self.summary_label.configure(font=ctk.CTkFont(size=1))
-        self.process_timer_label.configure(font=ctk.CTkFont(size=10, weight="bold"))
-        self.run_button.configure(
-            height=28,
-            font=ctk.CTkFont(size=10, weight="bold"),
+        self.process_timer_label.configure(
+            font=ctk.CTkFont(size=9 if apretada else 10, weight="bold")
         )
-        self.clear_button.configure(
-            height=28,
-            font=ctk.CTkFont(size=10, weight="bold"),
-        )
-        self.export_debug_button.configure(
-            height=28,
-            font=ctk.CTkFont(size=10, weight="bold"),
-        )
+        for boton in (self.run_button, self.clear_button, self.export_debug_button):
+            boton.configure(
+                height=alto_boton,
+                font=ctk.CTkFont(size=fuente_boton, weight="bold"),
+            )
 
         self.form_panel.set_compact_layout(True)
-        self.status_panel.set_compact_layout(False)
+        self.status_panel.set_compact_layout(
+            apretada, alto_mensaje=76 if apretada else None
+        )
         self.current_result_panel.set_compact_layout(True)
         self.secondary_actions.grid_remove()
         self.process_timer_label.grid_configure(row=0, column=1, pady=0, sticky="e")
