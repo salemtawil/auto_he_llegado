@@ -192,7 +192,11 @@ class _Sitio(BaseSite):
         self._estados = list(estados)
         self.clicks: list[str] = []
         self.progreso: list[str] = []
+        self.anotaciones: list[tuple[str, dict]] = []
         self.esperas = 0
+
+    def _record_timeline_event(self, evento: str, **detalles) -> None:
+        self.anotaciones.append((evento, detalles))
 
     # --- lo que el metodo necesita de su alrededor -------------------------
     def _leer_estado_de_cuenta(self, _root) -> dict:
@@ -223,6 +227,21 @@ def test_si_ya_esta_en_prestada_no_se_toca_nada() -> None:
     assert sitio.clicks == [], "pulsar el switch estando bien lo pondria en cuenta propia"
 
 
+def test_lo_que_se_leyo_queda_anotado_para_poder_diagnosticarlo() -> None:
+    # Sin esos datos no hay forma de saber, desde fuera, si el estado se leyo
+    # mal o si el control no respondio.
+    sitio = _Sitio([{"encontrado": True, "prestada": False, "aria": "true", "modo": "switch"}])
+
+    sitio._asegurar_cuenta_prestada(_Raiz())  # noqa: SLF001
+
+    eventos = [nombre for nombre, _ in sitio.anotaciones]
+    assert "cuenta_en_propia_detectada" in eventos
+    assert "cuenta_prestada_no_confirmada" in eventos
+    detalle = dict(sitio.anotaciones)["cuenta_prestada_no_confirmada"]
+    assert detalle["antes"]["modo"] == "switch"
+    assert detalle["antes"]["aria"] == "true"
+
+
 def test_si_no_hay_selector_el_paso_no_estorba() -> None:
     # Es lo normal en la mayoria de pantallas: el metodo se llama en varias y
     # no puede convertir su ausencia en un fallo.
@@ -243,13 +262,19 @@ def test_si_esta_en_propia_se_cambia_y_se_verifica() -> None:
     assert any("Cuenta prestada" in m for m in sitio.progreso)
 
 
-def test_si_el_switch_no_responde_se_dice_en_vez_de_seguir() -> None:
-    # Seguir con la cuenta propia hace fallar el proceso mucho mas adelante,
-    # donde ya no se entiende por que.
+def test_si_el_switch_no_responde_la_corrida_sigue() -> None:
+    """Un paso de conveniencia no puede ser la causa de que una corrida muera.
+
+    La primera version lanzaba aqui, y eso convirtio en fallo seguro un flujo
+    que antes funcionaba sin tocar el selector: paso de verdad en paripe.io el
+    23/10. Si la lectura del estado esta equivocada, lanzar mata una corrida
+    buena; si es correcta, el sitio dara su propio error mas adelante, que es
+    informacion real.
+    """
+
     sitio = _Sitio([{"encontrado": True, "prestada": False, "aria": "true"}])
 
-    with pytest.raises(RuntimeError, match="no quedo en 'Cuenta prestada'"):
-        sitio._asegurar_cuenta_prestada(_Raiz())  # noqa: SLF001
+    assert sitio._asegurar_cuenta_prestada(_Raiz()) == "no_confirmado"  # noqa: SLF001
 
 
 def test_el_estado_no_se_decide_por_aria_checked() -> None:

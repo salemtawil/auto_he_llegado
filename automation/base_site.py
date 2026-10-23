@@ -578,47 +578,61 @@ class BaseSite(ABC):
         return False
 
     def _asegurar_cuenta_prestada(self, root, *, progress_callback=None) -> str:
-        """Deja el selector en 'Cuenta prestada'. Devuelve que hizo.
+        """Intenta dejar el selector en 'Cuenta prestada'. NUNCA lanza.
 
-        Tres respuestas posibles: "ausente" (no hay selector en esta pantalla,
-        que es lo normal en la mayoria de pasos), "ya_estaba" y "cambiado". Si
-        el selector esta y NO se consigue dejarlo en prestada, lanza: seguir
-        con la cuenta propia hace que el proceso falle mas adelante, y mas
-        vale decirlo aqui, donde se entiende.
+        Respuestas: "ausente" (no hay selector en esta pantalla, que es lo
+        normal en la mayoria de pasos), "ya_estaba", "cambiado" y
+        "no_confirmado".
+
+        Lo importante es lo que NO hace: no tumba la corrida. La primera
+        version lanzaba si no conseguia confirmar el cambio, y eso convirtio
+        en fallo seguro un flujo que antes funcionaba sin tocar el selector.
+        Un paso de conveniencia no puede ser la causa de que una corrida
+        muera: si no se puede confirmar, se avisa, se deja anotado que leyo y
+        el flujo sigue. Si de verdad hacia falta la cuenta prestada, el sitio
+        lo dira mas adelante con su propio error, que es informacion real; si
+        la lectura estaba equivocada, la corrida se salva.
         """
 
         estado = self._leer_estado_de_cuenta(root)
         if not estado.get("encontrado"):
             return "ausente"
         if estado.get("prestada"):
-            self._record_run_stat("cuenta_prestada_ya_activa", aria=estado.get("aria"))
+            self._record_run_stat("cuenta_prestada_ya_activa", **self._detalles(estado))
             return "ya_estaba"
 
+        self._anotar("cuenta_en_propia_detectada", **self._detalles(estado))
         self.emit_progress(
             progress_callback,
             phase="account_selection",
-            message="El selector esta en 'Cuenta propia'. Cambiando a 'Cuenta prestada'...",
+            message="El selector parece estar en 'Cuenta propia'. Cambiando a 'Cuenta prestada'...",
         )
-        interruptor = self._localizar_control_de_cuenta(root)
-        if interruptor is None:
-            raise RuntimeError(
-                "Se vio el selector de cuenta en 'Cuenta propia', pero no se "
-                "encontro el interruptor para cambiarlo."
+        control = self._localizar_control_de_cuenta(root)
+        if control is None:
+            self._anotar("cuenta_sin_control", **self._detalles(estado))
+            self.emit_progress(
+                progress_callback,
+                phase="account_selection",
+                message=(
+                    "No se encontro el control para cambiar la cuenta. Se sigue"
+                    " sin tocarlo."
+                ),
             )
-        self._click_locator_resilient(
-            interruptor,
-            phase="account_selection",
-            error_message="No se pudo pulsar el interruptor de cuenta prestada/propia.",
-        )
+            return "no_confirmado"
+
+        with suppress(Exception):
+            self._click_locator_resilient(
+                control,
+                phase="account_selection",
+                error_message="No se pudo pulsar el control de cuenta prestada/propia.",
+            )
 
         limite = monotonic() + self.CUENTA_SWITCH_TIMEOUT_MS / 1000
+        ultimo = estado
         while monotonic() < limite:
-            if self._leer_estado_de_cuenta(root).get("prestada"):
-                # La linea de tiempo la define cada sitio, no la base.
-                registrar = getattr(self, "_record_timeline_event", None)
-                if callable(registrar):
-                    registrar("cuenta_prestada_activada")
-                self._record_run_stat("cuenta_prestada_activada")
+            ultimo = self._leer_estado_de_cuenta(root)
+            if ultimo.get("prestada"):
+                self._anotar("cuenta_prestada_activada", **self._detalles(ultimo))
                 self.emit_progress(
                     progress_callback,
                     phase="account_selection",
@@ -627,10 +641,46 @@ class BaseSite(ABC):
                 return "cambiado"
             with suppress(Exception):
                 root.wait_for_timeout(100)
-        raise RuntimeError(
-            "Se pulso el interruptor pero el selector no quedo en 'Cuenta "
-            "prestada'. El proceso no funciona con la cuenta propia."
+
+        # No se pudo confirmar. Se anota TODO lo que se leyo -antes y despues-
+        # porque la causa mas probable es que la lectura del estado este
+        # equivocada para esta pantalla, y sin esos datos no hay forma de
+        # saberlo desde fuera.
+        self._anotar(
+            "cuenta_prestada_no_confirmada",
+            antes=self._detalles(estado),
+            despues=self._detalles(ultimo),
         )
+        self.emit_progress(
+            progress_callback,
+            phase="account_selection",
+            message=(
+                "No se pudo confirmar que el selector quedara en 'Cuenta"
+                " prestada'. La corrida sigue: si el sitio lo necesita, lo dira."
+            ),
+        )
+        return "no_confirmado"
+
+    @staticmethod
+    def _detalles(estado: dict) -> dict:
+        """Lo que se leyo del selector, para el log. Sin el no hay diagnostico."""
+
+        return {
+            "modo": estado.get("modo"),
+            "prestada": estado.get("prestada"),
+            "aria": estado.get("aria"),
+            "encontrado": estado.get("encontrado"),
+        }
+
+    def _anotar(self, evento: str, **detalles) -> None:
+        """Deja el evento en la linea de tiempo y en las estadisticas."""
+
+        registrar = getattr(self, "_record_timeline_event", None)
+        if callable(registrar):
+            with suppress(Exception):
+                registrar(evento, **detalles)
+        with suppress(Exception):
+            self._record_run_stat(evento, **detalles)
 
     def _localizar_control_de_cuenta(self, root):
         """Lo que hay que pulsar para quedarse en "Cuenta prestada".
