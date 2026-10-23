@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 from contextlib import suppress
 
 from abc import ABC, abstractmethod
@@ -14,6 +16,15 @@ from automation.flow_state_detector import FlowStateDetector, snapshot_to_dict
 from core.models import LocalConfig, ProcessExecutionRequest, SiteExecutionResult
 
 ProgressCallback = Callable[[str, str], None]
+
+
+def _a_texto_corto(valor) -> str | None:
+    """La radiografia del selector, en una linea, para que quepa en el log."""
+
+    try:
+        return json.dumps(valor, ensure_ascii=False, default=str)[:800]
+    except Exception:  # noqa: BLE001 - el log nunca puede ser el que falle
+        return str(valor)[:800]
 
 
 class BaseSite(ABC):
@@ -463,18 +474,28 @@ class BaseSite(ABC):
     #
     # Aparece en dos sitios: en el panel de Paripe nada mas entrar, y en el
     # iframe de Compinche/Ready4Drive al pulsar "He llegado". El proceso solo
-    # va bien con "Cuenta prestada", asi que hay que dejarlo ahi siempre.
+    # va bien con "Cuenta prestada".
     #
-    # El control es un switch de Headless UI:
+    # La regla de este bloque es la carga de la prueba: SOLO se pulsa cuando
+    # hay prueba positiva de que el selector esta en "Cuenta propia". No basta
+    # con "no parece estar en prestada". La version anterior hacia justo eso
+    # -si no veia senales, daba por hecho propia y pulsaba- y asi se puede
+    # voltear un selector que ya estaba bien, que es el peor resultado
+    # posible: la corrida falla por culpa del arreglo. Cuando no se sabe, no
+    # se toca, y se guarda una radiografia del control en el log para poder
+    # decidirlo despues con datos en vez de con suposiciones.
     #
-    #   <button role="switch" aria-checked="false" ...>
+    # Hay DOS controles distintos segun el sitio:
     #
-    # y NO se usa `aria-checked` para decidir, a proposito: en el panel real,
-    # con "Cuenta prestada" activa, el switch vale aria-checked="false". Esa
-    # inversion es una decision del sitio que puede cambiar sin avisar. Lo que
-    # no cambia es lo que ve el agente: el lado activo esta `disabled` (no
-    # puedes elegir el que ya tienes) y pintado con la clase de acento,
-    # mientras el otro va en gris. Eso es lo que se lee.
+    # - Compinche/Ready4Drive, dentro del iframe: un `role="radiogroup"` de
+    #   Headless UI con dos `role="radio"`. El elegido lleva
+    #   `aria-checked="true"` y `data-checked` (vacio). Ojo con
+    #   `aria-label="borrowed-account"`: esta en LAS DOS opciones, es el
+    #   nombre del grupo y no distingue nada. Lo que distingue es el texto.
+    # - Paripe, en el panel: un `role="switch"` con una etiqueta a cada lado.
+    #   Ahi `aria-checked` del switch aparece INVERTIDO respecto a lo que se
+    #   ve, asi que no decide nada: se miran las dos etiquetas y se exige que
+    #   una, y solo una, de senales de estar activa.
 
     _CUENTA_PRESTADA_RE = r"cuenta\s+prestada|borrowed\s+account|conta\s+emprestada"
     _CUENTA_PROPIA_RE = r"cuenta\s+propia|own\s+account|personal\s+account|conta\s+pr[oó]pria"
@@ -482,60 +503,137 @@ class BaseSite(ABC):
     _JS_ESTADO_DE_CUENTA = r"""([rePrestada, rePropia]) => {
         const prestada = new RegExp(rePrestada, 'i');
         const propia = new RegExp(rePropia, 'i');
-        const texto = (e) => (e && e.textContent) || '';
+        const texto = (e) => (((e && e.textContent) || '')).replace(/\s+/g, ' ').trim();
         const cajas = [...document.querySelectorAll('div, section, fieldset')]
             .filter((d) => prestada.test(texto(d)) && propia.test(texto(d)));
-        if (!cajas.length) return { encontrado: false };
+        if (!cajas.length) return { encontrado: false, motivo: 'sin_caja' };
         // La mas interna: la que menos descendientes tiene sigue conteniendo
-        // las dos etiquetas y el switch, sin arrastrar media pagina.
-        cajas.sort((a, b) => a.querySelectorAll('*').length - b.querySelectorAll('*').length);
-        const caja = cajas[0];
+        // las dos etiquetas y el control, sin arrastrar media pagina.
+        const masInterno = (lista) => {
+            if (!lista.length) return null;
+            const copia = [...lista];
+            copia.sort((a, b) => a.querySelectorAll('*').length - b.querySelectorAll('*').length);
+            return copia[0];
+        };
+        const caja = masInterno(cajas);
         // El checkbox "Permitirme subir una selfie del propietario" vive en
         // este mismo modal en Compinche. NO es el selector de cuenta, y
-        // pulsarlo activaria una opcion que el agente no pidio.
-        const esDelPropietario = (e) => /propietario|owner\s*selfie|titular/i.test(
-            (e.closest('label, div, fieldset') || e).textContent || ''
-        );
+        // pulsarlo activaria una opcion que el agente no pidio. Se mira solo
+        // su entorno inmediato: subir hasta el primer `div` traia la caja
+        // entera y descartaba tambien el control bueno.
+        const ambas = (t) => prestada.test(t) && propia.test(t);
+        // El entorno propio del control: se sube mientras el ancestro siga
+        // hablando de UN solo lado. En cuanto aparecen los dos textos ya es
+        // la caja compartida, y su texto no dice nada de este control.
+        const entorno = (e) => {
+            let n = e;
+            let mejor = e;
+            while (n && n !== caja) {
+                if (ambas(texto(n))) break;
+                mejor = n;
+                n = n.parentElement;
+            }
+            return mejor;
+        };
+        const vecinos = (e) => [e.previousElementSibling, e.nextElementSibling]
+            .map((v) => (v && !ambas(texto(v)) ? texto(v) : ''))
+            .join(' ');
+        const esDelPropietario = (e) => {
+            const cerca = entorno(e);
+            const etiquetas = [e.getAttribute('aria-label'), e.getAttribute('name'), e.id]
+                .filter(Boolean).join(' ');
+            return /propietario|owner\s*selfie|titular/i.test(
+                etiquetas + ' ' + texto(cerca) + ' ' + vecinos(cerca)
+            );
+        };
         const interruptor = [...caja.querySelectorAll('[role="switch"], input[type="checkbox"]')]
             .find((c) => !esDelPropietario(c)) || null;
-        const botones = [...caja.querySelectorAll('button, label, [role="radio"]')];
-        const lado = botones.find((b) => prestada.test(texto(b)) && !propia.test(texto(b)));
-        if (!interruptor || !lado) return { encontrado: false };
-        const clases = typeof lado.className === 'string' ? lado.className : '';
-        const activa = Boolean(lado.disabled)
-            || /text-primary|font-semibold/.test(clases)
-            || lado.getAttribute('aria-checked') === 'true';
+        const candidatos = [...caja.querySelectorAll('button, label, [role="radio"], span, div')];
+        const senales = (e) => {
+            if (!e) return null;
+            const clases = typeof e.className === 'string' ? e.className : '';
+            return {
+                tag: e.tagName,
+                rol: e.getAttribute('role'),
+                aria: e.getAttribute('aria-checked'),
+                data: e.hasAttribute('data-checked') ? (e.getAttribute('data-checked') || '') : null,
+                off: Boolean(e.disabled) || e.getAttribute('aria-disabled') === 'true',
+                acento: /text-primary|font-semibold|font-bold|bg-primary/.test(clases),
+                clases: clases.slice(0, 120),
+                texto: texto(e).slice(0, 50),
+            };
+        };
+        // Tri-estado a proposito: true, false o null ("no se sabe"). Null no
+        // es false: confundirlos es lo que hacia pulsar a ciegas.
+        const activo = (s) => {
+            if (!s) return null;
+            if (s.aria === 'true' || s.data !== null) return true;
+            if (s.aria === 'false') return false;
+            if (s.off || s.acento) return true;
+            return null;
+        };
+        // De todos los elementos que hablan de un solo lado se elige el que
+        // LLEVA la senal, no el mas interno. En el panel real la etiqueta es
+        // un <span> sin nada dentro de un <button disabled> con la clase de
+        // acento: quedarse con el span mas interno es quedarse justo con el
+        // unico trozo que no dice nada.
+        const elegir = (lista) => {
+            if (!lista.length) return null;
+            return lista.find((e) => activo(senales(e)) !== null) || masInterno(lista);
+        };
+        const ladoPrestada = elegir(
+            candidatos.filter((b) => prestada.test(texto(b)) && !propia.test(texto(b)))
+        );
+        const ladoPropia = elegir(
+            candidatos.filter((b) => propia.test(texto(b)) && !prestada.test(texto(b)))
+        );
+        const sPrestada = senales(ladoPrestada);
+        const sPropia = senales(ladoPropia);
+        const p = activo(sPrestada);
+        const q = activo(sPropia);
+        let estado = null;
+        if (p === true && q !== true) estado = true;
+        else if (q === true && p !== true) estado = false;
+        else if (p === false && q === null) estado = false;
+        else if (q === false && p === null) estado = true;
         return {
-            encontrado: true,
-            prestada: activa,
-            aria: interruptor.getAttribute('aria-checked'),
+            encontrado: Boolean(ladoPrestada || ladoPropia),
+            motivo: (ladoPrestada || ladoPropia) ? null : 'sin_lados',
+            prestada: estado,
+            aria: interruptor ? interruptor.getAttribute('aria-checked') : null,
+            radiografia: {
+                prestada: sPrestada,
+                propia: sPropia,
+                sw: senales(interruptor),
+            },
         };
     }"""
 
-    # Cuanto se espera a que el switch refleje el cambio tras pulsarlo.
+    # Cuanto se espera a que el control refleje el cambio tras pulsarlo.
     CUENTA_SWITCH_TIMEOUT_MS = 2_500
+    # Cuanto se espera a poder LEER el estado antes de decidir nada. El panel
+    # de Paripe se pinta justo despues de entrar: si se mira demasiado pronto
+    # las dos etiquetas estan ahi pero todavia sin deshabilitar ni pintar, y
+    # entonces no hay forma de saber cual esta activa. Esperar a que el sitio
+    # termine es la diferencia entre leer bien y pulsar a ciegas.
+    CUENTA_LECTURA_TIMEOUT_MS = 3_000
 
     def _leer_estado_de_cuenta(self, root) -> dict:
-        """Dice si la cuenta prestada esta elegida. Nunca lanza.
+        """En que lado esta el selector de cuenta. Nunca lanza.
 
-        Hay DOS controles distintos segun el sitio:
-
-        - Compinche/Ready4Drive, dentro del iframe: un `role="radiogroup"` de
-          Headless UI con dos `role="radio"`. El elegido lleva
-          `aria-checked="true"` y `data-checked`. Ojo con el
-          `aria-label="borrowed-account"`: esta en LAS DOS opciones, es el
-          nombre del grupo y no sirve para distinguirlas. Lo que distingue es
-          el texto de cada tarjeta.
-        - Paripe, en el panel: un `role="switch"` con una etiqueta a cada
-          lado. Ahi el estado se lee de las etiquetas, no del switch (ver
-          `_JS_ESTADO_DE_CUENTA`).
+        `prestada` es tri-estado: True, False o None cuando no se pudo
+        determinar. Quien llame NO debe tratar None como False.
         """
 
         opcion = self._opcion_prestada_de_radiogrupo(root)
         if opcion is not None:
+            aria = None
+            with suppress(Exception):
+                aria = opcion.get_attribute("aria-checked")
             return {
                 "encontrado": True,
                 "prestada": self._radio_esta_marcado(opcion),
+                "aria": aria,
                 "modo": "radio",
             }
         try:
@@ -543,10 +641,14 @@ class BaseSite(ABC):
                 self._JS_ESTADO_DE_CUENTA,
                 [self._CUENTA_PRESTADA_RE, self._CUENTA_PROPIA_RE],
             )
-        except Exception:  # noqa: BLE001 - si no se puede mirar, no hay paso que dar
-            return {"encontrado": False}
+        except Exception as exc:  # noqa: BLE001 - si no se puede mirar, no hay paso que dar
+            return {
+                "encontrado": False,
+                "motivo": f"error:{type(exc).__name__}",
+                "modo": "switch",
+            }
         if not isinstance(estado, dict):
-            return {"encontrado": False}
+            return {"encontrado": False, "motivo": "sin_respuesta", "modo": "switch"}
         estado["modo"] = "switch"
         return estado
 
@@ -566,23 +668,47 @@ class BaseSite(ABC):
         return None
 
     @staticmethod
-    def _radio_esta_marcado(opcion) -> bool:
-        with suppress(Exception):
-            if opcion.get_attribute("aria-checked") == "true":
-                return True
+    def _radio_esta_marcado(opcion):
+        """True, False o None si no se pudo saber. None NO es False."""
+
         with suppress(Exception):
             # Headless UI lo pone vacio (`data-checked=""`), asi que vale con
             # que exista: comparar contra "true" daria siempre falso.
             if opcion.get_attribute("data-checked") is not None:
                 return True
-        return False
+        aria = None
+        with suppress(Exception):
+            aria = opcion.get_attribute("aria-checked")
+        if aria == "true":
+            return True
+        if aria == "false":
+            return False
+        return None
+
+    def _esperar_estado_de_cuenta(self, root) -> dict:
+        """Lee el selector hasta poder decir en que lado esta, o se rinde.
+
+        Devuelve la primera lectura concluyente; si no la hay, la ultima que
+        consiguio, para que quede en el log tal cual se vio.
+        """
+
+        limite = monotonic() + self.CUENTA_LECTURA_TIMEOUT_MS / 1000
+        ultimo: dict = {"encontrado": False, "motivo": "sin_lectura"}
+        while True:
+            ultimo = self._leer_estado_de_cuenta(root)
+            if ultimo.get("encontrado") and ultimo.get("prestada") is not None:
+                return ultimo
+            if monotonic() >= limite:
+                return ultimo
+            with suppress(Exception):
+                root.wait_for_timeout(150)
 
     def _asegurar_cuenta_prestada(self, root, *, progress_callback=None) -> str:
         """Intenta dejar el selector en 'Cuenta prestada'. NUNCA lanza.
 
         Respuestas: "ausente" (no hay selector en esta pantalla, que es lo
-        normal en la mayoria de pasos), "ya_estaba", "cambiado" y
-        "no_confirmado".
+        normal en la mayoria de pasos), "ya_estaba", "indeterminado" (esta,
+        pero no se pudo leer en que lado), "cambiado" y "no_confirmado".
 
         Lo importante es lo que NO hace: no tumba la corrida. La primera
         version lanzaba si no conseguia confirmar el cambio, y eso convirtio
@@ -594,12 +720,31 @@ class BaseSite(ABC):
         la lectura estaba equivocada, la corrida se salva.
         """
 
-        estado = self._leer_estado_de_cuenta(root)
+        estado = self._esperar_estado_de_cuenta(root)
         if not estado.get("encontrado"):
+            # Se anota aunque no haya nada: distinguir "no hay selector en esta
+            # pantalla" de "lo hay y no lo vi" es justo lo que hace falta para
+            # diagnosticar, y desde fuera las dos se parecen al silencio.
+            self._anotar("cuenta_selector_ausente", **self._detalles(estado))
             return "ausente"
-        if estado.get("prestada"):
+        marcado = estado.get("prestada")
+        if marcado is True:
             self._record_run_stat("cuenta_prestada_ya_activa", **self._detalles(estado))
             return "ya_estaba"
+        if marcado is None:
+            # No se sabe en que lado esta. No se toca: pulsar a ciegas puede
+            # voltear un selector que ya estaba en prestada y tumbar una
+            # corrida que iba bien. Queda la radiografia en el log.
+            self._anotar("cuenta_estado_indeterminado", **self._detalles(estado))
+            self.emit_progress(
+                progress_callback,
+                phase="account_selection",
+                message=(
+                    "No se pudo leer en que lado esta el selector de cuenta."
+                    " Se deja como esta para no empeorarlo."
+                ),
+            )
+            return "indeterminado"
 
         self._anotar("cuenta_en_propia_detectada", **self._detalles(estado))
         self.emit_progress(
@@ -631,7 +776,7 @@ class BaseSite(ABC):
         ultimo = estado
         while monotonic() < limite:
             ultimo = self._leer_estado_de_cuenta(root)
-            if ultimo.get("prestada"):
+            if ultimo.get("prestada") is True:
                 self._anotar("cuenta_prestada_activada", **self._detalles(ultimo))
                 self.emit_progress(
                     progress_callback,
@@ -665,11 +810,16 @@ class BaseSite(ABC):
     def _detalles(estado: dict) -> dict:
         """Lo que se leyo del selector, para el log. Sin el no hay diagnostico."""
 
+        radiografia = estado.get("radiografia")
+        if radiografia is not None and not isinstance(radiografia, str):
+            radiografia = _a_texto_corto(radiografia)
         return {
             "modo": estado.get("modo"),
             "prestada": estado.get("prestada"),
             "aria": estado.get("aria"),
             "encontrado": estado.get("encontrado"),
+            "motivo": estado.get("motivo"),
+            "radiografia": radiografia,
         }
 
     def _anotar(self, evento: str, **detalles) -> None:

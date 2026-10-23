@@ -185,6 +185,9 @@ def test_el_aria_label_no_sirve_para_distinguir_las_opciones() -> None:
 
 
 class _Sitio(BaseSite):
+    # Las pruebas no esperan al navegador: la espera se cubre aparte.
+    CUENTA_LECTURA_TIMEOUT_MS = 0
+
     def execute(self, *args, **kwargs):  # pragma: no cover - abstracto
         raise NotImplementedError
 
@@ -277,15 +280,54 @@ def test_si_el_switch_no_responde_la_corrida_sigue() -> None:
     assert sitio._asegurar_cuenta_prestada(_Raiz()) == "no_confirmado"  # noqa: SLF001
 
 
-def test_el_estado_no_se_decide_por_aria_checked() -> None:
-    # En el panel real, prestada activa == aria-checked "false". Si alguien
-    # "simplifica" esto leyendo el aria, invierte el comportamiento.
+def _js_del_estado() -> str:
     fuente = (RAIZ / "automation" / "base_site.py").read_text(encoding="utf-8")
-    js = re.search(r'_JS_ESTADO_DE_CUENTA = r"""(.*?)"""', fuente, re.S).group(1)
-    decision = js[js.index("const activa") : js.rindex("return {")]
-    assert "aria-checked" not in decision or "lado.getAttribute" in decision
-    assert "disabled" in decision, "el lado activo se reconoce porque esta deshabilitado"
-    assert "text-primary" in decision, "y porque lleva la clase de acento"
+    return re.search(r'_JS_ESTADO_DE_CUENTA = r"""(.*?)"""', fuente, re.S).group(1)
+
+
+def _cuerpo_de_activo(js: str) -> str:
+    """El cuerpo de `activo(...)`, que es quien decide si un lado esta puesto."""
+
+    inicio = js.index("const activo = (s) => {")
+    fin = js.index("\n        };", inicio)
+    return js[inicio:fin]
+
+
+def test_el_aria_del_switch_no_decide_el_estado() -> None:
+    """En el panel real, prestada activa == switch con aria-checked "false".
+
+    Esa inversion es del sitio y puede cambiar sin avisar, asi que el aria del
+    SWITCH solo se guarda para el log. Quien decide son las dos etiquetas: de
+    ahi sale `activo(...)`, que mira cada lado por separado.
+    """
+
+    js = _js_del_estado()
+    # El aria del interruptor aparece una sola vez, y es la del campo de log.
+    usos = re.findall(r"interruptor\.getAttribute\('aria-checked'\)", js)
+    assert len(usos) == 1, usos
+    assert "aria: interruptor ? interruptor.getAttribute('aria-checked') : null," in js
+    decision = _cuerpo_de_activo(js)
+    assert "interruptor" not in decision, "la decision no puede mirar el switch"
+    assert "s.off" in decision, "el lado activo se reconoce porque esta deshabilitado"
+    assert "s.acento" in decision, "y porque lleva la clase de acento"
+
+
+def test_sin_senales_el_estado_es_desconocido_y_no_falso() -> None:
+    """La trampa que costo una corrida: tratar "no lo se" como "cuenta propia".
+
+    Si ninguna de las dos etiquetas da senales -pasa mientras el panel se
+    esta pintando- la respuesta tiene que ser null. Darla por falsa hace
+    pulsar a ciegas, y pulsar un selector que ya estaba en prestada lo deja
+    en propia: la corrida falla por culpa del arreglo.
+    """
+
+    js = _js_del_estado()
+    decision = _cuerpo_de_activo(js)
+    assert decision.rstrip().endswith("return null;"), decision[-80:]
+    # Y la decision combinada nunca convierte un null en false por descarte.
+    combinada = js[js.index("let estado = null;") : js.index("return {", js.index("let estado"))]
+    assert "p === false && q === null" in combinada
+    assert "q === false && p === null" in combinada
 
 
 def test_el_html_real_del_panel_sigue_encajando_con_lo_que_se_busca() -> None:
@@ -294,3 +336,75 @@ def test_el_html_real_del_panel_sigue_encajando_con_lo_que_se_busca() -> None:
     assert re.search(BaseSite._CUENTA_PRESTADA_RE, HTML_REAL_PRESTADA, re.I)  # noqa: SLF001
     assert re.search(BaseSite._CUENTA_PROPIA_RE, HTML_REAL_PRESTADA, re.I)  # noqa: SLF001
     assert 'role="switch"' in HTML_REAL_PRESTADA
+
+
+def test_si_no_se_sabe_en_que_lado_esta_no_se_toca() -> None:
+    """Lo mas importante de todo el paso: ante la duda, no tocar.
+
+    Pulsar sin saber puede voltear un selector que ya estaba bien. Es
+    exactamente lo que paso en paripe.io el 23/10: el paso pulso, el selector
+    acabo en cuenta propia y la corrida murio por un paso de conveniencia.
+    """
+
+    sitio = _Sitio([{"encontrado": True, "prestada": None, "aria": "false", "modo": "switch"}])
+
+    assert sitio._asegurar_cuenta_prestada(_Raiz()) == "indeterminado"  # noqa: SLF001
+    assert sitio.clicks == []
+    eventos = [nombre for nombre, _ in sitio.anotaciones]
+    assert "cuenta_estado_indeterminado" in eventos
+
+
+def test_la_ausencia_del_selector_tambien_queda_anotada() -> None:
+    # Desde fuera, "no hay selector en esta pantalla" y "lo hay y no lo vi"
+    # se parecen al silencio. Distinguirlas es todo el diagnostico.
+    sitio = _Sitio([{"encontrado": False, "motivo": "sin_caja", "modo": "switch"}])
+
+    assert sitio._asegurar_cuenta_prestada(_Raiz()) == "ausente"  # noqa: SLF001
+    detalle = dict(sitio.anotaciones)["cuenta_selector_ausente"]
+    assert detalle["motivo"] == "sin_caja"
+
+
+def test_se_espera_a_que_el_panel_termine_de_pintarse() -> None:
+    """El panel de Paripe se pinta justo despues de entrar.
+
+    Mirarlo demasiado pronto da las dos etiquetas sin deshabilitar ni pintar,
+    es decir, ilegible. Rendirse en la primera lectura es lo que convierte un
+    problema de tiempos en una decision equivocada.
+    """
+
+    class _SitioLento(_Sitio):
+        CUENTA_LECTURA_TIMEOUT_MS = 2_000
+
+    lecturas = [
+        {"encontrado": True, "prestada": None, "modo": "switch"},
+        {"encontrado": True, "prestada": None, "modo": "switch"},
+        {"encontrado": True, "prestada": True, "aria": "false", "modo": "switch"},
+    ]
+    sitio = _SitioLento(lecturas)
+
+    assert sitio._asegurar_cuenta_prestada(_Raiz()) == "ya_estaba"  # noqa: SLF001
+    assert sitio.clicks == []
+
+
+def test_la_espera_se_rinde_y_devuelve_lo_ultimo_que_vio() -> None:
+    class _SitioCorto(_Sitio):
+        CUENTA_LECTURA_TIMEOUT_MS = 120
+
+    sitio = _SitioCorto([{"encontrado": True, "prestada": None, "modo": "switch"}])
+
+    assert sitio._asegurar_cuenta_prestada(_Raiz()) == "indeterminado"  # noqa: SLF001
+
+
+def test_la_radiografia_del_control_llega_al_log_en_una_linea() -> None:
+    # Sin ella no hay forma de decidir desde fuera por que no se pudo leer.
+    estado = {
+        "encontrado": True,
+        "prestada": None,
+        "modo": "switch",
+        "radiografia": {"prestada": {"off": False, "acento": False}, "propia": None},
+    }
+    detalles = BaseSite._detalles(estado)  # noqa: SLF001
+
+    assert isinstance(detalles["radiografia"], str)
+    assert "acento" in detalles["radiografia"]
+    assert "\n" not in detalles["radiografia"]
