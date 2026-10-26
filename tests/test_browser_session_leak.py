@@ -727,7 +727,7 @@ def test_el_cierre_manual_libera_todo_y_deja_el_vigilante_vivo(
         session, *_ = build_session(keep_open=True, driver_pid=pid)
         BrowserManager._register_session(session)
 
-    assert BrowserManager.close_all_browsers() == 2
+    assert BrowserManager.close_all_browsers() == (2, 0)
     assert sorted(killed) == [901, 902]
     assert BrowserManager._sessions == []
     assert parado == [], "El cierre manual no debe parar el vigilante."
@@ -777,3 +777,62 @@ def test_una_sesion_retenida_sigue_contando() -> None:
     gc.collect()
 
     assert identificador not in bm._SESIONES_VIVAS
+
+
+def test_el_boton_respeta_los_navegadores_de_corridas_vivas(
+    _clean_registry, monkeypatch
+) -> None:
+    """Con cuatro paneles, el boton mataba tambien a los que trabajaban.
+
+    Limpiar los navegadores que sobran no puede costar interrumpir a los
+    otros tres agentes.
+    """
+
+    killed = _clean_registry
+    monkeypatch.setattr(
+        bm.BrowserManager, "_stop_reaper", classmethod(lambda cls: None)
+    )
+    viva, *_ = build_session(keep_open=True, driver_pid=911)
+    viva._owner_thread = _HiloFalso(True)
+    terminada = _sesion_terminada(driver_pid=912)
+    for session in (viva, terminada):
+        BrowserManager._register_session(session)
+
+    assert BrowserManager.close_all_browsers(respetar_corridas=True) == (1, 1)
+    assert killed == [912], "solo debia cerrarse la que ya habia terminado"
+    assert BrowserManager._sessions == [viva]
+
+
+def test_el_navegador_abierto_a_mano_si_se_cierra(_clean_registry, monkeypatch) -> None:
+    """Es justo lo que el boton viene a limpiar.
+
+    Su hilo muere en cuanto termina de navegar, asi que sin esta excepcion
+    `operator_owned` lo trataria como corrida terminada... y de hecho lo es:
+    lo que no puede es salvarse por el vigilante y tampoco cerrarse aqui.
+    """
+
+    killed = _clean_registry
+    monkeypatch.setattr(
+        bm.BrowserManager, "_stop_reaper", classmethod(lambda cls: None)
+    )
+    manual, *_ = build_session(keep_open=True, driver_pid=921)
+    manual._owner_thread = _HiloFalso(False)
+    manual.operator_owned = True
+    BrowserManager._register_session(manual)
+
+    assert BrowserManager.close_all_browsers(respetar_corridas=True) == (1, 0)
+    assert killed == [921]
+
+
+def test_sin_pedirlo_el_cierre_sigue_siendo_total(_clean_registry, monkeypatch) -> None:
+    # La salida de la app y shutdown_all no pueden dejarse nada abierto.
+    killed = _clean_registry
+    monkeypatch.setattr(
+        bm.BrowserManager, "_stop_reaper", classmethod(lambda cls: None)
+    )
+    viva, *_ = build_session(keep_open=True, driver_pid=931)
+    viva._owner_thread = _HiloFalso(True)
+    BrowserManager._register_session(viva)
+
+    assert BrowserManager.close_all_browsers() == (1, 0)
+    assert killed == [931]

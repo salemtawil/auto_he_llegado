@@ -94,7 +94,7 @@ def test_un_equipo_chico_recibe_mas_tiempo_de_espera_no_menos():
 
 def test_si_no_se_pudo_medir_la_ram_se_asume_el_caso_chico():
     perfil = derivar_perfil(equipo(4096, 8, confiable=False))
-    assert perfil.max_concurrent_processes == 1
+    assert perfil.procesos_comodos == 1
     assert "no se pudo medir" in perfil.motivo
 
 
@@ -117,7 +117,6 @@ def test_la_primera_vez_mide_el_equipo_y_guarda_los_limites():
     resultado = MachineTuningService(servicio_config, perfil=perfil).ajustar()
 
     assert resultado.aplicado is True
-    assert resultado.config.max_concurrent_processes == 1
     assert resultado.config.page_timeout_seconds == perfil.page_timeout_seconds
     assert resultado.config.hardware_signature == perfil.firma
     assert resultado.config.hardware_profile == "ligero"
@@ -129,7 +128,6 @@ def test_en_el_mismo_equipo_no_vuelve_a_tocar_nada():
     guardada = LocalConfig(
         hardware_signature=perfil.firma,
         hardware_profile=perfil.nombre,
-        max_concurrent_processes=1,
         # El agente bajo el tiempo de espera a mano:
         page_timeout_seconds=90,
     )
@@ -138,17 +136,15 @@ def test_en_el_mismo_equipo_no_vuelve_a_tocar_nada():
 
     assert resultado.aplicado is False
     assert resultado.config.page_timeout_seconds == 90
-    assert resultado.config.max_concurrent_processes == 1
     assert servicio_config.guardados == []
 
 
 def test_una_configuracion_copiada_de_otra_maquina_se_recalcula():
-    # Un config traido de un equipo holgado no debe imponerle dos procesos a
-    # un equipo de 4 GB.
+    # Un config traido de un equipo holgado no debe imponerle a un equipo de
+    # 4 GB las esperas cortas que alli funcionaban.
     ajeno = LocalConfig(
         hardware_signature="Windows|32GB|12cpu",
         hardware_profile="holgado",
-        max_concurrent_processes=2,
         page_timeout_seconds=180,
     )
     servicio_config = ConfigServiceFalso(ajeno)
@@ -157,7 +153,7 @@ def test_una_configuracion_copiada_de_otra_maquina_se_recalcula():
     ).ajustar()
 
     assert resultado.aplicado is True
-    assert resultado.config.max_concurrent_processes == 1
+    assert resultado.config.page_timeout_seconds > 180
     assert resultado.config.hardware_profile == "ligero"
 
 
@@ -181,7 +177,6 @@ def test_una_medicion_poco_fiable_no_se_guarda_nunca():
     guardada = LocalConfig(
         hardware_signature=perfil_bueno.firma,
         hardware_profile=perfil_bueno.nombre,
-        max_concurrent_processes=2,
         page_timeout_seconds=180,
     )
     servicio_config = ConfigServiceFalso(guardada)
@@ -192,12 +187,30 @@ def test_una_medicion_poco_fiable_no_se_guarda_nunca():
     assert resultado.aplicado is False
     assert servicio_config.guardados == [], "no debe escribir una medida que no es fiable"
     assert servicio_config.config.hardware_signature == perfil_bueno.firma
-    assert servicio_config.config.max_concurrent_processes == 2
+    assert servicio_config.config.page_timeout_seconds == 180
     # Para ESTA sesion si se usan los limites prudentes.
-    assert resultado.config.max_concurrent_processes == 1
+    assert resultado.config.page_timeout_seconds > 180
 
 
 def test_el_perfil_del_equipo_se_mide_una_sola_vez():
     from config.machine_profile import perfil_del_equipo
 
     assert perfil_del_equipo() is perfil_del_equipo()
+
+
+def test_el_perfil_ya_no_le_quita_paneles_a_nadie():
+    """El tope por hardware desaparecio: lo decide el operador, no la RAM.
+
+    Antes, un equipo de 8 GB se quedaba con dos paneles de cuatro y los otros
+    dos salian en gris sin explicacion. La estimacion sigue hecha -es util
+    saber para cuantos da el equipo- pero ya no capa nada.
+    """
+
+    for ram, nucleos in [(4096, 2), (8192, 4), (32768, 16)]:
+        perfil = derivar_perfil(equipo(ram, nucleos))
+        assert perfil.max_concurrent_processes == 4, (ram, nucleos)
+
+    chico = derivar_perfil(equipo(4096, 2))
+    holgado = derivar_perfil(equipo(32768, 16))
+    assert chico.procesos_comodos < holgado.procesos_comodos
+    assert "da comodo para" in describir_equipo(chico)

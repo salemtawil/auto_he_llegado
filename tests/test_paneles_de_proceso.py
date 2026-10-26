@@ -113,3 +113,57 @@ def test_el_tope_de_procesos_no_pasa_del_numero_de_paneles() -> None:
     assert "len(self.SLOT_IDS)" in cuerpo, (
         "el tope estaba escrito a mano: con cuatro paneles tiene que salir de la lista"
     )
+
+
+def _cuerpo(nombre: str) -> str:
+    return next(
+        ast.unparse(n)
+        for n in _clase_ventana().body
+        if isinstance(n, ast.FunctionDef) and n.name == nombre
+    )
+
+
+def test_tener_un_proceso_corriendo_no_apaga_los_demas_botones() -> None:
+    """Los cuatro paneles son independientes.
+
+    Antes habia un 2 escrito a mano aqui: con dos corridas vivas, los botones
+    "Iniciar" de los otros dos paneles quedaban en gris sin decir por que. Lo
+    unico que puede apagarlos es que el usuario no tenga acceso a la app.
+    """
+
+    cuerpo = _cuerpo("_sync_run_button_state")
+    assert "active_count" not in cuerpo, "el estado del boton no depende de cuantos corren"
+    assert "flow_engine" not in cuerpo
+    assert "access_blocked" in cuerpo
+
+
+def test_arrancar_un_proceso_no_mira_cuantos_hay_ya() -> None:
+    """La unica razon para no arrancar un panel es que ese panel ya corra."""
+
+    cuerpo = _cuerpo("start_process")
+    assert "_max_concurrent_processes" not in cuerpo
+    assert "modo paralelo" not in cuerpo
+    assert "slot.thread is not None" in cuerpo
+
+
+def test_un_aviso_general_no_borra_el_progreso_de_un_panel_que_corre() -> None:
+    """El agente tiene que poder seguir SU proceso.
+
+    Antes, cualquier aviso de la app -actualizaciones, pool, guardar
+    ajustes- se escribia en los cuatro paneles y borraba la linea de
+    progreso del que estaba corriendo.
+    """
+
+    cuerpo = _cuerpo("_broadcast_status_message")
+    assert "slot.thread is None" in cuerpo, "tiene que mirar cuales estan libres"
+    assert "incluso_ocupados" in cuerpo
+    # Y si no queda ninguno libre se escribe igual: perder un error por no
+    # tener donde ponerlo es peor que pisar una linea que se reescribe sola.
+    assert "not libres" in cuerpo
+
+
+def test_los_avisos_del_cierre_si_llegan_a_todos() -> None:
+    # Ahi el panel ocupado es justo el que necesita enterarse.
+    for aviso in ("Cerrando Playwright", "no respondieron a tiempo", "liberen sus"):
+        posicion = VENTANA.index(aviso)
+        assert "incluso_ocupados=True" in VENTANA[posicion : posicion + 400], aviso

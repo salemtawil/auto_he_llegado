@@ -556,7 +556,9 @@ class ProcessService:
             # Persist the failure: otherwise the last-result panel keeps showing the
             # previous *successful* run as if nothing had gone wrong.
             try:
-                self._last_result_service.save_result(failed_result)
+                self._last_result_service.save_result(
+                    failed_result, slot_id=normalized_request.slot_id
+                )
             except Exception as save_exc:  # noqa: BLE001
                 register_log_warning(
                     f"No se pudo guardar el resultado fallido en disco: {save_exc}"
@@ -626,7 +628,9 @@ class ProcessService:
         # Local persistence must not be able to fail the run: the remote log is
         # best-effort, and so is this.
         try:
-            self._last_result_service.save_result(result)
+            self._last_result_service.save_result(
+                result, slot_id=normalized_request.slot_id
+            )
         except Exception as save_exc:  # noqa: BLE001
             register_log_warning(f"No se pudo guardar el ultimo resultado en disco: {save_exc}")
         return result

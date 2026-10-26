@@ -1706,18 +1706,35 @@ class BrowserManager:
         return True
 
     @classmethod
-    def close_all_browsers(cls) -> int:
-        """Cierra todas las sesiones AHORA y deja el vigilante en marcha.
+    def close_all_browsers(cls, *, respetar_corridas: bool = False) -> tuple[int, int]:
+        """Cierra sesiones AHORA y deja el vigilante en marcha.
 
         Es lo que hay detras del boton de la app. A diferencia de
         shutdown_all(), que se usa al salir, aqui no se para el vigilante:
         la app sigue funcionando y las proximas corridas necesitan que vigile.
+
+        Con `respetar_corridas` no se tocan los navegadores de corridas vivas.
+        Con cuatro paneles independientes, el boton cerraba tambien el Chrome
+        de los procesos que estaban trabajando en otros paneles y los mataba a
+        todos de golpe. El navegador que el agente abrio a mano SI se cierra:
+        su hilo ya termino, que es justo lo que el boton viene a limpiar.
+
+        Devuelve (cerradas, respetadas).
         """
 
         with cls._sessions_lock:
             sessions = list(cls._sessions)
         cerradas = 0
+        respetadas = 0
         for session in sessions:
+            if respetar_corridas:
+                try:
+                    en_marcha = session.run_is_still_running() and not session.operator_owned
+                except Exception:  # noqa: BLE001 - ante la duda, no se cierra
+                    en_marcha = True
+                if en_marcha:
+                    respetadas += 1
+                    continue
             try:
                 if session.kill_driver():
                     cerradas += 1
@@ -1725,8 +1742,12 @@ class BrowserManager:
                 _LOGGER.warning("No se pudo cerrar una sesion: %s", exc)
             finally:
                 cls._unregister_session(session)
-        _LOGGER.info("Cierre manual de navegadores: %s liberados.", cerradas)
-        return cerradas
+        _LOGGER.info(
+            "Cierre manual de navegadores: %s liberados, %s respetados por estar en uso.",
+            cerradas,
+            respetadas,
+        )
+        return cerradas, respetadas
 
     @classmethod
     def reap_orphan_sessions(cls) -> int:

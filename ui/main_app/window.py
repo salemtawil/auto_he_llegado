@@ -22,7 +22,12 @@ import customtkinter as ctk
 from automation.browser_manager import BrowserManager
 from config.paths import DEFAULT_LOCAL_DATA_DIR, PROJECT_ROOT
 from config.settings import get_settings
-from core.models import LocalConfig, ProcessExecutionRequest, ProcessExecutionResult
+from core.models import (
+    LastResultSnapshot,
+    LocalConfig,
+    ProcessExecutionRequest,
+    ProcessExecutionResult,
+)
 from core.validators import sanitize_phone_number, validate_non_empty_string, validate_positive_int
 from services.last_result_service import LastResultService
 from services.local_config_service import LocalConfigService
@@ -434,6 +439,52 @@ class MainAppWindow(ctk.CTk):
             self._slots[slot_id] = ProcessSlotRuntime(slot_id=slot_id, panel=panel)
 
         self._sync_primary_slot_refs()
+        self._restaurar_ultimos_resultados()
+
+    def _restaurar_ultimos_resultados(self) -> None:
+        """Cada panel abre mostrando SU ultima corrida, no la de otro.
+
+        Hasta ahora el resultado solo vivia en memoria: al cerrar la app, los
+        cuatro paneles amanecian en blanco aunque el disco tuviera el dato.
+        Nunca puede impedir que la ventana se abra, asi que cada panel se
+        intenta por separado y un fallo deja ese panel en blanco y ya.
+        """
+
+        solo_exitosos = self._current_config.last_result_filter == "success_only"
+        for slot_id, slot in self._slots.items():
+            with contextlib.suppress(Exception):
+                snapshot = self._last_result_service.load_latest(
+                    slot_id=slot_id, only_successful=solo_exitosos
+                )
+                if snapshot is None:
+                    continue
+                slot.panel.current_result_panel.set_result(
+                    self._resultado_desde_snapshot(snapshot)
+                )
+
+    @staticmethod
+    def _resultado_desde_snapshot(snapshot: LastResultSnapshot) -> ProcessExecutionResult:
+        """El panel pinta un ProcessExecutionResult; en disco hay un resumen.
+
+        Lo que el resumen no guarda -la fase, el tiempo, los ids- se deja en
+        su valor por defecto en vez de inventarlo: es una corrida de otra
+        sesion y no hay cronometro que mostrar.
+        """
+
+        return ProcessExecutionResult(
+            page_name=snapshot.site_name,
+            action_name=snapshot.action_name,
+            phone_number=snapshot.phone_number,
+            agent_name=snapshot.agent_name,
+            success=snapshot.success,
+            message=snapshot.message,
+            final_status=snapshot.final_status,
+            station_name=snapshot.station_name,
+            block_price=snapshot.block_price,
+            block_duration=snapshot.block_duration,
+            deepfakescore_retries=snapshot.deepfakescore_retries,
+            completed_at=snapshot.completed_at,
+        )
 
     def open_video_uploader(self) -> None:
         if self._video_upload_running:
@@ -876,22 +927,16 @@ class MainAppWindow(ctk.CTk):
         que se dejan abiertos para ver el resultado no liberan la RAM hasta
         cerrar la app.
 
-        Si hay una automatizacion trabajando se pide confirmacion: cerrarle el
-        navegador la interrumpe.
+        Los navegadores de procesos que estan trabajando NO se tocan: con
+        cuatro paneles independientes, el boton los mataba a todos de golpe y
+        no habia forma de limpiar los que sobraban sin interrumpir a los
+        demas. Por eso tampoco hace falta ya pedir confirmacion.
         """
 
-        activos = self._active_process_count()
-        if activos > 0 and not messagebox.askyesno(
-            "Cerrar navegadores",
-            f"Hay {activos} proceso(s) en ejecucion.\n\n"
-            "Al cerrar los navegadores se interrumpiran.\n\n"
-            "Cerrar de todas formas?",
-            parent=self,
-            default=messagebox.NO,
-        ):
-            return
         try:
-            liberados = BrowserManager.close_all_browsers()
+            liberados, respetados = BrowserManager.close_all_browsers(
+                respetar_corridas=True
+            )
         except Exception as exc:  # noqa: BLE001
             messagebox.showerror(
                 "Cerrar navegadores",
@@ -902,7 +947,12 @@ class MainAppWindow(ctk.CTk):
         if liberados:
             mensaje = f"Se cerraron {liberados} navegador(es) y sus procesos."
         else:
-            mensaje = "No habia navegadores abiertos por la app."
+            mensaje = "No habia navegadores libres que cerrar."
+        if respetados:
+            mensaje += (
+                f" Se dejaron {respetados} abierto(s) porque hay procesos"
+                " usandolos ahora mismo."
+            )
         self._broadcast_status_message(mensaje, color=SUCCESS)
 
     def toggle_theme_mode(self) -> None:
@@ -1238,11 +1288,14 @@ class MainAppWindow(ctk.CTk):
         return sum(1 for slot in self._slots.values() if slot.thread is not None)
 
     def _max_concurrent_processes(self) -> int:
-        try:
-            tope = int(self._current_config.max_concurrent_processes)
-        except (TypeError, ValueError):
-            return 1
-        return max(1, min(len(self.SLOT_IDS), tope))
+        """Cuantos procesos se pueden tener a la vez: los paneles que hay.
+
+        Ya no hay tope por configuracion ni por hardware. Los cuatro paneles
+        son independientes y tener uno corriendo no inhabilita a los demas;
+        quien decide cuantos lanza es el agente, no un calculo de RAM.
+        """
+
+        return len(self.SLOT_IDS)
 
     def _slot_process_count_label(self) -> str:
         return (
@@ -1270,11 +1323,27 @@ class MainAppWindow(ctk.CTk):
         slot.panel.status_panel.set_message(message, color=color)
         self._set_slot_summary(slot_id, message.splitlines()[0][:110] if message else "Sin actividad reciente.")
 
-    def _broadcast_status_message(self, message: str, *, color: str | None = None) -> None:
-        for slot_id in self._slots:
+    def _broadcast_status_message(
+        self, message: str, *, color: str | None = None, incluso_ocupados: bool = False
+    ) -> None:
+        """Un aviso general de la app, en los paneles que estan libres.
+
+        Antes iba a los cuatro sin mirar. Cualquier cosa -una actualizacion,
+        el pool, guardar ajustes- borraba el mensaje de progreso del panel que
+        estaba corriendo, y el agente se quedaba sin saber por donde iba su
+        proceso. Ahora un panel ocupado conserva lo suyo.
+
+        Si TODOS estan ocupados se escribe igual: perder un error por no tener
+        donde ponerlo es peor que pisar una linea de progreso que el propio
+        proceso va a reescribir en un segundo.
+        """
+
+        libres = [sid for sid, slot in self._slots.items() if slot.thread is None]
+        destinatarios = self._slots if (incluso_ocupados or not libres) else libres
+        for slot_id in destinatarios:
             try:
                 self._set_slot_status(slot_id, message, color=color)
-            except Exception:
+            except Exception:  # noqa: BLE001 - un panel roto no calla a los demas
                 continue
 
     def refresh_background_video_status(self) -> None:
@@ -1377,30 +1446,12 @@ class MainAppWindow(ctk.CTk):
         if self._is_closing:
             return
         slot = self._get_slot(slot_id)
-        active_count = self._active_process_count()
-        current_flow_engine = (self._current_config.flow_engine or "").strip().lower()
         if not self._process_access_allows_start():
             self._set_slot_status(slot_id, self._process_access_block_reason, color=WARNING)
             self._sync_run_button_state()
             return
         if slot.thread is not None:
             self._set_slot_status(slot_id, "Este panel ya tiene un proceso en ejecución. Espera a que termine antes de iniciar otro.", color=ERROR)
-            return
-        tope = self._max_concurrent_processes()
-        if active_count >= tope:
-            self._set_slot_status(
-                slot_id,
-                f"Ya hay {tope} proceso(s) activo(s) para este equipo."
-                " Espera a que termine uno para iniciar otro.",
-                color=ERROR,
-            )
-            return
-        if active_count >= 1 and current_flow_engine != "traditional":
-            self._set_slot_status(
-                slot_id,
-                "Ya hay un proceso en ejecución. El modo paralelo aún no está habilitado.",
-                color=ERROR,
-            )
             return
 
         process_id = str(uuid4())
@@ -1746,8 +1797,6 @@ class MainAppWindow(ctk.CTk):
     def _sync_run_button_state(self) -> None:
         if self._is_closing:
             return
-        active_count = self._active_process_count()
-        current_flow_engine = (self._current_config.flow_engine or "").strip().lower()
         access_blocked = bool(
             not self._current_user_is_admin()
             and (self._access_snapshot is None or not self._access_snapshot.can_use_app)
@@ -1763,12 +1812,10 @@ class MainAppWindow(ctk.CTk):
                 )
                 continue
             slot.panel.set_run_button_mode("start")
-            disabled = (
-                access_blocked
-                or active_count >= 2
-                or (active_count >= 1 and current_flow_engine != "traditional")
-            )
-            slot.panel.run_button.configure(state="disabled" if disabled else "normal")
+            # Los cuatro paneles son independientes: tener uno corriendo no
+            # apaga el boton de los demas. Lo unico que lo apaga es que este
+            # usuario no tenga acceso a la app.
+            slot.panel.run_button.configure(state="disabled" if access_blocked else "normal")
         self._refresh_header_summary()
 
     @staticmethod
@@ -2371,9 +2418,12 @@ class MainAppWindow(ctk.CTk):
                     f"Cerrando: esperando a que {cancelled} proceso(s) liberen sus "
                     f"recursos (hasta {int(self.SHUTDOWN_GRACE_SECONDS)} s)...",
                     color=WARNING,
+                    incluso_ocupados=True,
                 )
             else:
-                self._broadcast_status_message("Cerrando Playwright y recursos activos...")
+                self._broadcast_status_message(
+                    "Cerrando Playwright y recursos activos...", incluso_ocupados=True
+                )
         threading.Thread(
             target=self._shutdown_and_destroy,
             name="app-shutdown",
@@ -2406,6 +2456,7 @@ class MainAppWindow(ctk.CTk):
                         f"{count} proceso(s) no respondieron a tiempo. Se cierra igualmente: "
                         "puede quedar una foto reservada y un Chrome abierto.",
                         color=ERROR,
+                        incluso_ocupados=True,
                     ),
                     allow_during_close=True,
                 )

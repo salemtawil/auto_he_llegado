@@ -56,6 +56,8 @@ class MachineProfile:
 
     nombre: str
     max_concurrent_processes: int
+    # Lo que el equipo aguantaria comodamente. Informativo: no capa nada.
+    procesos_comodos: int
     page_timeout_seconds: int
     action_timeout_seconds: int
     paripe_block_wait_seconds: int
@@ -134,18 +136,21 @@ def detectar_recursos() -> MachineResources:
 
 
 def _procesos_que_caben(recursos: MachineResources) -> int:
-    """Cuantas corridas simultaneas aguanta el equipo.
+    """Cuantas corridas simultaneas aguanta el equipo COMODAMENTE.
 
     Reserva 2 GB para el sistema operativo y reparte el resto entre corridas.
+    Cada corrida ocupa su hilo y el Chrome que levanta, y Chrome por si solo
+    usa varios procesos, asi que tambien se cuentan dos nucleos por corrida.
+
+    Esto YA NO es un tope: los cuatro paneles estan siempre disponibles, por
+    decision del operador. Es una estimacion, y se usa solo para decirlo en el
+    log y en los ajustes. El que decide cuantos procesos lanza es quien esta
+    delante de la maquina, no este calculo.
     """
 
     reserva_so_mb = 2048
     util = recursos.total_ram_mb - reserva_so_mb
     por_ram = int(util // RAM_POR_CORRIDA_MB) if util > 0 else 0
-    # Cada corrida ocupa su hilo y el Chrome que levanta, y Chrome por si solo
-    # usa varios procesos. Dos nucleos por corrida es lo que evita que se
-    # peleen y vayan todas lentas: con cuatro nucleos caben dos, con ocho
-    # cuatro. Mas vale una corrida menos que cuatro arrastrandose.
     por_cpu = max(1, recursos.logical_cpus // 2)
     return max(1, min(MAX_PROCESOS_SOPORTADOS, por_ram, por_cpu))
 
@@ -195,7 +200,10 @@ def derivar_perfil(recursos: MachineResources | None = None) -> MachineProfile:
 
     return MachineProfile(
         nombre=nombre,
-        max_concurrent_processes=procesos,
+        # Los cuatro paneles, siempre. El operador decide cuantos usa; la app
+        # no le quita paneles porque el equipo sea justo.
+        max_concurrent_processes=MAX_PROCESOS_SOPORTADOS,
+        procesos_comodos=procesos,
         page_timeout_seconds=page,
         action_timeout_seconds=accion,
         paripe_block_wait_seconds=bloqueo,
@@ -215,6 +223,7 @@ def describir_equipo(perfil: MachineProfile | None = None) -> str:
     perfil = perfil or perfil_del_equipo()
     return (
         f"Perfil '{perfil.nombre}': {perfil.motivo}."
-        f" Hasta {perfil.max_concurrent_processes} proceso(s) a la vez,"
+        f" {perfil.max_concurrent_processes} paneles disponibles"
+        f" (este equipo da comodo para {perfil.procesos_comodos}),"
         f" espera de pagina {perfil.page_timeout_seconds}s."
     )

@@ -298,10 +298,11 @@ class LocalConfig(DomainModel):
     action_timeout_seconds: int = 180
     paripe_block_wait_seconds: int = 300
     max_selfie_retries: int = 10
-    # Cuantas corridas a la vez aguanta este equipo. Lo calcula
-    # `config/machine_profile.py` segun la RAM y los nucleos; la interfaz no
-    # ofrece mas de dos paneles, asi que el valor util es 1 o 2.
-    max_concurrent_processes: int = 2
+    # Se conserva por compatibilidad con los ajustes ya guardados, pero YA NO
+    # capa nada: los cuatro paneles estan siempre disponibles y tener uno
+    # corriendo no inhabilita a los demas. Lo que el equipo aguanta comodo se
+    # sigue estimando en `config/machine_profile.py`, pero solo para decirlo.
+    max_concurrent_processes: int = 4
     # Tamano del navegador de la automatizacion y zoom, en porcentaje. El zoom
     # se aplica con --force-device-scale-factor, asi que al 63% cabe mas
     # pagina en una ventana mas chica: es lo que permite tener la app y el

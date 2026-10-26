@@ -12,15 +12,41 @@ from core.models import LastResultSnapshot, ProcessExecutionResult
 
 
 class LastResultService:
+    """El ultimo resultado de cada panel, guardado por separado.
+
+    Antes era un fichero unico para toda la app. Con cuatro paneles corriendo
+    a la vez, el que terminaba de ultimo pisaba el resultado de los otros
+    tres: al reabrir la app, tres paneles mostraban una corrida que no era la
+    suya. Ahora cada panel tiene su carpeta y nadie pisa a nadie.
+    """
+
     def __init__(self, root_dir: Path | None = None) -> None:
         self._root_dir = (root_dir or DEFAULT_LOCAL_DATA_DIR / "results").resolve()
-        self._latest_general_path = self._root_dir / "latest_general.json"
-        self._latest_success_path = self._root_dir / "latest_success.json"
-        # Un mismo servicio lo comparten los dos paneles (process_service lo
-        # pasa a ambos), asi que dos corridas pueden terminar a la vez.
+        # Los de antes, sin panel. Se siguen leyendo -para no dejar en blanco
+        # el panel la primera vez que se abre la app ya actualizada- pero no
+        # se vuelven a escribir.
+        self._heredado_general = self._root_dir / "latest_general.json"
+        self._heredado_success = self._root_dir / "latest_success.json"
+        # Dos corridas pueden terminar a la vez, aunque sean de paneles
+        # distintos: `mkdir` y el reemplazo se serializan.
         self._candado = threading.Lock()
 
-    def save_result(self, result: ProcessExecutionResult) -> LastResultSnapshot:
+    _PANEL_POR_DEFECTO = "slot_1"
+
+    def _carpeta(self, slot_id: str | None) -> Path:
+        """La carpeta de un panel. Un slot_id raro no puede sacarnos de aqui."""
+
+        nombre = (slot_id or self._PANEL_POR_DEFECTO).strip() or self._PANEL_POR_DEFECTO
+        limpio = "".join(c for c in nombre if c.isalnum() or c in "-_")
+        return self._root_dir / (limpio or self._PANEL_POR_DEFECTO)
+
+    def _rutas(self, slot_id: str | None) -> tuple[Path, Path]:
+        carpeta = self._carpeta(slot_id)
+        return carpeta / "latest_general.json", carpeta / "latest_success.json"
+
+    def save_result(
+        self, result: ProcessExecutionResult, *, slot_id: str | None = None
+    ) -> LastResultSnapshot:
         snapshot = LastResultSnapshot(
             completed_at=result.completed_at,
             phone_number=result.phone_number,
@@ -35,24 +61,42 @@ class LastResultService:
             success=result.success,
             message=result.message,
         )
+        general, exitoso = self._rutas(slot_id)
         with self._candado:
-            self._root_dir.mkdir(parents=True, exist_ok=True)
-            self._write_snapshot(self._latest_general_path, snapshot)
+            general.parent.mkdir(parents=True, exist_ok=True)
+            self._write_snapshot(general, snapshot)
             if snapshot.success:
-                self._write_snapshot(self._latest_success_path, snapshot)
+                self._write_snapshot(exitoso, snapshot)
         return snapshot
 
-    def load_latest(self, *, only_successful: bool = False) -> LastResultSnapshot | None:
-        target = self._latest_success_path if only_successful else self._latest_general_path
+    def load_latest(
+        self, *, slot_id: str | None = None, only_successful: bool = False
+    ) -> LastResultSnapshot | None:
+        general, exitoso = self._rutas(slot_id)
+        objetivo = exitoso if only_successful else general
+        snapshot = self._read_snapshot(objetivo)
+        if snapshot is not None:
+            return snapshot
+        # Primera apertura tras actualizar: todavia no hay nada en la carpeta
+        # del panel, pero puede quedar el fichero compartido de antes. Se
+        # muestra solo en el primer panel, que es el que lo escribio mas
+        # veces; repartirlo a los cuatro seria inventarse corridas.
+        if (slot_id or self._PANEL_POR_DEFECTO) != self._PANEL_POR_DEFECTO:
+            return None
+        heredado = self._heredado_success if only_successful else self._heredado_general
+        return self._read_snapshot(heredado)
+
+    @staticmethod
+    def _read_snapshot(target: Path) -> LastResultSnapshot | None:
         if not target.exists():
             return None
         try:
             payload = json.loads(target.read_text(encoding="utf-8"))
-        except Exception:
+        except Exception:  # noqa: BLE001 - un fichero roto no puede tumbar la app
             return None
         try:
             return LastResultSnapshot.model_validate(payload)
-        except Exception:
+        except Exception:  # noqa: BLE001
             return None
 
     # Reintentos del reemplazo atomico. En Windows, con la carpeta dentro de
