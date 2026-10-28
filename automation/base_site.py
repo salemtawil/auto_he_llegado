@@ -535,14 +535,41 @@ class BaseSite(ABC):
     #   ve, asi que no decide nada: se miran las dos etiquetas y se exige que
     #   una, y solo una, de senales de estar activa.
 
+    @staticmethod
+    def _es_locator(root) -> bool:
+        with suppress(Exception):
+            from playwright.sync_api import Locator
+
+            return isinstance(root, Locator)
+        return type(root).__name__ == "Locator"
+
+    def _evaluar_en_la_raiz(self, root, cuerpo_js: str, argumento):
+        """Ejecuta `(doc, arg) => ...` sobre la raiz, sea Page, Frame o Locator.
+
+        ESTO NO ES UN DETALLE. `locator.evaluate(fn, arg)` llama a
+        `fn(elemento, arg)`, mientras que `page.evaluate(fn, arg)` llama a
+        `fn(arg)`. Son dos firmas distintas y no hay una sola que valga para
+        las dos. Un JS escrito para Page que acaba corriendo sobre un Locator
+        recibe el ELEMENTO donde espera sus parametros: no falla, no lanza,
+        simplemente no encuentra nada. Eso fue exactamente lo que hizo que
+        "Omitir verificacion" se diera por ausente teniendola delante.
+        """
+
+        if self._es_locator(root):
+            return root.evaluate(
+                "(elemento, arg) => (" + cuerpo_js + ")(elemento.ownerDocument, arg)",
+                argumento,
+            )
+        return root.evaluate("(arg) => (" + cuerpo_js + ")(document, arg)", argumento)
+
     _CUENTA_PRESTADA_RE = r"cuenta\s+prestada|borrowed\s+account|conta\s+emprestada"
     _CUENTA_PROPIA_RE = r"cuenta\s+propia|own\s+account|personal\s+account|conta\s+pr[oó]pria"
 
-    _JS_ESTADO_DE_CUENTA = r"""([rePrestada, rePropia]) => {
+    _JS_ESTADO_DE_CUENTA = r"""(doc, [rePrestada, rePropia]) => {
         const prestada = new RegExp(rePrestada, 'i');
         const propia = new RegExp(rePropia, 'i');
         const texto = (e) => (((e && e.textContent) || '')).replace(/\s+/g, ' ').trim();
-        const cajas = [...document.querySelectorAll('div, section, fieldset')]
+        const cajas = [...doc.querySelectorAll('div, section, fieldset')]
             .filter((d) => prestada.test(texto(d)) && propia.test(texto(d)));
         if (!cajas.length) return { encontrado: false, motivo: 'sin_caja' };
         // La mas interna: la que menos descendientes tiene sigue conteniendo
@@ -683,7 +710,8 @@ class BaseSite(ABC):
                 "modo": "radio",
             }
         try:
-            estado = root.evaluate(
+            estado = self._evaluar_en_la_raiz(
+                root,
                 self._JS_ESTADO_DE_CUENTA,
                 [self._CUENTA_PRESTADA_RE, self._CUENTA_PROPIA_RE],
             )
@@ -744,7 +772,17 @@ class BaseSite(ABC):
     # Una opcion de una lista de la que hay que elegir una. No siempre es un
     # `role="radio"`: a veces es una `label` con su input dentro, y a veces
     # una tarjeta cualquiera. Se prueban los tres, del mas fiable al menos.
-    _SELECTORES_DE_OPCION = ('[role="radio"]', "label", 'li, [role="option"]')
+    # Del mas especifico al mas general. `button` va el ultimo y no sobra: en
+    # el dialogo del propietario cada opcion es literalmente
+    # <button type="button" aria-expanded="false" class="flex w-full ...">
+    # con el circulo dibujado como un <span aria-hidden>. Sin el, la opcion no
+    # se encuentra por ningun lado.
+    _SELECTORES_DE_OPCION = (
+        '[role="radio"]',
+        "label",
+        'li, [role="option"]',
+        'button, [role="button"]',
+    )
 
     def _localizar_opcion(self, root, patron: str):
         """Lo que hay que pulsar para elegir esa opcion, o None."""
@@ -769,7 +807,7 @@ class BaseSite(ABC):
     # dentro de un Locator, que busca solo entre sus descendientes.
     _MARCA_DE_OPCION = "data-ahl-opcion"
 
-    _JS_TARJETA_PULSABLE = r"""([patron, marca]) => {
+    _JS_TARJETA_PULSABLE = r"""(doc, [patron, marca]) => {
         const expresion = new RegExp(patron, 'i');
         const texto = (e) => ((e && e.textContent) || '').replace(/\s+/g, ' ').trim();
         const pulsable = (e) => {
@@ -795,12 +833,12 @@ class BaseSite(ABC):
         // Marcas de una busqueda anterior: si quedaran, Python podria coger
         // la de antes en vez de esta.
         try {
-            for (const viejo of document.querySelectorAll('[' + marca + ']')) {
+            for (const viejo of doc.querySelectorAll('[' + marca + ']')) {
                 viejo.removeAttribute(marca);
             }
         } catch (_) { /* da igual, se sigue */ }
         let todos = [];
-        try { todos = [...document.querySelectorAll('*')]; } catch (_) { return null; }
+        try { todos = [...doc.querySelectorAll('*')]; } catch (_) { return null; }
         const contienen = todos.filter((e) => expresion.test(texto(e)) && visible(e));
         if (!contienen.length) return null;
         contienen.sort((a, b) => a.querySelectorAll('*').length - b.querySelectorAll('*').length);
@@ -848,7 +886,9 @@ class BaseSite(ABC):
 
         ficha = None
         with suppress(Exception):
-            ficha = root.evaluate(self._JS_TARJETA_PULSABLE, [patron, self._MARCA_DE_OPCION])
+            ficha = self._evaluar_en_la_raiz(
+                root, self._JS_TARJETA_PULSABLE, [patron, self._MARCA_DE_OPCION]
+            )
         if not isinstance(ficha, dict):
             return None
         resumen = dict(ficha)
@@ -864,8 +904,9 @@ class BaseSite(ABC):
         """Deja la pagina como estaba. Nunca lanza."""
 
         with suppress(Exception):
-            root.evaluate(
-                "(marca) => { for (const e of document.querySelectorAll('[' + marca + ']'))"
+            self._evaluar_en_la_raiz(
+                root,
+                "(doc, marca) => { for (const e of doc.querySelectorAll('[' + marca + ']'))"
                 " e.removeAttribute(marca); }",
                 self._MARCA_DE_OPCION,
             )
@@ -876,6 +917,16 @@ class BaseSite(ABC):
         marcado = self._radio_esta_marcado(opcion)
         if marcado is not None:
             return marcado
+        # El dialogo del propietario no usa aria-checked: sus opciones son
+        # botones de acordeon y lo que cambia al elegirlas es aria-expanded.
+        # No es lo mismo que "marcada", pero es la unica senal que da el
+        # sitio de que el click surtio efecto.
+        with suppress(Exception):
+            expandido = opcion.get_attribute("aria-expanded")
+            if expandido == "true":
+                return True
+            if expandido == "false":
+                return False
         # Una `label` no lleva aria-checked: lo lleva su input.
         with suppress(Exception):
             entrada = opcion.locator('input[type="radio"], input[type="checkbox"]').first

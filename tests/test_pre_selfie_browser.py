@@ -621,3 +621,147 @@ def test_no_se_pulsa_el_boton_antes_de_elegir_la_opcion(browser, site_type):
         )
     finally:
         context.close()
+
+
+# HTML tal cual lo sirve compinche.io, sacado de un diagnostico real del
+# 28/10. Cada opcion es un <button> de acordeon; el circulo de "elegida" es
+# un <span aria-hidden> sin estado que leer. No hay role="radio" ni input ni
+# label en ninguna parte, y el contenedor NO lleva role="dialog".
+HTML_REAL_DEL_PROPIETARIO = """
+    <div id="root"><div class="mt-14">
+      <h2 class="text-center text-lg font-semibold">Verificaci&#243;n del propietario de la cuenta</h2>
+      <p class="mt-1 text-center text-sm text-gray-600">Elige c&#243;mo continuar</p>
+      <div class="mt-4 space-y-2">
+        <div class="overflow-hidden rounded-lg border border-gray-200 bg-white">
+          <button type="button" aria-expanded="false" class="flex w-full items-center gap-3 p-3 text-left">
+            <span class="flex h-9 w-9 flex-shrink-0 rounded-full bg-gray-100"></span>
+            <span class="min-w-0 flex-1">
+              <span class="block text-sm font-semibold text-gray-900">Enviar enlace al due&#241;o</span>
+              <span class="block text-xs text-gray-600">El due&#241;o se verifica desde su propio tel&#233;fono.</span>
+            </span>
+            <span aria-hidden="true" class="h-4 w-4 flex-shrink-0 rounded-full border-2 border-gray-300"></span>
+          </button>
+          <div class="p-3"><button type="button" class="rounded bg-violet-600 px-2 py-1 text-white">Copiar enlace</button></div>
+        </div>
+        <div class="overflow-hidden rounded-lg border border-gray-200 bg-white">
+          <button type="button" aria-expanded="false" class="flex w-full items-center gap-3 p-3 text-left">
+            <span class="flex h-9 w-9 flex-shrink-0 rounded-full bg-gray-100"></span>
+            <span class="min-w-0 flex-1">
+              <span class="block text-sm font-semibold text-gray-900">Verificaci&#243;n autom&#225;tica de video</span>
+              <span class="block text-xs text-gray-600">Sube tres selfies del due&#241;o.</span>
+            </span>
+            <span aria-hidden="true" class="h-4 w-4 flex-shrink-0 rounded-full border-2 border-gray-300"></span>
+          </button>
+        </div>
+        <div class="overflow-hidden rounded-lg border border-gray-200 bg-white">
+          <button type="button" aria-expanded="false" id="omitir" class="flex w-full items-center gap-3 p-3 text-left">
+            <span class="flex h-9 w-9 flex-shrink-0 rounded-full bg-gray-100"></span>
+            <span class="min-w-0 flex-1">
+              <span class="block text-sm font-semibold text-gray-900">Omitir verificaci&#243;n</span>
+              <span class="block text-xs text-gray-600">Contin&#250;a solo con tu selfie.</span>
+            </span>
+            <span aria-hidden="true" class="h-4 w-4 flex-shrink-0 rounded-full border-2 border-gray-300"></span>
+          </button>
+          <div id="panel_omitir"></div>
+        </div>
+      </div>
+    </div></div>
+    <script>
+      window.pulsados = [];
+      for (const boton of document.querySelectorAll('button')) {
+        boton.addEventListener('click', (evento) => {
+          const propio = evento.currentTarget;
+          window.pulsados.push(propio.id || propio.textContent.replace(/\\s+/g, ' ').trim().slice(0, 24));
+          if (propio.id !== 'omitir') return;
+          propio.setAttribute('aria-expanded', 'true');
+          document.querySelector('#panel_omitir').innerHTML =
+            '<button type="button" id="seguir">Continuar con selfie</button>';
+          // Sin iframe, `parent` es la propia ventana y nadie escucha: inofensivo.
+          document.querySelector('#seguir').addEventListener('click', () => {
+            parent.postMessage('photo', '*');
+          });
+        });
+      }
+    </script>
+"""
+
+
+@pytest.mark.parametrize("site_type", [CompincheSite, Ready4DriveSite, ParipeSite])
+def test_el_dialogo_real_se_resuelve_con_la_raiz_siendo_un_locator(browser, site_type):
+    """El fallo que ningun test cazaba: la raiz es un Locator, no un Frame.
+
+    `locator.evaluate(fn, arg)` llama a `fn(elemento, arg)`, pero
+    `page.evaluate(fn, arg)` llama a `fn(arg)`. El JS que busca la opcion
+    estaba escrito para la segunda firma, asi que sobre un Locator recibia el
+    ELEMENTO donde esperaba el patron: no fallaba, no lanzaba, simplemente no
+    encontraba nada y el paso decia "ausente" con la opcion en pantalla.
+
+    Todas las pruebas anteriores pasaban un Frame. Por eso pasaban.
+    """
+
+    site = site_type()
+    context = browser.new_context()
+    page = context.new_page()
+    try:
+        page.route("https://verify.example/owner", lambda route: route.fulfill(body=HTML_REAL_DEL_PROPIETARIO, content_type="text/html"))
+        page.goto("https://verify.example/owner")
+        page.locator("#omitir").wait_for()
+
+        raiz = page.locator("#root")  # <- Locator, como en la corrida real
+        assert site._omitir_verificacion_del_propietario(raiz, progress_callback=None) in (
+            "elegida",
+            "no_confirmado",
+        )
+
+        pulsados = page.evaluate("pulsados")
+        assert "omitir" in pulsados, f"no se pulso la opcion: {pulsados}"
+        assert not any("Enviar enlace" in p for p in pulsados)
+        assert not any("Copiar enlace" in p for p in pulsados)
+        assert not any("autom" in p for p in pulsados)
+        # Y el boton que el sitio pinta al elegir queda a la vista.
+        assert page.locator("#seguir").count() == 1
+        assert page.evaluate("document.querySelectorAll('[data-ahl-opcion]').length") == 0
+    finally:
+        context.close()
+
+
+@pytest.mark.parametrize("site_type", [CompincheSite, Ready4DriveSite])
+def test_el_flujo_entero_con_el_html_real(browser, site_type):
+    """Desde el dialogo del propietario hasta el input de la foto."""
+
+    site = site_type()
+    context = browser.new_context()
+    page = context.new_page()
+    photo_html = """
+        <div role="dialog" aria-modal="true">
+          <input type="file" id="user_avatar" hidden><button>Continuar</button>
+        </div>
+    """
+    try:
+        page.route("https://verify.example/owner", lambda route: route.fulfill(body=HTML_REAL_DEL_PROPIETARIO, content_type="text/html"))
+        page.route("https://verify.example/photo", lambda route: route.fulfill(body=photo_html, content_type="text/html"))
+        page.set_content(
+            """
+            <script>
+              window.addEventListener('message', event => {
+                if (event.data === 'photo') document.querySelector('iframe').src = 'https://verify.example/photo';
+              });
+            </script>
+            <iframe title="He llegado" src="https://verify.example/owner"></iframe>
+            """
+        )
+        frame = page.frames[1]
+        frame.locator("#omitir").wait_for()
+
+        # El paso que atiende ESTE dialogo. El de antes -"Iniciar
+        # verificacion"- ya ocurrio: aqui empieza donde el agente se queda.
+        result = site._complete_owner_verification_selfie_step(
+            frame, page=page, progress_callback=None, timeout_ms=4000
+        )
+
+        assert result.locator("input[type=file]").count() == 1
+        assert "verify.example/photo" in result.evaluate("() => window.location.href")
+        pulsados = result.evaluate("() => (window.pulsados || [])")
+        assert pulsados == [] or "omitir" in str(pulsados)
+    finally:
+        context.close()
