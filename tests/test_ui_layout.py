@@ -31,6 +31,14 @@ needs_display = pytest.mark.skipif(
     not os.environ.get("DISPLAY"), reason="requiere un servidor X para medir geometría"
 )
 
+# Anchos de prueba derivados del punto de corte real del panel, no escritos a
+# mano. Estaban fijados en 600, y cuando el panel bajo su corte a 560 -al
+# apretar las tarjetas para que cupieran cuatro- estas pruebas pasaron a pedir
+# el apilado con un ancho que ya no es estrecho. Nadie lo vio: todas llevan
+# @needs_display y en Windows no hay DISPLAY, asi que se saltan siempre.
+ESTRECHO = ProcessSlotPanel._STACK_BREAKPOINT - 40  # noqa: SLF001
+ANCHO = ProcessSlotPanel._STACK_BREAKPOINT + 640  # noqa: SLF001
+
 
 # ---------------------------------------------------------------------------
 # Resumen de cabecera (función pura, siempre se ejecuta)
@@ -198,11 +206,11 @@ def test_el_formulario_conserva_su_ancho_minimo(tk_root) -> None:
 def test_el_panel_de_seguimiento_se_apila_en_una_tarjeta_estrecha(tk_root) -> None:
     panel = _build_panel(tk_root)
 
-    panel.apply_width_layout(1200)
+    panel.apply_width_layout(ANCHO)
     assert panel.status_panel.grid_info()["row"] == 0, "ancha: al lado del formulario"
     assert panel.status_panel.grid_info()["column"] == 1
 
-    panel.apply_width_layout(600)
+    panel.apply_width_layout(ESTRECHO)
     assert panel.status_panel.grid_info()["row"] == 1, "estrecha: debajo del formulario"
     assert panel.status_panel.grid_info()["column"] == 0
     assert panel.form_panel.grid_info()["columnspan"] == 2
@@ -212,10 +220,10 @@ def test_el_panel_de_seguimiento_se_apila_en_una_tarjeta_estrecha(tk_root) -> No
 def test_apply_width_layout_es_idempotente(tk_root) -> None:
     panel = _build_panel(tk_root)
 
-    panel.apply_width_layout(600)
+    panel.apply_width_layout(ESTRECHO)
     primera = dict(panel.status_panel.grid_info())
-    panel.apply_width_layout(600)
-    panel.apply_width_layout(600)
+    panel.apply_width_layout(ESTRECHO)
+    panel.apply_width_layout(ESTRECHO)
     assert dict(panel.status_panel.grid_info()) == primera
 
 
@@ -223,9 +231,9 @@ def test_apply_width_layout_es_idempotente(tk_root) -> None:
 def test_los_botones_caben_tambien_en_la_tarjeta_estrecha(tk_root) -> None:
     """Ancho por debajo del punto de corte: el formulario ocupa toda la tarjeta."""
 
-    tk_root.geometry("640x760")
+    tk_root.geometry(f"{ESTRECHO + 40}x760")
     panel = _build_panel(tk_root)
-    panel.apply_width_layout(600)
+    panel.apply_width_layout(ESTRECHO)
     for _ in range(3):
         tk_root.update_idletasks()
         tk_root.update()

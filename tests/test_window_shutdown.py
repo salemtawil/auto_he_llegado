@@ -42,11 +42,21 @@ def _window(*, slots, active, service, answers=None, messages=None):
         _active_process_count=lambda: active,
         _cleanup_owner_selfie_temp_files=lambda: None,
         _stop_process_timer=lambda _slot_id, prefix=None: None,
-        _broadcast_status_message=lambda message, color=None: (
+        # **_kwargs a proposito: el aviso real acepta mas opciones que
+        # `color` -por ejemplo si debe llegar tambien a los paneles
+        # ocupados- y un doble mas estrecho convierte eso en un TypeError
+        # que el cierre se traga, dejando la prueba fallando lejos de la
+        # causa.
+        _broadcast_status_message=lambda message, **_kwargs: (
             messages.append(message) if messages is not None else None
         ),
         _safe_after=lambda _delay, callback, allow_during_close=False: callback(),
-        _destroy_after_shutdown=lambda: (messages or []).append("__destroyed__"),
+        # Ojo con `messages or []`: con la lista vacia -que es justo el caso
+        # cuando algo fallo antes- se apendaba a una lista tirada y la
+        # prueba acusaba al destroy de un fallo que estaba en otro sitio.
+        _destroy_after_shutdown=lambda: (
+            messages.append("__destroyed__") if messages is not None else None
+        ),
         SHUTDOWN_GRACE_SECONDS=1.0,
         _asked=asked,
         _askyesno=askyesno,

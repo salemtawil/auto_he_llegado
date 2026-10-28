@@ -258,7 +258,7 @@ def test_toggle_theme_mode_persists_next_theme_without_refresh_or_messages(monke
     repaint_calls = []
     window._config_service = SimpleNamespace(save=lambda config: persisted.append(config) or config)  # noqa: SLF001
     window.refresh_extension_status = lambda: refresh_calls.append("refresh")  # type: ignore[method-assign]  # noqa: SLF001
-    window._broadcast_status_message = lambda message, color=None: messages.append((message, color))  # type: ignore[method-assign]  # noqa: SLF001
+    window._broadcast_status_message = lambda message, color=None, **_kwargs: messages.append((message, color))  # type: ignore[method-assign]  # noqa: SLF001
     window._sync_theme_toggle_button = lambda: theme_syncs.append(window._current_config.theme_mode)  # type: ignore[method-assign]  # noqa: SLF001
     window._refresh_theme_widgets = lambda: repaint_calls.append(window._current_config.theme_mode)  # type: ignore[method-assign]  # noqa: SLF001
     monkeypatch.setattr("ui.main_app.window.apply_theme_mode", lambda mode: mode)

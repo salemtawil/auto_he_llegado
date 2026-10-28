@@ -344,7 +344,7 @@ def test_request_external_update_does_not_close_when_launch_fails(monkeypatch) -
     window._download_update_package_from_github = lambda: _downloaded_update(Path("downloaded.zip"))  # type: ignore[method-assign]  # noqa: SLF001
     window._launch_integrated_updater = lambda package_zip=None, *, revision=None: False  # type: ignore[method-assign]  # noqa: SLF001
     window._handle_app_close = lambda **_kwargs: closed.append(True)  # type: ignore[method-assign]  # noqa: SLF001
-    window._broadcast_status_message = lambda message, color=None: messages.append(message)  # type: ignore[method-assign]  # noqa: SLF001
+    window._broadcast_status_message = lambda message, color=None, **_kwargs: messages.append(message)  # type: ignore[method-assign]  # noqa: SLF001
     monkeypatch.setattr(window_module.messagebox, "showerror", lambda *args, **kwargs: None)
     _run_threads_inline(monkeypatch)
 
@@ -369,7 +369,7 @@ def test_request_external_update_launches_helper_shows_message_and_closes(monkey
 
     window._launch_integrated_updater = _lanzar  # type: ignore[method-assign]  # noqa: SLF001
     window._handle_app_close = lambda **_kwargs: closed.append(True)  # type: ignore[method-assign]  # noqa: SLF001
-    window._broadcast_status_message = lambda message, color=None: messages.append(message)  # type: ignore[method-assign]  # noqa: SLF001
+    window._broadcast_status_message = lambda message, color=None, **_kwargs: messages.append(message)  # type: ignore[method-assign]  # noqa: SLF001
     monkeypatch.setattr(window_module.messagebox, "showerror", lambda *args, **kwargs: None)
     _run_threads_inline(monkeypatch)
 
