@@ -708,9 +708,13 @@ def test_el_dialogo_real_se_resuelve_con_la_raiz_siendo_un_locator(browser, site
         page.locator("#omitir").wait_for()
 
         raiz = page.locator("#root")  # <- Locator, como en la corrida real
-        assert site._omitir_verificacion_del_propietario(raiz, progress_callback=None) in (
-            "elegida",
-            "no_confirmado",
+        # "elegida", no "no_confirmado": el sitio pone aria-expanded="true" al
+        # pulsar, y esa es la unica senal que da de que el click surtio
+        # efecto. Conformarse con "no_confirmado" dejaria pasar un paso que
+        # pulsa al aire, que es justo lo que habia que arreglar.
+        assert (
+            site._omitir_verificacion_del_propietario(raiz, progress_callback=None)
+            == "elegida"
         )
 
         pulsados = page.evaluate("pulsados")
