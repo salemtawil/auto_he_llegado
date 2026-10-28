@@ -435,11 +435,34 @@ class MainAppWindow(ctk.CTk):
                 on_owner_selfie_toggle=lambda enabled, sid=slot_id: self._handle_owner_selfie_toggle(sid, enabled),
                 on_owner_selfie_select=lambda sid=slot_id: self._handle_owner_selfie_select(sid),
                 on_owner_selfie_remove=lambda sid=slot_id: self._handle_owner_selfie_remove(sid),
+                on_debug_toggle=lambda activo, sid=slot_id: self._handle_debug_toggle(sid, activo),
             )
             self._slots[slot_id] = ProcessSlotRuntime(slot_id=slot_id, panel=panel)
 
         self._sync_primary_slot_refs()
+        self._sync_diagnostico_visible()
         self._restaurar_ultimos_resultados()
+
+    def _sync_diagnostico_visible(self) -> None:
+        """La casilla de diagnostico solo la ven los admin."""
+
+        es_admin = self._current_user_is_admin()
+        for slot in self._slots.values():
+            with contextlib.suppress(Exception):
+                slot.panel.mostrar_diagnostico(es_admin)
+
+    def _handle_debug_toggle(self, slot_id: str, activo: bool) -> None:
+        self._set_slot_status(
+            slot_id,
+            (
+                "Diagnostico activado: la proxima corrida de este panel grabara"
+                " lo que aparezca en pantalla y al terminar te pedira donde"
+                " guardar el archivo."
+                if activo
+                else "Diagnostico desactivado."
+            ),
+            color=WARNING if activo else None,
+        )
 
     def _restaurar_ultimos_resultados(self) -> None:
         """Cada panel abre mostrando SU ultima corrida, no la de otro.
@@ -1596,6 +1619,7 @@ class MainAppWindow(ctk.CTk):
             ),
             color=SUCCESS if result.success else ERROR,
         )
+        self._ofrecer_guardar_diagnostico(slot_id)
         self._refresh_admin_diagnostics_if_open()
         self.refresh_extension_status()
 
@@ -1616,7 +1640,117 @@ class MainAppWindow(ctk.CTk):
             ),
             color=ERROR,
         )
+        self._ofrecer_guardar_diagnostico(slot_id)
         self._refresh_admin_diagnostics_if_open()
+
+    def _diagnostico_pedido(self, panel) -> bool:
+        """Si grabar el diagnostico de esta corrida: admin Y casilla marcada.
+
+        La casilla sola no basta: si se ocultara mal, o alguien dejara de ser
+        admin con ella puesta, el widget seguiria diciendo que si.
+
+        Ante cualquier duda, NO. Grabar sin que se haya pedido seria escribir
+        en disco el HTML de la pagina, con lo que lleve dentro, a espaldas de
+        quien esta trabajando.
+        """
+
+        with contextlib.suppress(Exception):
+            if not self._current_user_is_admin():
+                return False
+            activo = getattr(panel, "diagnostico_activo", None)
+            return bool(callable(activo) and activo())
+        return False
+
+    def _ofrecer_guardar_diagnostico(self, slot_id: str) -> None:
+        """Al terminar una corrida con diagnostico, pregunta donde guardarlo.
+
+        Solo si de verdad se grabo algo: si el panel tenia la casilla puesta
+        pero la corrida murio antes de capturar nada, un dialogo vacio solo
+        estorba.
+
+        Nunca lanza, y nunca deja el archivo sin escribir: si el dialogo no se
+        puede abrir -la app cerrandose, por ejemplo- se guarda en la carpeta
+        de datos y se dice donde quedo. Perder lo grabado por no tener donde
+        preguntar seria el peor final posible para esto.
+        """
+
+        slot = self._get_slot(slot_id)
+        capturas = self._capturas_del_diagnostico(slot.last_process_debug)
+        if not capturas:
+            return
+        nombre = (
+            f"diagnostico_{slot_id}_"
+            f"{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+        )
+        carpeta = DEFAULT_LOCAL_DATA_DIR / "debug"
+        destino: Path | None = None
+        with contextlib.suppress(Exception):
+            carpeta.mkdir(parents=True, exist_ok=True)
+        with contextlib.suppress(Exception):
+            elegido = filedialog.asksaveasfilename(
+                parent=self,
+                title=f"Guardar diagnostico de {self.slot_title(slot_id)}",
+                initialdir=str(carpeta),
+                initialfile=nombre,
+                defaultextension=".json",
+                filetypes=[("JSON", "*.json"), ("Todos", "*.*")],
+            )
+            if elegido:
+                destino = Path(elegido)
+            else:
+                # El agente dijo que no. Es su decision, no un fallo.
+                self._set_slot_status(
+                    slot_id,
+                    f"Diagnostico descartado ({len(capturas)} capturas).",
+                    color=WARNING,
+                )
+                return
+        if destino is None:
+            destino = carpeta / nombre
+        try:
+            destino.write_text(
+                json.dumps(
+                    self._payload_de_diagnostico(slot_id, slot.last_process_debug),
+                    indent=2,
+                    ensure_ascii=False,
+                    default=str,
+                ),
+                encoding="utf-8",
+            )
+        except Exception as exc:  # noqa: BLE001
+            self._set_slot_status(
+                slot_id,
+                f"No se pudo guardar el diagnostico. ({safe_error_summary(exc, context='diagnostico')})",
+                color=ERROR,
+            )
+            return
+        self._set_slot_status(
+            slot_id,
+            f"Diagnostico guardado ({len(capturas)} capturas): {destino}",
+            color=SUCCESS,
+        )
+
+    @staticmethod
+    def _capturas_del_diagnostico(process_debug) -> list:
+        if not isinstance(process_debug, dict):
+            return []
+        diagnostico = process_debug.get("diagnostico")
+        if not isinstance(diagnostico, dict) or not diagnostico.get("activo"):
+            return []
+        capturas = diagnostico.get("capturas")
+        return list(capturas) if isinstance(capturas, list) else []
+
+    def _payload_de_diagnostico(self, slot_id: str, process_debug) -> dict:
+        slot = self._get_slot(slot_id)
+        resultado = slot.last_result
+        return {
+            "generado_en": datetime.now().isoformat(),
+            "panel": self.slot_title(slot_id),
+            "slot_id": slot_id,
+            "version_de_la_app": getattr(self._settings, "app_version", None),
+            "resultado": resultado.model_dump() if resultado is not None else None,
+            "proceso": process_debug,
+        }
 
     def _start_process_timer(self, slot_id: str, process_id: str) -> None:
         slot = self._get_slot(slot_id)
@@ -1869,7 +2003,8 @@ class MainAppWindow(ctk.CTk):
     def _cleanup_owner_selfie_temp_files(self) -> None:
         for slot_id in self._slots:
             self._delete_owner_selfie_file(slot_id)
-            form_panel = self._get_slot(slot_id).panel.form_panel
+            panel = self._get_slot(slot_id).panel
+            form_panel = panel.form_panel
             set_owner_selfie_state = getattr(form_panel, "set_owner_selfie_state", None)
             if callable(set_owner_selfie_state):
                 set_owner_selfie_state(enabled=False, path=None)
@@ -2480,7 +2615,8 @@ class MainAppWindow(ctk.CTk):
             self.destroy()
 
     def _build_process_request(self, slot_id: str, *, process_id: str) -> ProcessExecutionRequest:
-        form_panel = self._get_slot(slot_id).panel.form_panel
+        panel = self._get_slot(slot_id).panel
+        form_panel = panel.form_panel
         data = form_panel.get_form_data()
         owner_selfie_data = form_panel.get_owner_selfie_data()
         agent_name = validate_non_empty_string(self._current_config.agent_name, "agent_name")
@@ -2502,6 +2638,7 @@ class MainAppWindow(ctk.CTk):
             agent_name=agent_name,
             execution_mode=self._current_config.flow_engine,
             owner_selfie_enabled=owner_selfie_enabled,
+            debug_enabled=self._diagnostico_pedido(panel),
             owner_selfie_path=owner_selfie_path,
         )
 

@@ -394,6 +394,7 @@ class SitioDeBloques(BaseSite):
             "timing_summary_text": self._build_timing_summary_text(),
             "last_process_debug_export": dict(self._last_process_debug_export),
             "flow_state_detector": self._build_flow_state_detector_export(),
+            "diagnostico": self._build_diagnostico_export(),
         }
         payload.update(self._build_common_run_stats_payload())
         return payload
@@ -645,6 +646,7 @@ class SitioDeBloques(BaseSite):
         progress_callback: ProgressCallback | None = None,
     ) -> SiteExecutionResult:
         normalized_request = request.model_copy(update={"execution_mode": "traditional"})
+        self._preparar_diagnostico(normalized_request)
         return self._execute_traditional(
             normalized_request,
             local_config=local_config,
@@ -1706,6 +1708,7 @@ class SitioDeBloques(BaseSite):
         # iframe, al pulsar "He llegado". Se mira antes que nada: si no esta
         # -lo normal en la mayoria de vueltas- no cuesta mas que un evaluate.
         self._asegurar_cuenta_prestada(root, progress_callback=progress_callback)
+        self._capturar(root, "pantalla_previa_a_la_selfie")
         if self._has_photo_input_now(root):
             return root
         start_button = self._find_fast_text_button(root, self._selectors.verification_start_texts)
@@ -1765,6 +1768,7 @@ class SitioDeBloques(BaseSite):
             # hasta elegir. Las otras dos opciones esperan a una persona que
             # no esta delante, asi que la unica que deja avanzar al proceso es
             # "Omitir verificacion", que continua con nuestra propia selfie.
+            self._capturar(root, "dialogo_del_propietario")
             self._omitir_verificacion_del_propietario(root, progress_callback=progress_callback)
             etiquetas = (
                 self._selectors.self_owner_continue_texts
@@ -1772,6 +1776,11 @@ class SitioDeBloques(BaseSite):
                 + self._selectors.owner_verification_continue_texts
             )
             continue_button = self._esperar_boton_de_continuar(root, etiquetas)
+            self._capturar(
+                root,
+                "tras_omitir_verificacion",
+                hay_boton=continue_button is not None,
+            )
         if continue_button is None:
             return root
 

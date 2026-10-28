@@ -29,6 +29,9 @@ def _a_texto_corto(valor) -> str | None:
 
 class BaseSite(ABC):
     site_name: str = ""
+    # Grabador de diagnostico. None salvo que el agente marque la casilla en
+    # su panel: cada captura cuesta un evaluate sobre la pagina real.
+    _diagnostico = None
     _TIME_RANGE_RE = r"\b\d{1,2}:\d{2}\s*(?:am|pm)\s*-\s*\d{1,2}:\d{2}\s*(?:am|pm)\b"
     _DURATION_RE = r"\b\d+(?:[.,]\d+)?\s*(?:horas?|hours?|hrs?)\b"
     _FLOW_STATE_THROTTLE_S = 0.5
@@ -131,6 +134,35 @@ class BaseSite(ABC):
             "snapshots": [dict(item) for item in debug_state.get("snapshots") or []],
         }
 
+    def _preparar_diagnostico(self, request) -> None:
+        """Enciende o apaga el grabador segun lo que pidio el agente."""
+
+        if bool(getattr(request, "debug_enabled", False)):
+            from services.diagnostic_recorder import DiagnosticRecorder
+
+            self._diagnostico = DiagnosticRecorder()
+            self._anotar("diagnostico_activado")
+        else:
+            self._diagnostico = None
+
+    def _capturar(self, root, momento: str, **contexto) -> None:
+        """Una foto del DOM, si el diagnostico esta encendido. Nunca lanza."""
+
+        grabador = self._diagnostico
+        if grabador is None or root is None:
+            return
+        with suppress(Exception):
+            grabador.capturar(root, momento, **contexto)
+
+    def _build_diagnostico_export(self) -> dict:
+        grabador = self._diagnostico
+        if grabador is None:
+            return {"activo": False}
+        datos = {"activo": True}
+        with suppress(Exception):
+            datos.update(grabador.exportar())
+        return datos
+
     def _observe_flow_state(self, context, page, source: str):
         detector = self._get_flow_state_detector()
         run_context = getattr(self, "_process_run_context", None)
@@ -160,6 +192,12 @@ class BaseSite(ABC):
         if throttled:
             return snapshot
 
+        self._capturar(
+            context if context is not None else page,
+            f"detector:{snapshot.state}",
+            origen=source,
+            motivo=snapshot.reason,
+        )
         snapshot_payload = snapshot_to_dict(snapshot)
         debug_state["last_state"] = snapshot.state
         debug_state["last_confidence"] = snapshot.confidence
@@ -858,6 +896,7 @@ class BaseSite(ABC):
         Respuestas: "ausente", "ya_estaba", "elegida", "no_confirmado".
         """
 
+        self._capturar(root, f"antes_de_{evento}", patron=patron)
         opcion = self._localizar_opcion(root, patron)
         if opcion is None:
             self._anotar(f"{evento}_ausente")
@@ -883,6 +922,7 @@ class BaseSite(ABC):
         while monotonic() < limite:
             if self._opcion_esta_marcada(opcion) is True:
                 self._anotar(f"{evento}_elegida")
+                self._capturar(root, f"tras_{evento}", resultado="elegida")
                 self._quitar_marca_de_opcion(root)
                 return "elegida"
             with suppress(Exception):
@@ -896,6 +936,7 @@ class BaseSite(ABC):
         # esta elegida, asi que lo normal es acabar aqui habiendola pulsado
         # bien. Por eso no se trata como fallo.
         self._anotar(f"{evento}_no_confirmada")
+        self._capturar(root, f"tras_{evento}", resultado="no_confirmado")
         self._quitar_marca_de_opcion(root)
         return "no_confirmado"
 
@@ -965,6 +1006,7 @@ class BaseSite(ABC):
         """
 
         estado = self._esperar_estado_de_cuenta(root, busqueda_ms=busqueda_ms)
+        self._capturar(root, "selector_de_cuenta", **self._detalles(estado))
         if not estado.get("encontrado"):
             # Se anota aunque no haya nada: distinguir "no hay selector en esta
             # pantalla" de "lo hay y no lo vi" es justo lo que hace falta para

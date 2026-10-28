@@ -330,6 +330,10 @@ class ProcessExecutionRequest(DomainModel):
     execution_mode: str = "traditional"
     owner_selfie_enabled: bool = False
     owner_selfie_path: str | None = None
+    # Diagnostico: graba el DOM en cada paso y deja un archivo al terminar.
+    # Solo lo enciende un admin desde su panel, porque cada captura cuesta un
+    # evaluate sobre la pagina real.
+    debug_enabled: bool = False
 
     @field_validator("slot_id", "owner_selfie_path")
     @classmethod

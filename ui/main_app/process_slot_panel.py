@@ -42,6 +42,7 @@ class ProcessSlotPanel(ctk.CTkFrame):
         on_owner_selfie_toggle=None,
         on_owner_selfie_select=None,
         on_owner_selfie_remove=None,
+        on_debug_toggle=None,
         **kwargs,
     ) -> None:
         super().__init__(master, fg_color=CARD_ALT_BG, corner_radius=18, border_width=1, border_color=BORDER, **kwargs)
@@ -50,6 +51,8 @@ class ProcessSlotPanel(ctk.CTkFrame):
         self._on_open_diagnostics = on_open_diagnostics
         self._on_open_extensions = on_open_extensions
         self._on_open_browser = on_open_browser
+        self._on_debug_toggle = on_debug_toggle
+        self._debug_var = ctk.BooleanVar(value=False)
 
         self.grid_columnconfigure(0, weight=1)
         self.grid_rowconfigure(1, weight=1)
@@ -91,6 +94,29 @@ class ProcessSlotPanel(ctk.CTkFrame):
         )
         self.summary_label.grid(row=1, column=1, pady=0, sticky="w")
         self.summary_label.grid_remove()
+
+        # Diagnostico: graba lo que va apareciendo en pantalla y al terminar
+        # deja un archivo con el inventario de elementos y el HTML de cada
+        # dialogo. Es para cuando el sitio cambia y hay que ver que hay ahi
+        # de verdad, en vez de deducirlo de una captura de pantalla.
+        #
+        # Va aqui, en la columna 2 del titulo, porque es una propiedad de ESTE
+        # panel y tiene que verse al lado de su nombre. Arranca oculta: solo
+        # la ve un admin (`mostrar_diagnostico`).
+        self.debug_checkbox = ctk.CTkCheckBox(
+            self.title_wrap,
+            text="Diagnostico",
+            variable=self._debug_var,
+            command=self._handle_debug_toggle,
+            checkbox_width=14,
+            checkbox_height=14,
+            border_width=1,
+            corner_radius=4,
+            font=ctk.CTkFont(size=10),
+            text_color=TEXT_MUTED,
+        )
+        self.debug_checkbox.grid(row=0, column=2, padx=(10, 0), sticky="w")
+        self.debug_checkbox.grid_remove()
 
         self.process_timer_label = ctk.CTkLabel(
             self.header,
@@ -341,6 +367,11 @@ class ProcessSlotPanel(ctk.CTkFrame):
         self.current_result_panel.set_compact_layout(True)
         self.secondary_actions.grid_remove()
         self.process_timer_label.grid_configure(row=0, column=1, pady=0, sticky="e")
+        self.debug_checkbox.configure(
+            font=ctk.CTkFont(size=9 if apretada else 10),
+            checkbox_width=12 if apretada else 14,
+            checkbox_height=12 if apretada else 14,
+        )
         self.body.grid_columnconfigure(0, weight=3, minsize=self._FORM_MIN_WIDTH)
         self.body.grid_columnconfigure(1, weight=2)
         # No se fija aqui la posicion del panel de seguimiento: la decide
@@ -348,6 +379,24 @@ class ProcessSlotPanel(ctk.CTkFrame):
         self._stacked_layout = None
         self.apply_width_layout(self.winfo_width())
         self.result_wrap.grid_forget()
+
+    def mostrar_diagnostico(self, visible: bool) -> None:
+        """Muestra u oculta la casilla. Solo los admin la ven."""
+
+        if visible:
+            self.debug_checkbox.grid()
+        else:
+            # Ocultarla no basta: si alguien dejo de ser admin a mitad de
+            # sesion, la opcion tiene que quedar tambien apagada.
+            self._debug_var.set(False)
+            self.debug_checkbox.grid_remove()
+
+    def diagnostico_activo(self) -> bool:
+        return bool(self._debug_var.get())
+
+    def _handle_debug_toggle(self) -> None:
+        if self._on_debug_toggle is not None:
+            self._on_debug_toggle(bool(self._debug_var.get()))
 
     def _handle_open_diagnostics(self) -> None:
         if self._on_open_diagnostics is not None:

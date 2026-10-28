@@ -517,6 +517,7 @@ class ParipeSite(BaseSite):
             "last_final_button_candidate": dict(self._last_final_button_candidate or {}),
             "last_process_debug_export": dict(self._last_process_debug_export),
             "flow_state_detector": self._build_flow_state_detector_export(),
+            "diagnostico": self._build_diagnostico_export(),
         }
         payload.update(self._build_common_run_stats_payload())
         return payload
@@ -818,6 +819,7 @@ class ParipeSite(BaseSite):
         progress_callback: ProgressCallback | None = None,
     ) -> SiteExecutionResult:
         normalized_request = request.model_copy(update={"execution_mode": "traditional"})
+        self._preparar_diagnostico(normalized_request)
         return self._execute_traditional(
             normalized_request,
             local_config=local_config,
@@ -1848,6 +1850,7 @@ class ParipeSite(BaseSite):
             # Version nueva del dialogo: hay que elegir una opcion y el boton
             # de seguir aparece despues. La unica que deja avanzar sin el
             # dueno delante es "Omitir verificacion".
+            self._capturar(dialog, "dialogo_del_propietario")
             self._omitir_verificacion_del_propietario(dialog, progress_callback=progress_callback)
             etiquetas = (
                 etiquetas
@@ -1855,6 +1858,11 @@ class ParipeSite(BaseSite):
                 + self._selectors.owner_verification_continue_texts
             )
             continue_button = self._esperar_boton_de_continuar(dialog, etiquetas)
+            self._capturar(
+                dialog,
+                "tras_omitir_verificacion",
+                hay_boton=continue_button is not None,
+            )
         if continue_button is None:
             continue_button = self._find_button_by_labels(dialog, etiquetas)
         if continue_button is None:

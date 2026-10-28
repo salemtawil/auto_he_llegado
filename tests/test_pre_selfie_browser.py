@@ -519,3 +519,50 @@ def test_la_tarjeta_que_se_pulsa_es_la_fila_entera_no_la_lista(browser, site_typ
         assert frame.evaluate("pulsado") == "omitir", "subio hasta la lista entera"
     finally:
         context.close()
+
+
+def test_el_diagnostico_graba_la_opcion_aunque_no_sea_un_control(browser):
+    """La prueba de fondo: que el archivo sirva para lo que se hizo.
+
+    Si una opcion dibujada como <div> no apareciera en el archivo, el modo
+    diagnostico no resolveria nada: seguiriamos sin saber que hay en la
+    pantalla, que es justo lo que pasaba con las capturas de pantalla.
+    """
+
+    from services.diagnostic_recorder import DiagnosticRecorder
+
+    context = browser.new_context()
+    page = context.new_page()
+    owner_html = """
+        <style>.tarjeta { cursor: pointer; display: block; padding: 8px; }</style>
+        <div role="dialog" aria-modal="true">
+          <h2>Verificaci&#243;n del propietario de la cuenta</h2>
+          <div class="tarjeta" id="enlace"><span>Enviar enlace al due&#241;o</span></div>
+          <div class="tarjeta" id="omitir"><span>Omitir verificaci&#243;n</span></div>
+        </div>
+        <p id="fuera">esto esta fuera del dialogo</p>
+    """
+    try:
+        page.route("https://verify.example/owner", lambda route: route.fulfill(body=owner_html, content_type="text/html"))
+        page.goto("https://verify.example/owner")
+        page.locator("#omitir").wait_for()
+
+        grabador = DiagnosticRecorder()
+        grabador.capturar(page, "dialogo_del_propietario")
+        captura = grabador.exportar()["capturas"][0]
+
+        # 1. La opcion aparece, con su ruta, aunque no sea ningun control.
+        cadena = captura["coincidencias"].get("Omitir verificación")
+        assert cadena, "la opcion no aparece en el archivo"
+        assert cadena[0]["ruta"], "sin ruta no se puede volver a encontrar"
+        assert any(nodo["id"] == "omitir" for nodo in cadena)
+        assert any(nodo["pulsable"] for nodo in cadena), "no dice cual responde al raton"
+
+        # 2. El HTML es el del dialogo, no el de media pagina.
+        assert "Omitir verificaci" in captura["html"]
+        assert "esto esta fuera del dialogo" not in captura["html"]
+
+        # 3. Y el texto que ve el agente queda tal cual.
+        assert any("Omitir verificaci" in linea for linea in captura["texto_visible"])
+    finally:
+        context.close()
