@@ -315,7 +315,7 @@ def test_el_dialogo_de_tres_opciones_se_resuelve_omitiendo(browser, site_type):
               <span>Contin&#250;a solo con tu selfie.</span>
             </span>
           </div>
-          <div id="pie"></div>
+          <div id="pie"><button id="seguir" disabled>Continuar con selfie</button></div>
         </div>
         <script>
           window.elegidas = [];
@@ -329,10 +329,14 @@ def test_el_dialogo_de_tres_opciones_se_resuelve_omitiendo(browser, site_type):
               }
               // El boton de seguir solo existe tras elegir, y solo si la
               // opcion elegida permite continuar sin el dueno.
-              document.querySelector('#pie').innerHTML =
-                opcion.id === 'omitir' ? '<button id="seguir">Continuar</button>' : '';
+              // El boton ya estaba ahi, deshabilitado: solo se activa al
+              // elegir la opcion que permite seguir sin el dueno.
               const seguir = document.querySelector('#seguir');
-              if (seguir) seguir.onclick = () => parent.postMessage('photo', '*');
+              seguir.disabled = opcion.id !== 'omitir';
+              seguir.onclick = () => {
+                if (seguir.disabled) return;
+                parent.postMessage('photo', '*');
+              };
             };
           }
         </script>
@@ -564,5 +568,56 @@ def test_el_diagnostico_graba_la_opcion_aunque_no_sea_un_control(browser):
 
         # 3. Y el texto que ve el agente queda tal cual.
         assert any("Omitir verificaci" in linea for linea in captura["texto_visible"])
+    finally:
+        context.close()
+
+
+@pytest.mark.parametrize("site_type", [CompincheSite, Ready4DriveSite, ParipeSite])
+def test_no_se_pulsa_el_boton_antes_de_elegir_la_opcion(browser, site_type):
+    """La trampa del atajo: el boton ya esta ahi, pero deshabilitado.
+
+    La busqueda rapida mira tamano y visibilidad, no si el boton esta
+    activo, asi que lo encontraba igual. Si se buscara el boton antes de
+    elegir, se pulsaria un boton muerto y el proceso se quedaria mirando un
+    dialogo que no avanza, sin que nada fallara.
+    """
+
+    site = site_type()
+    context = browser.new_context()
+    page = context.new_page()
+    owner_html = """
+        <style>.tarjeta { cursor: pointer; display: block; padding: 8px; }</style>
+        <div role="dialog" aria-modal="true">
+          <h2>Verificaci&#243;n del propietario de la cuenta</h2>
+          <div class="tarjeta" id="enlace"><span>Enviar enlace al due&#241;o</span></div>
+          <div class="tarjeta" id="omitir"><span>Omitir verificaci&#243;n</span></div>
+          <button id="seguir" disabled>Continuar con selfie</button>
+        </div>
+        <script>
+          window.orden = [];
+          document.querySelector('#omitir').onclick = () => {
+            window.orden.push('omitir');
+            document.querySelector('#seguir').disabled = false;
+          };
+          document.querySelector('#seguir').onclick = () => window.orden.push('seguir');
+        </script>
+    """
+    try:
+        page.route("https://verify.example/owner", lambda route: route.fulfill(body=owner_html, content_type="text/html"))
+        page.set_content('<iframe title="He llegado" src="https://verify.example/owner"></iframe>')
+        frame = page.frames[1]
+        frame.locator("#omitir").wait_for()
+
+        site._omitir_verificacion_del_propietario(frame, progress_callback=None)
+        boton = site._esperar_boton_de_continuar(
+            frame,
+            site._selectors.self_owner_continue_texts + site._selectors.continue_texts,
+        )
+        assert boton is not None
+        boton.click()
+
+        assert frame.evaluate("orden") == ["omitir", "seguir"], (
+            "se pulso el boton antes de elegir la opcion"
+        )
     finally:
         context.close()

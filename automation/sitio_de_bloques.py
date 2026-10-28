@@ -1759,28 +1759,38 @@ class SitioDeBloques(BaseSite):
     ) -> Page | Frame | Locator:
         if self._has_photo_input_now(root):
             return root
-        continue_button = self._find_fast_text_button(root, self._selectors.self_owner_continue_texts)
+        if not self._has_any_text_now(root, self._selectors.owner_verification_texts):
+            return root
+
+        # ORDEN: primero elegir, despues buscar el boton. Nunca al reves.
+        #
+        # En la version nueva el dialogo trae tres opciones, con "Enviar
+        # enlace al dueno" ya elegida, y el boton de seguir -"Continuar con
+        # selfie"- aparece al elegir. Las otras dos opciones esperan a una
+        # persona que no esta delante, asi que la unica que deja avanzar al
+        # proceso es "Omitir verificacion".
+        #
+        # Buscar el boton primero parece un atajo para el dialogo viejo, y es
+        # una trampa: si el sitio lo pinta desde el principio pero
+        # deshabilitado, se encuentra igual -la busqueda mira tamano y
+        # visibilidad, no si esta activo- y se pulsa sin haber elegido nada.
+        # Intentar omitir cuando no hay opciones no cuesta casi nada y no
+        # hace dano: contesta "ausente" y sigue.
+        self._capturar(root, "dialogo_del_propietario")
+        self._omitir_verificacion_del_propietario(root, progress_callback=progress_callback)
+        etiquetas = (
+            self._selectors.self_owner_continue_texts
+            + self._selectors.continue_texts
+            + self._selectors.owner_verification_continue_texts
+        )
+        continue_button = self._esperar_boton_de_continuar(root, etiquetas)
+        self._capturar(
+            root,
+            "tras_omitir_verificacion",
+            hay_boton=continue_button is not None,
+        )
         if continue_button is None:
-            if not self._has_any_text_now(root, self._selectors.owner_verification_texts):
-                return root
-            # Version nueva del dialogo: tres opciones, con "Enviar enlace al
-            # dueno" ya elegida, y el boton de seguir no aparece -o no sirve-
-            # hasta elegir. Las otras dos opciones esperan a una persona que
-            # no esta delante, asi que la unica que deja avanzar al proceso es
-            # "Omitir verificacion", que continua con nuestra propia selfie.
-            self._capturar(root, "dialogo_del_propietario")
-            self._omitir_verificacion_del_propietario(root, progress_callback=progress_callback)
-            etiquetas = (
-                self._selectors.self_owner_continue_texts
-                + self._selectors.continue_texts
-                + self._selectors.owner_verification_continue_texts
-            )
-            continue_button = self._esperar_boton_de_continuar(root, etiquetas)
-            self._capturar(
-                root,
-                "tras_omitir_verificacion",
-                hay_boton=continue_button is not None,
-            )
+            continue_button = self._find_best_text_candidate(root, etiquetas)
         if continue_button is None:
             return root
 

@@ -1841,28 +1841,33 @@ class ParipeSite(BaseSite):
     ) -> Locator:
         if self._dialog_has_file_input(dialog):
             return dialog
-        continue_button = self._find_fast_text_button(dialog, self._selectors.self_owner_continue_texts)
-        etiquetas = self._selectors.self_owner_continue_texts
-        if continue_button is None:
-            dialog_text = self._safe_normalized_text(dialog)
-            if not self._normalized_contains_any(dialog_text, self._selectors.owner_verification_texts):
-                return dialog
-            # Version nueva del dialogo: hay que elegir una opcion y el boton
-            # de seguir aparece despues. La unica que deja avanzar sin el
-            # dueno delante es "Omitir verificacion".
-            self._capturar(dialog, "dialogo_del_propietario")
-            self._omitir_verificacion_del_propietario(dialog, progress_callback=progress_callback)
-            etiquetas = (
-                etiquetas
-                + self._selectors.continue_texts
-                + self._selectors.owner_verification_continue_texts
-            )
-            continue_button = self._esperar_boton_de_continuar(dialog, etiquetas)
-            self._capturar(
-                dialog,
-                "tras_omitir_verificacion",
-                hay_boton=continue_button is not None,
-            )
+        dialog_text = self._safe_normalized_text(dialog)
+        if not self._normalized_contains_any(dialog_text, self._selectors.owner_verification_texts):
+            return dialog
+
+        # ORDEN: primero elegir, despues buscar el boton. Nunca al reves.
+        #
+        # El boton de seguir -"Continuar con selfie"- aparece al elegir una
+        # opcion, y la unica que deja avanzar sin el dueno delante es "Omitir
+        # verificacion". Buscar el boton primero parece un atajo para el
+        # dialogo viejo y es una trampa: si el sitio lo pinta desde el
+        # principio pero deshabilitado, se encuentra igual -la busqueda mira
+        # tamano y visibilidad, no si esta activo- y se pulsa sin haber
+        # elegido nada. Intentar omitir cuando no hay opciones contesta
+        # "ausente" y sigue.
+        self._capturar(dialog, "dialogo_del_propietario")
+        self._omitir_verificacion_del_propietario(dialog, progress_callback=progress_callback)
+        etiquetas = (
+            self._selectors.self_owner_continue_texts
+            + self._selectors.continue_texts
+            + self._selectors.owner_verification_continue_texts
+        )
+        continue_button = self._esperar_boton_de_continuar(dialog, etiquetas)
+        self._capturar(
+            dialog,
+            "tras_omitir_verificacion",
+            hay_boton=continue_button is not None,
+        )
         if continue_button is None:
             continue_button = self._find_button_by_labels(dialog, etiquetas)
         if continue_button is None:
