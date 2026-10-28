@@ -622,6 +622,9 @@ class BaseSite(ABC):
     # ahi el presupuesto largo retrasa el click varios segundos en pantallas
     # donde el selector sencillamente no existe, que son la mayoria.
     CUENTA_BUSQUEDA_TIMEOUT_MS = 300
+    # Cuanto se espera a confirmar algo que probablemente no se puede
+    # confirmar: una opcion dibujada como tarjeta no lleva estado que leer.
+    CONFIRMACION_CORTA_MS = 600
 
     def _leer_estado_de_cuenta(self, root) -> dict:
         """En que lado esta el selector de cuenta. Nunca lanza.
@@ -716,7 +719,118 @@ class BaseSite(ABC):
                 opcion = root.locator(selector).filter(has_text=expresion).last
                 if opcion.count() > 0:
                     return opcion
+        # Nada de lo de arriba encaja cuando la opcion no es un control de
+        # verdad sino una tarjeta: un <div> con texto dentro, sin rol, sin
+        # input y sin label. Entonces hay que hacer lo que hace una persona:
+        # buscar el texto y subir hasta el trozo que responde al raton.
+        return self._localizar_tarjeta_pulsable(root, patron)
+
+    # Atributo que se pone y se quita para poder apuntar desde Python al
+    # elemento que eligio el JS. Es la unica forma que funciona por igual
+    # sobre una Page, un Frame y un Locator; una ruta CSS absoluta no sirve
+    # dentro de un Locator, que busca solo entre sus descendientes.
+    _MARCA_DE_OPCION = "data-ahl-opcion"
+
+    _JS_TARJETA_PULSABLE = r"""([patron, marca]) => {
+        const expresion = new RegExp(patron, 'i');
+        const texto = (e) => ((e && e.textContent) || '').replace(/\s+/g, ' ').trim();
+        const pulsable = (e) => {
+            try {
+                const estilo = e.ownerDocument.defaultView.getComputedStyle(e);
+                if (estilo.cursor === 'pointer') return true;
+            } catch (_) { /* sin estilo no se sabe */ }
+            return Boolean(
+                e.onclick
+                || e.getAttribute('tabindex') !== null
+                || e.getAttribute('role')
+                || ['BUTTON', 'A', 'LABEL', 'INPUT'].includes(e.tagName)
+            );
+        };
+        const visible = (e) => {
+            try {
+                const caja = e.getBoundingClientRect();
+                const estilo = e.ownerDocument.defaultView.getComputedStyle(e);
+                return caja.width > 1 && caja.height > 1
+                    && estilo.visibility !== 'hidden' && estilo.display !== 'none';
+            } catch (_) { return false; }
+        };
+        // Marcas de una busqueda anterior: si quedaran, Python podria coger
+        // la de antes en vez de esta.
+        try {
+            for (const viejo of document.querySelectorAll('[' + marca + ']')) {
+                viejo.removeAttribute(marca);
+            }
+        } catch (_) { /* da igual, se sigue */ }
+        let todos = [];
+        try { todos = [...document.querySelectorAll('*')]; } catch (_) { return null; }
+        const contienen = todos.filter((e) => expresion.test(texto(e)) && visible(e));
+        if (!contienen.length) return null;
+        contienen.sort((a, b) => a.querySelectorAll('*').length - b.querySelectorAll('*').length);
+        // El mas interno, y ahi se queda. Subir buscando "el contenedor
+        // pulsable" parece mejor y es peor: el contenedor de las TRES
+        // opciones tambien contiene este texto y tambien responde al raton,
+        // asi que la subida acababa pulsando la lista entera y el click caia
+        // en la primera tarjeta. Lo que hace una persona es pulsar las
+        // palabras; el click burbujea solo hasta quien lo escuche.
+        const elegido = contienen[0];
+        // La cadena de padres se devuelve para el diagnostico: si el sitio
+        // cambia, ahi se ve la forma real sin tener que adivinarla.
+        const cadena = [];
+        let actual = elegido;
+        while (actual && actual.nodeType === 1 && cadena.length < 4) {
+            cadena.push({
+                tag: actual.tagName,
+                id: actual.id || null,
+                rol: actual.getAttribute('role'),
+                pulsable: pulsable(actual),
+            });
+            actual = actual.parentElement;
+        }
+        try { elegido.setAttribute(marca, '1'); } catch (_) { return null; }
+        return {
+            tag: elegido.tagName,
+            id: elegido.id || null,
+            rol: elegido.getAttribute('role'),
+            clases: (typeof elegido.className === 'string' ? elegido.className : '').slice(0, 160),
+            pulsable: pulsable(elegido),
+            texto: texto(elegido).slice(0, 80),
+            cadena: cadena,
+        };
+    }"""
+
+    def _localizar_tarjeta_pulsable(self, root, patron: str):
+        """La tarjeta que hay que pulsar cuando la opcion no es un control.
+
+        Marca el elemento con un atributo propio y lo busca por el. Tocar el
+        DOM del sitio no es gratis, pero el atributo no cambia nada de lo que
+        la pagina hace ni de como se ve, y se quita en cuanto se usa. La
+        alternativa -devolver una ruta CSS- no funciona cuando la raiz es un
+        Locator, que busca solo entre sus descendientes.
+        """
+
+        ficha = None
+        with suppress(Exception):
+            ficha = root.evaluate(self._JS_TARJETA_PULSABLE, [patron, self._MARCA_DE_OPCION])
+        if not isinstance(ficha, dict):
+            return None
+        resumen = dict(ficha)
+        resumen["cadena"] = _a_texto_corto(resumen.get("cadena"))
+        self._anotar("opcion_encontrada_como_tarjeta", **resumen)
+        with suppress(Exception):
+            opcion = root.locator(f"[{self._MARCA_DE_OPCION}]").first
+            if opcion.count() > 0:
+                return opcion
         return None
+
+    def _quitar_marca_de_opcion(self, root) -> None:
+        """Deja la pagina como estaba. Nunca lanza."""
+
+        with suppress(Exception):
+            root.evaluate(
+                "(marca) => { for (const e of document.querySelectorAll('[' + marca + ']'))"
+                " e.removeAttribute(marca); }",
+                self._MARCA_DE_OPCION,
+            )
 
     def _opcion_esta_marcada(self, opcion):
         """True, False o None si no se pudo saber. None NO es False."""
@@ -748,7 +862,8 @@ class BaseSite(ABC):
         if opcion is None:
             self._anotar(f"{evento}_ausente")
             return "ausente"
-        if self._opcion_esta_marcada(opcion) is True:
+        antes = self._opcion_esta_marcada(opcion)
+        if antes is True:
             self._anotar(f"{evento}_ya_estaba")
             return "ya_estaba"
 
@@ -759,17 +874,29 @@ class BaseSite(ABC):
                 error_message=f"No se pudo elegir la opcion '{patron}'.",
             )
 
-        limite = monotonic() + self.CUENTA_SWITCH_TIMEOUT_MS / 1000
+        # Si antes de pulsar no habia forma de saber si estaba marcada -una
+        # tarjeta suelta no tiene aria-checked ni input- tampoco la va a
+        # haber despues. Esperar los 2,5 s enteros seria tiempo tirado en
+        # cada corrida.
+        espera_ms = self.CUENTA_SWITCH_TIMEOUT_MS if antes is False else self.CONFIRMACION_CORTA_MS
+        limite = monotonic() + espera_ms / 1000
         while monotonic() < limite:
             if self._opcion_esta_marcada(opcion) is True:
                 self._anotar(f"{evento}_elegida")
+                self._quitar_marca_de_opcion(root)
                 return "elegida"
             with suppress(Exception):
                 root.wait_for_timeout(100)
         # Se pulso y no se pudo confirmar. No se vuelve a pulsar: un segundo
         # click en una lista de opciones puede deseleccionar lo que acaba de
         # quedar bien. Lo dira la pantalla siguiente.
+        #
+        # Y "no confirmado" aqui no es lo mismo que en el selector de cuenta:
+        # una tarjeta sin aria-checked ni input no tiene forma de decir que
+        # esta elegida, asi que lo normal es acabar aqui habiendola pulsado
+        # bien. Por eso no se trata como fallo.
         self._anotar(f"{evento}_no_confirmada")
+        self._quitar_marca_de_opcion(root)
         return "no_confirmado"
 
     @staticmethod

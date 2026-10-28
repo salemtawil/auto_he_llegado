@@ -421,3 +421,101 @@ def test_nunca_se_elige_enviar_enlace_ni_verificacion_de_video(browser, site_typ
         assert "copiar" not in elegidas, "'Copiar enlace' no es el boton de seguir"
     finally:
         context.close()
+
+
+@pytest.mark.parametrize("site_type", [CompincheSite, Ready4DriveSite, ParipeSite])
+def test_las_opciones_dibujadas_como_tarjetas_tambien_se_pulsan(browser, site_type):
+    """El caso real: las tres opciones no son radios, son <div> con texto.
+
+    Sin rol, sin input, sin label. Los selectores de control no las ven, y
+    el paso se quedaba diciendo "ausente" mientras el agente veia las tres
+    opciones en pantalla.
+    """
+
+    site = site_type()
+    context = browser.new_context()
+    page = context.new_page()
+    owner_html = """
+        <style>.tarjeta { cursor: pointer; padding: 8px; display: block; }</style>
+        <div role="dialog" aria-modal="true">
+          <h2>Verificaci&#243;n del propietario de la cuenta</h2>
+          <div class="lista">
+            <div class="tarjeta" id="enlace">
+              <span>Enviar enlace al due&#241;o</span>
+              <button id="copiar">Copiar enlace</button>
+            </div>
+            <div class="tarjeta" id="video"><span>Verificaci&#243;n autom&#225;tica de video</span></div>
+            <div class="tarjeta" id="omitir">
+              <span>Omitir verificaci&#243;n</span>
+              <span>Contin&#250;a solo con tu selfie.</span>
+            </div>
+          </div>
+        </div>
+        <script>
+          window.elegidas = [];
+          for (const tarjeta of document.querySelectorAll('.tarjeta, #copiar')) {
+            tarjeta.onclick = (evento) => {
+              window.elegidas.push(evento.currentTarget.id);
+            };
+          }
+        </script>
+    """
+    try:
+        page.route("https://verify.example/owner", lambda route: route.fulfill(body=owner_html, content_type="text/html"))
+        page.set_content('<iframe title="He llegado" src="https://verify.example/owner"></iframe>')
+        frame = page.frames[1]
+        frame.locator("#omitir").wait_for()
+
+        site._omitir_verificacion_del_propietario(frame, progress_callback=None)
+
+        elegidas = frame.evaluate("elegidas")
+        assert "omitir" in elegidas, f"no se pulso la tarjeta correcta: {elegidas}"
+        assert "enlace" not in elegidas
+        assert "video" not in elegidas
+        assert "copiar" not in elegidas
+        # Y la pagina queda como estaba: la marca que se usa para apuntar al
+        # elemento no puede quedarse puesta.
+        assert frame.evaluate("document.querySelectorAll('[data-ahl-opcion]').length") == 0
+    finally:
+        context.close()
+
+
+@pytest.mark.parametrize("site_type", [CompincheSite, Ready4DriveSite])
+def test_la_tarjeta_que_se_pulsa_es_la_fila_entera_no_la_lista(browser, site_type):
+    """Subir de más pulsaría el contenedor de las tres opciones.
+
+    Ahí el click no elige nada, o elige la que quede debajo del cursor.
+    """
+
+    site = site_type()
+    context = browser.new_context()
+    page = context.new_page()
+    owner_html = """
+        <style>.lista, .tarjeta, .t { cursor: pointer; display: block; padding: 6px; }</style>
+        <div role="dialog" aria-modal="true">
+          <h2>Verificaci&#243;n del propietario de la cuenta</h2>
+          <div class="lista" id="lista">
+            <div class="tarjeta" id="enlace"><span class="t">Enviar enlace al due&#241;o</span></div>
+            <div class="tarjeta" id="omitir"><span class="t">Omitir verificaci&#243;n</span></div>
+          </div>
+        </div>
+        <script>
+          window.pulsado = null;
+          for (const nodo of document.querySelectorAll('[id]')) {
+            nodo.addEventListener('click', (evento) => {
+              if (window.pulsado === null) window.pulsado = evento.target.closest('[id]').id;
+            });
+          }
+        </script>
+    """
+    try:
+        page.route("https://verify.example/owner", lambda route: route.fulfill(body=owner_html, content_type="text/html"))
+        page.set_content('<iframe title="He llegado" src="https://verify.example/owner"></iframe>')
+        frame = page.frames[1]
+        frame.locator("#omitir").wait_for()
+
+        site._omitir_verificacion_del_propietario(frame, progress_callback=None)
+
+        assert frame.evaluate("pulsado") == "omitir", "subio hasta la lista entera"
+    finally:
+        context.close()
