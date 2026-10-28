@@ -52,6 +52,10 @@ class ProcessService:
     # seria inutil; mas largo perderia el detalle de las fases criticas.
     _V2_IMPORTANT_LOG_MIN_INTERVAL_SECONDS = 1.0
     _LOG_DRAIN_TIMEOUT_SECONDS = 20.0
+    # Cada cuanto se recuerda que un paso largo sigue vivo, cuando su
+    # mensaje no cambia. Cinco segundos: suficiente para que el agente no
+    # crea que se colgo, y lejos del cuarto de segundo al que llegaba antes.
+    _LATIDO_SEGUNDOS = 5.0
     _MAX_PROCESS_DEBUG_EXPORTS = 50
     _MAX_SLOT_DEBUG_EXPORTS = 50
     _IMPORTANT_LOG_PHASES = {
@@ -470,7 +474,63 @@ class ProcessService:
                     "se descartan los pendientes y la ejecucion continua."
                 )
 
+        # Un mensaje identico al anterior no informa de nada y se paga tres
+        # veces: reescribe la linea de estado del panel, ocupa una entrada en
+        # la linea de tiempo y puede acabar en un update del log remoto.
+        #
+        # Medido en una corrida real del 28/10: durante los 17 s finales se
+        # escribieron 67 veces, letra por letra, el mismo diagnostico de
+        # final_result. Eran 70 de los 207 eventos de la corrida -un tercio
+        # del registro era la misma frase- y el panel parpadeaba sin decir
+        # nada nuevo.
+        #
+        # Asi que solo se escribe cuando cambia. Para que no parezca colgado,
+        # cada LATIDO_SEGUNDOS sale una linea corta diciendo que sigue igual
+        # y cuanto lleva, y cuando la racha termina queda anotado cuantas
+        # veces se repitio: el dato sigue estando, solo deja de gritarlo.
+        ultimo: dict[str, object] = {
+            "phase": None,
+            "message": None,
+            "primera": 0.0,
+            "ultimo_aviso": 0.0,
+            "repeticiones": 0,
+        }
+
+        def cerrar_racha() -> None:
+            repeticiones = int(ultimo["repeticiones"] or 0)
+            if repeticiones <= 0:
+                return
+            run_context.run_stats.record(
+                "progreso_repetido",
+                {
+                    "phase": ultimo["phase"],
+                    "message": ultimo["message"],
+                    "veces": repeticiones,
+                    "segundos": round(monotonic() - float(ultimo["primera"] or 0.0), 1),
+                },
+            )
+            ultimo["repeticiones"] = 0
+
         def emit(phase: str, message: str) -> None:
+            ahora = monotonic()
+            if phase == ultimo["phase"] and message == ultimo["message"]:
+                ultimo["repeticiones"] = int(ultimo["repeticiones"] or 0) + 1
+                if ahora - float(ultimo["ultimo_aviso"] or 0.0) < self._LATIDO_SEGUNDOS:
+                    return
+                ultimo["ultimo_aviso"] = ahora
+                segundos = int(ahora - float(ultimo["primera"] or 0.0))
+                # Solo a la interfaz: el mensaje largo ya se escribio entero
+                # la primera vez, y repetirlo en la linea de tiempo seria
+                # volver al problema por otra puerta.
+                emit_progress(phase, f"Esperando... ({segundos}s sin cambios)")
+                return
+
+            cerrar_racha()
+            ultimo["phase"] = phase
+            ultimo["message"] = message
+            ultimo["primera"] = ahora
+            ultimo["ultimo_aviso"] = ahora
+
             emit_progress(phase, message)
             run_context.run_stats.record(
                 f"{phase}_event",
@@ -534,6 +594,7 @@ class ProcessService:
                 message=message,
                 error_message=None if fue_cancelada else message,
             )
+            cerrar_racha()
             self._store_process_debug_export(
                 normalized_request.process_id,
                 site_runner.runner,
@@ -599,6 +660,7 @@ class ProcessService:
             finished_at=completed_at,
         )
 
+        cerrar_racha()
         self._store_process_debug_export(
             normalized_request.process_id,
             site_runner.runner,

@@ -1693,3 +1693,129 @@ def test_el_resultado_se_guarda_en_la_carpeta_de_su_panel(monkeypatch) -> None:
     for linea in guardados:
         bloque = fuente[fuente.index(linea) : fuente.index(linea) + 200]
         assert "slot_id=" in bloque, linea
+
+
+def test_el_mismo_mensaje_repetido_se_escribe_una_sola_vez() -> None:
+    """67 veces la misma frase en una corrida real. Una basta.
+
+    La de verdad: durante los 17 s que el sitio tarda en validar la selfie,
+    el diagnostico de final_result no cambia ni una letra. Escribirlo cada
+    250 ms reescribia la linea de estado del panel, llenaba un tercio de la
+    linea de tiempo y podia acabar en el log remoto.
+    """
+
+    diagnostico = (
+        "Diagnostico final_result en iframe. modal_bloque_abierto=si."
+        " boton_final_presente=no. cambio_dom=no."
+    )
+
+    class PesadaCompincheSite(StubCompincheSite):
+        def execute_traditional(self, request, *, local_config, progress_callback):
+            self.execute_calls.append(("traditional", request, local_config))
+            for _ in range(67):
+                progress_callback("final_result", diagnostico)
+            progress_callback("final_result", "Resultado final detectado en iframe.")
+            return self.result
+
+    log_service = StubLogService()
+    progress_events: list[tuple[str, str]] = []
+    service = ProcessService(
+        log_service_factory=build_log_service_factory(log_service),
+        local_config_service=StubLocalConfigService(),
+        compinche_site=PesadaCompincheSite(
+            SiteExecutionResult(
+                success=True,
+                message="Proceso completado correctamente en compinche.io.",
+                final_status="success",
+                phase="final_result",
+            )
+        ),
+        paripe_site=StubParipeSite(
+            SiteExecutionResult(success=True, message="unused", final_status="success", phase="final_result")
+        ),
+    )
+
+    result = service.execute(
+        ProcessExecutionRequest(
+            page_name="Compinche",
+            action_name="He llegado",
+            phone_number="8095551234",
+            password="secret",
+            agent_name="Agente Local",
+            execution_mode="normal",
+        ),
+        progress_callback=lambda phase, message: progress_events.append((phase, message)),
+    )
+
+    assert result.success is True
+
+    mensajes = [mensaje for _phase, mensaje in progress_events]
+    assert mensajes.count(diagnostico) == 1, "el diagnostico se repitio en el panel"
+    assert "Resultado final detectado en iframe." in mensajes, (
+        "el mensaje que SI cambia tiene que llegar igual"
+    )
+    # Las 66 repeticiones van tan seguidas que no da tiempo a ningun latido.
+    assert not [m for m in mensajes if "sin cambios" in m]
+
+    # Y en la linea de tiempo queda una entrada, no 67.
+    debug = service.get_process_debug_export(result.process_id)
+    eventos = debug["run_stats_timeline"]
+    repetidos = [
+        e
+        for e in eventos
+        if e["event"] == "final_result_event" and e["details"].get("message") == diagnostico
+    ]
+    assert len(repetidos) == 1, f"{len(repetidos)} entradas para el mismo mensaje"
+
+    # Pero el dato no se pierde: queda contado cuantas veces se repitio.
+    rachas = [e for e in eventos if e["event"] == "progreso_repetido"]
+    assert rachas, "nadie anoto que el mensaje se repitio"
+    assert rachas[0]["details"]["veces"] == 66
+    assert rachas[0]["details"]["message"] == diagnostico
+
+
+def test_la_senal_de_vida_sale_cuando_la_espera_se_alarga(monkeypatch) -> None:
+    """Silencio total durante 17 s pareceria que el proceso se colgo."""
+
+    monkeypatch.setattr(ProcessService, "_LATIDO_SEGUNDOS", 0.0)
+
+    class LentaCompincheSite(StubCompincheSite):
+        def execute_traditional(self, request, *, local_config, progress_callback):
+            self.execute_calls.append(("traditional", request, local_config))
+            for _ in range(4):
+                progress_callback("final_result", "Validando la selfie...")
+            return self.result
+
+    log_service = StubLogService()
+    progress_events: list[tuple[str, str]] = []
+    service = ProcessService(
+        log_service_factory=build_log_service_factory(log_service),
+        local_config_service=StubLocalConfigService(),
+        compinche_site=LentaCompincheSite(
+            SiteExecutionResult(
+                success=True,
+                message="Proceso completado correctamente en compinche.io.",
+                final_status="success",
+                phase="final_result",
+            )
+        ),
+        paripe_site=StubParipeSite(
+            SiteExecutionResult(success=True, message="unused", final_status="success", phase="final_result")
+        ),
+    )
+
+    service.execute(
+        ProcessExecutionRequest(
+            page_name="Compinche",
+            action_name="He llegado",
+            phone_number="8095551234",
+            password="secret",
+            agent_name="Agente Local",
+            execution_mode="normal",
+        ),
+        progress_callback=lambda phase, message: progress_events.append((phase, message)),
+    )
+
+    latidos = [m for _p, m in progress_events if "sin cambios" in m]
+    assert latidos, "sin latido, 17 s callado parecen un cuelgue"
+    assert all("s sin cambios" in m for m in latidos)
