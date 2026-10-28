@@ -145,6 +145,28 @@ class ParipeSelectors:
         "Continuar com selfie",
         "Verificar com uma selfie",
     )
+    # El dialogo del propietario, version nueva: tres opciones -enlace al
+    # dueno, verificacion por video, y omitir- con la primera ya elegida. Las
+    # dos primeras esperan a una persona que no esta delante.
+    owner_verification_skip_texts: tuple[str, ...] = (
+        "Omitir verificacion",
+        "Omitir verificación",
+        "Skip verification",
+        "Pular verificacao",
+        "Pular verificação",
+    )
+    # El boton que aparece al elegir una opcion. Se usa SOLO en este dialogo,
+    # aparte de `continue_texts`, para que ampliarlo aqui no cambie el boton
+    # "Continuar" del resto del flujo. No se mete ninguna etiqueta que pueda
+    # coincidir con "Copiar enlace" ni con las dos opciones que esperan al
+    # dueno: elegir mal deja el proceso colgado sin que nada falle.
+    owner_verification_continue_texts: tuple[str, ...] = (
+        "Siguiente",
+        "Next",
+        "Seguinte",
+        "Omitir y continuar",
+        "Skip and continue",
+    )
     processing_texts: tuple[str, ...] = (
         "validamos su foto",
         "validando",
@@ -1764,6 +1786,49 @@ class ParipeSite(BaseSite):
             "Se presiono Iniciar verificacion, pero no aparecio el input de imagen.",
         )
 
+    # Cuanto se espera a que aparezca el boton de seguir tras elegir opcion.
+    _BOTON_TRAS_ELEGIR_MS = 2_000
+
+    def _omitir_verificacion_del_propietario(
+        self, dialog: Locator, *, progress_callback: ProgressCallback | None
+    ) -> str:
+        """Elige "Omitir verificacion" en el dialogo del propietario."""
+
+        resultado = self._elegir_opcion(
+            dialog,
+            self._patron_de_textos(self._selectors.owner_verification_skip_texts),
+            evento="omitir_verificacion",
+        )
+        if resultado in ("elegida", "ya_estaba"):
+            self.emit_progress(
+                progress_callback,
+                phase="account_selection",
+                message="Verificacion del propietario: se eligio 'Omitir verificacion'.",
+            )
+        elif resultado == "ausente":
+            # Dialogo de la version anterior, sin opciones. No es un fallo.
+            self._record_run_stat("owner_verification_sin_opciones")
+        return resultado
+
+    def _esperar_boton_de_continuar(
+        self, dialog: Locator, etiquetas: tuple[str, ...]
+    ) -> Locator | None:
+        """El boton que aparece despues de elegir una opcion.
+
+        Se busca SIEMPRE por etiqueta, nunca por posicion: en este dialogo
+        hay tambien un "Copiar enlace" y una X de cerrar.
+        """
+
+        limite = monotonic() + self._BOTON_TRAS_ELEGIR_MS / 1000
+        while True:
+            boton = self._find_fast_text_button(dialog, etiquetas)
+            if boton is not None:
+                return boton
+            if monotonic() >= limite:
+                return None
+            with suppress(Exception):
+                dialog.page.wait_for_timeout(self._PRE_SELFIE_POLL_MS)
+
     def _complete_owner_verification_selfie_step(
         self,
         dialog: Locator,
@@ -1775,13 +1840,25 @@ class ParipeSite(BaseSite):
         if self._dialog_has_file_input(dialog):
             return dialog
         continue_button = self._find_fast_text_button(dialog, self._selectors.self_owner_continue_texts)
+        etiquetas = self._selectors.self_owner_continue_texts
         if continue_button is None:
             dialog_text = self._safe_normalized_text(dialog)
             if not self._normalized_contains_any(dialog_text, self._selectors.owner_verification_texts):
                 return dialog
-            continue_button = self._find_button_by_labels(dialog, self._selectors.self_owner_continue_texts)
+            # Version nueva del dialogo: hay que elegir una opcion y el boton
+            # de seguir aparece despues. La unica que deja avanzar sin el
+            # dueno delante es "Omitir verificacion".
+            self._omitir_verificacion_del_propietario(dialog, progress_callback=progress_callback)
+            etiquetas = (
+                etiquetas
+                + self._selectors.continue_texts
+                + self._selectors.owner_verification_continue_texts
+            )
+            continue_button = self._esperar_boton_de_continuar(dialog, etiquetas)
         if continue_button is None:
-            continue_button = self._find_pre_selfie_text_candidate(dialog, self._selectors.self_owner_continue_texts)
+            continue_button = self._find_button_by_labels(dialog, etiquetas)
+        if continue_button is None:
+            continue_button = self._find_pre_selfie_text_candidate(dialog, etiquetas)
         if continue_button is None:
             return dialog
 

@@ -83,6 +83,29 @@ class SelectoresDeSitio:
         "Verificação do proprietário da conta",
         "Continuar com selfie",
     )
+    # El dialogo "Verificacion del propietario de la cuenta" trae tres
+    # opciones -enlace al dueno, verificacion por video, y omitir- y llega con
+    # la primera ya elegida. El proceso solo va bien omitiendo: las otras dos
+    # esperan a una persona que no esta.
+    owner_verification_skip_texts: tuple[str, ...] = (
+        "Omitir verificacion",
+        "Omitir verificación",
+        "Skip verification",
+        "Pular verificacao",
+        "Pular verificação",
+    )
+    # El boton que aparece al elegir una opcion. Se usa SOLO en este dialogo,
+    # aparte de `continue_texts`, para que ampliarlo aqui no cambie el boton
+    # "Continuar" del resto del flujo. No se mete ninguna etiqueta que pueda
+    # coincidir con "Copiar enlace" ni con las dos opciones que esperan al
+    # dueno: elegir mal deja el proceso colgado sin que nada falle.
+    owner_verification_continue_texts: tuple[str, ...] = (
+        "Siguiente",
+        "Next",
+        "Seguinte",
+        "Omitir y continuar",
+        "Skip and continue",
+    )
     self_owner_continue_texts: tuple[str, ...] = (
         "Continuar con selfie",
         "Verificar con una selfie",
@@ -1737,7 +1760,18 @@ class SitioDeBloques(BaseSite):
         if continue_button is None:
             if not self._has_any_text_now(root, self._selectors.owner_verification_texts):
                 return root
-            continue_button = self._find_best_text_candidate(root, self._selectors.self_owner_continue_texts)
+            # Version nueva del dialogo: tres opciones, con "Enviar enlace al
+            # dueno" ya elegida, y el boton de seguir no aparece -o no sirve-
+            # hasta elegir. Las otras dos opciones esperan a una persona que
+            # no esta delante, asi que la unica que deja avanzar al proceso es
+            # "Omitir verificacion", que continua con nuestra propia selfie.
+            self._omitir_verificacion_del_propietario(root, progress_callback=progress_callback)
+            etiquetas = (
+                self._selectors.self_owner_continue_texts
+                + self._selectors.continue_texts
+                + self._selectors.owner_verification_continue_texts
+            )
+            continue_button = self._esperar_boton_de_continuar(root, etiquetas)
         if continue_button is None:
             return root
 
@@ -1764,6 +1798,63 @@ class SitioDeBloques(BaseSite):
             "photo_upload",
             "Se eligio continuar con selfie, pero no aparecio el input de imagen.",
         )
+
+    # Cuanto se espera a que aparezca el boton de seguir tras elegir una
+    # opcion. El dialogo lo pinta al momento, pero el click y el repintado no
+    # son instantaneos y buscarlo una sola vez se lo perderia.
+    _BOTON_TRAS_ELEGIR_MS = 2_000
+
+    def _omitir_verificacion_del_propietario(
+        self,
+        root: Page | Frame | Locator,
+        *,
+        progress_callback: ProgressCallback | None,
+    ) -> str:
+        """Elige "Omitir verificacion" en el dialogo del propietario."""
+
+        resultado = self._elegir_opcion(
+            root,
+            self._patron_de_textos(self._selectors.owner_verification_skip_texts),
+            evento="omitir_verificacion",
+        )
+        if resultado in ("elegida", "ya_estaba"):
+            self.emit_progress(
+                progress_callback,
+                phase="account_selection",
+                message="Verificacion del propietario: se eligio 'Omitir verificacion'.",
+            )
+        elif resultado == "ausente":
+            # Dialogo de la version anterior, sin opciones. No es un fallo.
+            self._record_run_stat("owner_verification_sin_opciones")
+        else:
+            self.emit_progress(
+                progress_callback,
+                phase="account_selection",
+                message=(
+                    "No se pudo confirmar que quedara elegida 'Omitir"
+                    " verificacion'. Se sigue: lo dira la pantalla siguiente."
+                ),
+            )
+        return resultado
+
+    def _esperar_boton_de_continuar(
+        self, root: Page | Frame | Locator, etiquetas: tuple[str, ...]
+    ) -> Locator | None:
+        """El boton que aparece despues de elegir una opcion.
+
+        Se busca SIEMPRE por etiqueta, nunca por posicion ni "el ultimo boton
+        del dialogo": ahi estan tambien "Copiar enlace" y la X de cerrar.
+        """
+
+        limite = monotonic() + self._BOTON_TRAS_ELEGIR_MS / 1000
+        while True:
+            boton = self._find_fast_text_button(root, etiquetas)
+            if boton is not None:
+                return boton
+            if monotonic() >= limite:
+                break
+            self._wait_interval(root, self._POLL_MS)
+        return self._find_best_text_candidate(root, etiquetas)
 
     def _resolve_selfie_retry_root(self, page: Page, previous_root: Page | Frame | Locator) -> Page | Frame | Locator:
         ready_root = self._find_pre_selfie_context_now(page, previous_root)

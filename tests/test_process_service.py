@@ -56,9 +56,11 @@ class StubLocalConfigService:
 class StubLastResultService:
     def __init__(self) -> None:
         self.saved_results = []
+        self.saved_slots = []
 
-    def save_result(self, result) -> None:
+    def save_result(self, result, *, slot_id=None) -> None:
         self.saved_results.append(result)
+        self.saved_slots.append(slot_id)
 
 
 class StubCompincheSite:
@@ -282,6 +284,7 @@ def test_execute_compinche_runs_real_site_and_finishes_log() -> None:
             password="secret",
             agent_name="Agente Local",
             execution_mode="normal",
+            slot_id="slot_3",
         ),
         progress_callback=lambda phase, message: progress_events.append((phase, message)),
     )
@@ -296,6 +299,9 @@ def test_execute_compinche_runs_real_site_and_finishes_log() -> None:
     assert log_service.finish_calls[0][1]["final_status"] == "success"
     assert last_result_service.saved_results[0].phone_number == "8095551234"
     assert last_result_service.saved_results[0].action_name == "He llegado"
+    # Y se guarda en la carpeta de SU panel: con un fichero compartido, la
+    # corrida que termina de ultima pisa el resultado de las otras tres.
+    assert last_result_service.saved_slots == ["slot_3"]
     assert last_result_service.saved_results[0].deepfakescore_retries == 2
     assert progress_events == [
         ("login", "Preparando navegador limpio para compinche.io... Motor: Tradicional."),
@@ -1665,3 +1671,25 @@ def test_si_el_candado_esta_ocupado_no_se_escribe_por_otra_via() -> None:
     assert devuelto is None
     assert log_service.finish_calls == [], "no debe escribirse saltandose el candado"
     assert avisos and "queda abierta" in avisos[0]
+
+
+def test_el_resultado_se_guarda_en_la_carpeta_de_su_panel(monkeypatch) -> None:
+    """Sin el slot_id, las cuatro corridas vuelven a compartir un fichero.
+
+    Y el fallo seria mudo: la llamada va dentro de un try/except para que
+    guardar en disco no pueda tumbar una corrida, asi que un slot_id que no
+    llega no rompe nada, solo deja de guardarse donde toca.
+    """
+
+    import inspect
+
+    from services.process_service import ProcessService
+
+    fuente = inspect.getsource(ProcessService._execute_run)  # noqa: SLF001
+    guardados = [
+        linea for linea in fuente.splitlines() if "_last_result_service.save_result(" in linea
+    ]
+    assert guardados, "nadie guarda el ultimo resultado"
+    for linea in guardados:
+        bloque = fuente[fuente.index(linea) : fuente.index(linea) + 200]
+        assert "slot_id=" in bloque, linea

@@ -660,17 +660,117 @@ class BaseSite(ABC):
     def _opcion_prestada_de_radiogrupo(self, root):
         """La tarjeta "Cuenta prestada" de un grupo de radios, o None."""
 
+        return self._opcion_de_radiogrupo(root, self._CUENTA_PRESTADA_RE)
+
+    @staticmethod
+    def _patron_de_textos(textos) -> str:
+        """Una expresion que encaja con cualquiera de esos textos.
+
+        OJO: el texto de la pagina lleva tildes, asi que NO se puede construir
+        este patron a partir del texto normalizado sin acentos; no encajaria
+        con "verificacion". Por eso se escapan los textos tal cual vienen -la
+        lista ya trae la version con tilde y la version sin ella- y lo unico
+        que se afloja son los espacios, que el sitio puede partir en varios.
+        """
+
+        import re as _re
+
+        sueltas = []
+        for texto in textos:
+            if not texto or not texto.strip():
+                continue
+            # `re.escape` escapa el espacio en unas versiones de Python y no
+            # en otras, asi que se contemplan las dos formas.
+            parte = _re.escape(texto.strip())
+            sueltas.append(parte.replace(r"\ ", r"\s+").replace(" ", r"\s+"))
+        return "|".join(sueltas)
+
+    def _opcion_de_radiogrupo(self, root, patron: str):
+        """La opcion de un `role="radio"` cuyo texto encaja con `patron`."""
+
         import re as _re
 
         with suppress(Exception):
             opcion = (
                 root.locator('[role="radio"]')
-                .filter(has_text=_re.compile(self._CUENTA_PRESTADA_RE, _re.I))
+                .filter(has_text=_re.compile(patron, _re.I))
                 .first
             )
             if opcion.count() > 0:
                 return opcion
         return None
+
+    # Una opcion de una lista de la que hay que elegir una. No siempre es un
+    # `role="radio"`: a veces es una `label` con su input dentro, y a veces
+    # una tarjeta cualquiera. Se prueban los tres, del mas fiable al menos.
+    _SELECTORES_DE_OPCION = ('[role="radio"]', "label", 'li, [role="option"]')
+
+    def _localizar_opcion(self, root, patron: str):
+        """Lo que hay que pulsar para elegir esa opcion, o None."""
+
+        import re as _re
+
+        expresion = _re.compile(patron, _re.I)
+        for selector in self._SELECTORES_DE_OPCION:
+            with suppress(Exception):
+                opcion = root.locator(selector).filter(has_text=expresion).last
+                if opcion.count() > 0:
+                    return opcion
+        return None
+
+    def _opcion_esta_marcada(self, opcion):
+        """True, False o None si no se pudo saber. None NO es False."""
+
+        marcado = self._radio_esta_marcado(opcion)
+        if marcado is not None:
+            return marcado
+        # Una `label` no lleva aria-checked: lo lleva su input.
+        with suppress(Exception):
+            entrada = opcion.locator('input[type="radio"], input[type="checkbox"]').first
+            if entrada.count() > 0:
+                return bool(entrada.is_checked())
+        return None
+
+    def _elegir_opcion(self, root, patron: str, *, evento: str) -> str:
+        """Deja marcada la opcion que encaja con `patron`. NUNCA lanza.
+
+        Misma regla que el selector de cuenta: solo se pulsa con prueba
+        positiva de que NO esta marcada. Si no se sabe, se pulsa igual, porque
+        aqui la opcion marcada de fabrica es otra -el sitio trae elegida
+        "Enviar enlace al dueno"- y no elegir es quedarse parado. La
+        diferencia con el selector de cuenta es esa: alli no tocar era seguro,
+        aqui no tocar es no avanzar.
+
+        Respuestas: "ausente", "ya_estaba", "elegida", "no_confirmado".
+        """
+
+        opcion = self._localizar_opcion(root, patron)
+        if opcion is None:
+            self._anotar(f"{evento}_ausente")
+            return "ausente"
+        if self._opcion_esta_marcada(opcion) is True:
+            self._anotar(f"{evento}_ya_estaba")
+            return "ya_estaba"
+
+        with suppress(Exception):
+            self._click_locator_resilient(
+                opcion,
+                phase="account_selection",
+                error_message=f"No se pudo elegir la opcion '{patron}'.",
+            )
+
+        limite = monotonic() + self.CUENTA_SWITCH_TIMEOUT_MS / 1000
+        while monotonic() < limite:
+            if self._opcion_esta_marcada(opcion) is True:
+                self._anotar(f"{evento}_elegida")
+                return "elegida"
+            with suppress(Exception):
+                root.wait_for_timeout(100)
+        # Se pulso y no se pudo confirmar. No se vuelve a pulsar: un segundo
+        # click en una lista de opciones puede deseleccionar lo que acaba de
+        # quedar bien. Lo dira la pantalla siguiente.
+        self._anotar(f"{evento}_no_confirmada")
+        return "no_confirmado"
 
     @staticmethod
     def _radio_esta_marcado(opcion):

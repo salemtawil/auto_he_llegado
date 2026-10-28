@@ -272,3 +272,152 @@ def test_ready4drive_owner_step_follows_recreated_generic_iframe(browser):
         assert site._active_flow_context is not None
     finally:
         context.close()
+
+
+@pytest.mark.parametrize("site_type", [CompincheSite, Ready4DriveSite])
+def test_el_dialogo_de_tres_opciones_se_resuelve_omitiendo(browser, site_type):
+    """La version nueva del dialogo del propietario, con el HTML real.
+
+    Llega con "Enviar enlace al dueno" ya elegida, que espera a una persona
+    que no esta delante, y el boton de seguir no existe hasta elegir. Elegir
+    la equivocada, o no elegir, deja el proceso parado para siempre.
+    """
+
+    site = site_type()
+    context = browser.new_context()
+    page = context.new_page()
+    start_html = """
+        <div role="dialog" aria-modal="true">
+          <button id="start">Iniciar verificaci&#243;n</button>
+        </div>
+        <script>
+          document.querySelector('#start').onclick = () => parent.postMessage('owner', '*');
+        </script>
+    """
+    # Radiogroup de Headless UI, igual que el selector de cuenta: las tres
+    # opciones comparten aria-label y lo que las distingue es el texto.
+    owner_html = """
+        <div role="dialog" aria-modal="true">
+          <h2>Verificaci&#243;n del propietario de la cuenta</h2>
+          <p>Elige c&#243;mo continuar</p>
+          <div role="radiogroup" id="opciones">
+            <span role="radio" aria-label="owner-verification" aria-checked="true" data-checked="" id="enlace">
+              <span>Enviar enlace al due&#241;o</span>
+              <span>El due&#241;o se verifica desde su propio tel&#233;fono.</span>
+              <button id="copiar">Copiar enlace</button>
+            </span>
+            <span role="radio" aria-label="owner-verification" aria-checked="false" id="video">
+              <span>Verificaci&#243;n autom&#225;tica de video</span>
+              <span>Sube tres selfies del due&#241;o.</span>
+            </span>
+            <span role="radio" aria-label="owner-verification" aria-checked="false" id="omitir">
+              <span>Omitir verificaci&#243;n</span>
+              <span>Contin&#250;a solo con tu selfie.</span>
+            </span>
+          </div>
+          <div id="pie"></div>
+        </div>
+        <script>
+          window.elegidas = [];
+          for (const opcion of document.querySelectorAll('[role="radio"]')) {
+            opcion.onclick = () => {
+              window.elegidas.push(opcion.id);
+              for (const otra of document.querySelectorAll('[role="radio"]')) {
+                otra.setAttribute('aria-checked', String(otra === opcion));
+                if (otra === opcion) otra.setAttribute('data-checked', '');
+                else otra.removeAttribute('data-checked');
+              }
+              // El boton de seguir solo existe tras elegir, y solo si la
+              // opcion elegida permite continuar sin el dueno.
+              document.querySelector('#pie').innerHTML =
+                opcion.id === 'omitir' ? '<button id="seguir">Continuar</button>' : '';
+              const seguir = document.querySelector('#seguir');
+              if (seguir) seguir.onclick = () => parent.postMessage('photo', '*');
+            };
+          }
+        </script>
+    """
+    photo_html = """
+        <div role="dialog" aria-modal="true">
+          <input type="file" id="user_avatar" hidden>
+          <button>Continuar</button>
+        </div>
+    """
+    try:
+        page.route("https://paripe.io/imhere-light", lambda route: route.fulfill(body=start_html, content_type="text/html"))
+        page.route("https://verify.example/owner", lambda route: route.fulfill(body=owner_html, content_type="text/html"))
+        page.route("https://verify.example/photo", lambda route: route.fulfill(body=photo_html, content_type="text/html"))
+        page.set_content(
+            """
+            <script>
+              window.addEventListener('message', event => {
+                const frame = document.querySelector('iframe');
+                if (event.data === 'owner') frame.src = 'https://verify.example/owner';
+                if (event.data === 'photo') frame.src = 'https://verify.example/photo';
+              });
+            </script>
+            <iframe title="He llegado" src="https://paripe.io/imhere-light"></iframe>
+            """
+        )
+        frame = page.frames[1]
+        frame.locator("#start").wait_for()
+
+        root = site._wait_for_flow_root(page, site._get_action_spec("He llegado"), timeout_ms=1000).root
+        result = site._complete_pre_selfie_account_step(root, page=page, progress_callback=None, timeout_ms=3000)
+
+        assert result.locator("input[type=file]").count() == 1
+        assert "verify.example/photo" in result.evaluate("() => window.location.href")
+        assert site._active_flow_context is not None
+    finally:
+        context.close()
+
+
+@pytest.mark.parametrize("site_type", [CompincheSite, Ready4DriveSite, ParipeSite])
+def test_nunca_se_elige_enviar_enlace_ni_verificacion_de_video(browser, site_type):
+    """Las otras dos opciones esperan a una persona que no esta.
+
+    Si el paso eligiera una de ellas, el proceso se quedaria colgado sin que
+    nada fallara, que es la peor forma de fallar.
+    """
+
+    site = site_type()
+    context = browser.new_context()
+    page = context.new_page()
+    owner_html = """
+        <div role="dialog" aria-modal="true">
+          <h2>Verificaci&#243;n del propietario de la cuenta</h2>
+          <div role="radiogroup">
+            <span role="radio" aria-checked="true" data-checked="" id="enlace">
+              <span>Enviar enlace al due&#241;o</span>
+              <button id="copiar">Copiar enlace</button>
+            </span>
+            <span role="radio" aria-checked="false" id="video">
+              <span>Verificaci&#243;n autom&#225;tica de video</span>
+            </span>
+            <span role="radio" aria-checked="false" id="omitir">
+              <span>Omitir verificaci&#243;n</span>
+            </span>
+          </div>
+        </div>
+        <script>
+          window.elegidas = [];
+          for (const opcion of document.querySelectorAll('[role="radio"], button')) {
+            opcion.onclick = () => window.elegidas.push(opcion.id);
+          }
+        </script>
+    """
+    try:
+        page.route("https://verify.example/owner", lambda route: route.fulfill(body=owner_html, content_type="text/html"))
+        page.set_content('<iframe title="He llegado" src="https://verify.example/owner"></iframe>')
+        frame = page.frames[1]
+        frame.locator("#omitir").wait_for()
+
+        site._omitir_verificacion_del_propietario(frame, progress_callback=None)
+
+        elegidas = frame.evaluate("elegidas")
+        assert "omitir" in elegidas
+        assert "enlace" not in elegidas
+        assert "video" not in elegidas
+        assert "copiar" not in elegidas, "'Copiar enlace' no es el boton de seguir"
+    finally:
+        context.close()
