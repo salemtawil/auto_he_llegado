@@ -11,13 +11,23 @@ from __future__ import annotations
 
 import logging
 
+from core.errors import ErrorParaElAgente
+
 _LOGGER = logging.getLogger("auto_he_llegado.ui")
 
 
 def safe_error_summary(exc: BaseException, *, context: str = "") -> str:
-    """Log the full exception and return a short, non-sensitive label for the UI."""
+    """Log the full exception and return a short, non-sensitive label for the UI.
+
+    La excepcion a la regla es `ErrorParaElAgente`: su texto lo escribimos
+    nosotros para que lo lea una persona, asi que se muestra entero. Sin eso,
+    "el video debe durar minimo 10 s" llegaba a pantalla como "(RuntimeError)"
+    y el agente no tenia forma de saber que hacer.
+    """
 
     _LOGGER.exception(
         "Error en la interfaz%s", f" ({context})" if context else "", exc_info=exc
     )
+    if isinstance(exc, ErrorParaElAgente):
+        return str(exc)
     return type(exc).__name__

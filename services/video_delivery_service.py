@@ -5,6 +5,7 @@ import mimetypes
 from pathlib import Path
 
 from config.settings import Settings, get_settings
+from core.errors import ErrorParaElAgente
 
 
 @dataclass(frozen=True)
@@ -17,8 +18,36 @@ class VideoDeliveryResult:
 class GoogleDriveVideoDeliveryService:
     _SCOPES = ("https://www.googleapis.com/auth/drive.file",)
 
-    def __init__(self, settings: Settings | None = None) -> None:
+    def __init__(self, settings: Settings | None = None, *, user_key: str | None = None) -> None:
         self._settings = settings or get_settings()
+        self._user_key = self._limpiar_user_key(user_key)
+
+    @staticmethod
+    def _limpiar_user_key(valor: str | None) -> str | None:
+        """El identificador del agente, apto para formar un nombre de archivo."""
+
+        if not valor:
+            return None
+        limpio = "".join(c for c in str(valor) if c.isalnum() or c in "-_")
+        return limpio[:64] or None
+
+    def _token_file(self) -> Path | None:
+        """Donde se guarda la autorizacion de Google de ESTE agente.
+
+        Era un unico archivo por instalacion, y eso tenia dos consecuencias
+        que nadie queria: el primero que autorizaba dejaba su cuenta puesta
+        para todos los demas del equipo -sus videos subian a la cuenta de
+        otro- y ningun agente posterior volvia a ver la pantalla de
+        verificacion, asi que parecia que la app se la saltaba.
+
+        Ahora cada agente tiene la suya. Al actualizar, la primera subida de
+        cada uno volvera a pedir la cuenta: eso es lo correcto, no un fallo.
+        """
+
+        base = self._settings.google_drive_oauth_token_file
+        if base is None or self._user_key is None:
+            return base
+        return base.with_name(f"{base.stem}_{self._user_key}{base.suffix}")
 
     def upload_video(self, video_path: str | Path, *, display_name: str) -> VideoDeliveryResult:
         path = Path(video_path)
@@ -81,9 +110,15 @@ class GoogleDriveVideoDeliveryService:
 
         credentials_path = self._settings.google_drive_service_account_file
         if credentials_path is None:
-            raise RuntimeError("Falta configurar GOOGLE_DRIVE_SERVICE_ACCOUNT_FILE.")
+            raise ErrorParaElAgente(
+                "La cuenta de Google para subir videos no esta configurada en esta"
+                " instalacion. Avisa al administrador."
+            )
         if not credentials_path.exists() or not credentials_path.is_file():
-            raise RuntimeError(f"No existe GOOGLE_DRIVE_SERVICE_ACCOUNT_FILE: {credentials_path}")
+            raise ErrorParaElAgente(
+                "Falta el archivo de la cuenta de Google en esta instalacion."
+                " Avisa al administrador."
+            )
         return service_account.Credentials.from_service_account_file(
             str(credentials_path),
             scopes=list(self._SCOPES),
@@ -95,13 +130,22 @@ class GoogleDriveVideoDeliveryService:
         from google_auth_oauthlib.flow import InstalledAppFlow
 
         client_file = self._settings.google_drive_oauth_client_file
-        token_file = self._settings.google_drive_oauth_token_file
+        token_file = self._token_file()
         if client_file is None:
-            raise RuntimeError("Falta configurar GOOGLE_DRIVE_OAUTH_CLIENT_FILE.")
+            raise ErrorParaElAgente(
+                "La cuenta de Google para subir videos no esta configurada en esta"
+                " instalacion. Avisa al administrador."
+            )
         if not client_file.exists() or not client_file.is_file():
-            raise RuntimeError(f"No existe GOOGLE_DRIVE_OAUTH_CLIENT_FILE: {client_file}")
+            raise ErrorParaElAgente(
+                "Falta el archivo de configuracion de Google en esta instalacion."
+                " Avisa al administrador."
+            )
         if token_file is None:
-            raise RuntimeError("Falta configurar GOOGLE_DRIVE_OAUTH_TOKEN_FILE.")
+            raise ErrorParaElAgente(
+                "Falta configurar donde se guarda la autorizacion de Google."
+                " Avisa al administrador."
+            )
 
         credentials = None
         if token_file.exists():
@@ -125,6 +169,9 @@ class GoogleDriveVideoDeliveryService:
 
     def _validate_config(self, video_path: Path) -> None:
         if not video_path.exists() or not video_path.is_file():
-            raise FileNotFoundError(f"Video no encontrado: {video_path}")
+            raise ErrorParaElAgente("No se encontro el video que elegiste.")
         if not self._settings.google_drive_folder_id:
-            raise RuntimeError("Falta configurar GOOGLE_DRIVE_FOLDER_ID.")
+            raise ErrorParaElAgente(
+                "Falta configurar la carpeta de Drive donde se guardan los videos."
+                " Avisa al administrador."
+            )

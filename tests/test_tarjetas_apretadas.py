@@ -80,11 +80,20 @@ def test_el_suelo_de_altura_sigue_al_modo() -> None:
 
 
 def test_la_ventana_aprieta_las_tarjetas_cuando_hay_mas_de_dos() -> None:
+    """Y "mas de dos" son las que se VEN, no las que existen.
+
+    Si el agente elige ver dos paneles de los cuatro, cada uno ocupa media
+    ventana de ancho y la altura entera: apretarlos ahi seria encoger sin
+    motivo. Antes se miraba `len(self.SLOT_IDS)`, que siempre son cuatro.
+    """
+
     ventana = (RAIZ / "ui" / "main_app" / "window.py").read_text(encoding="utf-8")
     cuerpo = next(
         ast.unparse(n)
         for n in ast.walk(ast.parse(ventana))
         if isinstance(n, ast.FunctionDef) and n.name == "_layout_slots"
     )
-    assert "len(self.SLOT_IDS) > 2" in cuerpo
+    assert "visibles = self._slots_visibles()" in cuerpo
+    assert "len(visibles) > 2" in cuerpo
+    assert "len(self.SLOT_IDS) > 2" not in cuerpo, "vuelve a contar los que no se ven"
     assert "set_compact_layout(apretadas)" in cuerpo

@@ -303,6 +303,10 @@ class LocalConfig(DomainModel):
     # corriendo no inhabilita a los demas. Lo que el equipo aguanta comodo se
     # sigue estimando en `config/machine_profile.py`, pero solo para decirlo.
     max_concurrent_processes: int = 4
+    # Cuantos paneles quiere VER el agente. No capa cuantos procesos puede
+    # lanzar -eso son los paneles que haya-, solo cuantas tarjetas se dibujan:
+    # con uno o dos, cada una respira y la ventana cabe en pantallas chicas.
+    visible_process_slots: int = 4
     # Tamano del navegador de la automatizacion y zoom, en porcentaje. El zoom
     # se aplica con --force-device-scale-factor, asi que al 63% cabe mas
     # pagina en una ventana mas chica: es lo que permite tener la app y el

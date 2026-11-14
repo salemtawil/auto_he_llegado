@@ -167,3 +167,89 @@ def test_los_avisos_del_cierre_si_llegan_a_todos() -> None:
     for aviso in ("Cerrando Playwright", "no respondieron a tiempo", "liberen sus"):
         posicion = VENTANA.index(aviso)
         assert "incluso_ocupados=True" in VENTANA[posicion : posicion + 400], aviso
+
+
+def test_se_puede_elegir_cuantos_paneles_se_ven() -> None:
+    """Cuantos se DIBUJAN, que no es lo mismo que cuantos se pueden lanzar."""
+
+    cuerpo = _cuerpo("_slots_visibles")
+    assert "visible_process_slots" in cuerpo
+    assert "len(self.SLOT_IDS)" in cuerpo, "el tope sigue saliendo de la lista"
+
+
+def test_un_panel_que_esta_corriendo_nunca_se_oculta() -> None:
+    """Esconder una corrida en marcha la dejaria trabajando a ciegas.
+
+    Sin forma de verla ni de pararla, y el proceso vivo por detras. Asi que
+    el numero elegido es un minimo mientras queden corridas por encima.
+    """
+
+    cuerpo = _cuerpo("_slots_visibles")
+    assert "slot.thread is not None" in cuerpo
+
+
+def test_el_contador_cuenta_sobre_los_paneles_que_se_ven() -> None:
+    # "2/4" con dos paneles en pantalla hace pensar que faltan dos.
+    for nombre in ("_slot_process_count_label",):
+        assert "_slots_visibles()" in _cuerpo(nombre), nombre
+    assert "Activos: {self._active_process_count()}/{len(self._slots_visibles())}" in VENTANA
+
+
+def test_cambiar_el_numero_redibuja_al_momento() -> None:
+    cuerpo = _cuerpo("_persist_local_config")
+    assert "visible_process_slots" in cuerpo
+    assert "_layout_slots" in cuerpo, "si no, habria que reiniciar para verlo"
+
+
+def test_un_numero_raro_no_deja_la_ventana_sin_paneles() -> None:
+    cuerpo = _cuerpo("_parse_visible_slots")
+    assert "max(1," in cuerpo
+    assert "min(len(self.SLOT_IDS)" in cuerpo
+
+
+def _ventana_falsa(*, pedidos, corriendo=()):
+    """Lo justo que `_slots_visibles` necesita de su alrededor."""
+
+    from types import SimpleNamespace
+
+    from ui.main_app.window import MainAppWindow
+
+    class _Ventana:
+        SLOT_IDS = MainAppWindow.SLOT_IDS
+        _slots_visibles = MainAppWindow._slots_visibles  # noqa: SLF001
+
+        def __init__(self) -> None:
+            self._current_config = SimpleNamespace(visible_process_slots=pedidos)
+            self._slots = {
+                sid: SimpleNamespace(thread=object() if sid in corriendo else None)
+                for sid in self.SLOT_IDS
+            }
+
+    return _Ventana()
+
+
+def test_se_dibujan_los_primeros_n_paneles() -> None:
+    pytest.importorskip("tkinter", reason="la ventana necesita Tk")
+
+    assert _ventana_falsa(pedidos=1)._slots_visibles() == ("slot_1",)  # noqa: SLF001
+    assert _ventana_falsa(pedidos=2)._slots_visibles() == ("slot_1", "slot_2")  # noqa: SLF001
+    assert len(_ventana_falsa(pedidos=4)._slots_visibles()) == 4  # noqa: SLF001
+
+
+def test_una_corrida_por_encima_del_numero_elegido_sigue_a_la_vista() -> None:
+    """El caso que importa: eliges ver 2 y el panel 4 esta trabajando."""
+
+    pytest.importorskip("tkinter", reason="la ventana necesita Tk")
+
+    visibles = _ventana_falsa(pedidos=2, corriendo=("slot_4",))._slots_visibles()  # noqa: SLF001
+    assert visibles == ("slot_1", "slot_2", "slot_4"), visibles
+    # Y en el orden de la rejilla, no al final por haber llegado despues.
+    assert list(visibles) == sorted(visibles)
+
+
+def test_un_numero_fuera_de_rango_se_acota() -> None:
+    pytest.importorskip("tkinter", reason="la ventana necesita Tk")
+
+    assert len(_ventana_falsa(pedidos=0)._slots_visibles()) == 1  # noqa: SLF001
+    assert len(_ventana_falsa(pedidos=99)._slots_visibles()) == 4  # noqa: SLF001
+    assert len(_ventana_falsa(pedidos=None)._slots_visibles()) == 4  # noqa: SLF001

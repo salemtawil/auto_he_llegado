@@ -145,7 +145,12 @@ class SettingsDialog(ctk.CTkToplevel):
         self.browser_extension_overlay_menu = self._build_option_menu(
             body,
             row=10,
-            label="overlay visual de extension",
+            # Decia "overlay visual de extension" a secas, y eso hacia pensar
+            # que afectaba a las corridas. No: en una corrida real la
+            # extension nunca se carga -el motor tradicional es el unico
+            # vivo- y browser_manager ni mira esta opcion. Solo tiene efecto
+            # en los dos navegadores que abre el admin a mano.
+            label="overlay en el navegador manual (solo admin)",
             values=["si", "no"],
         )
         self.browser_extension_overlay_menu.set("si" if config.browser_extension_overlay else "no")
@@ -153,7 +158,10 @@ class SettingsDialog(ctk.CTkToplevel):
         self.page_timeout_entry = self._build_entry(
             body,
             row=12,
-            label="timeout de procesamiento de foto",
+            # No es el timeout de la foto: es el timeout general de pagina, y
+            # ademas es el suelo de la espera de bloque. Subirlo "para darle
+            # mas tiempo a la foto" alarga todo el flujo.
+            label="timeout general de pagina y espera de bloque",
             placeholder="180",
         )
         self.page_timeout_entry.insert(0, str(config.page_timeout_seconds))
@@ -161,7 +169,8 @@ class SettingsDialog(ctk.CTkToplevel):
         self.action_timeout_entry = self._build_entry(
             body,
             row=14,
-            label="timeout de respuesta final",
+            # Tampoco es solo la respuesta final: es el timeout de accion.
+            label="timeout general de acciones",
             placeholder="180",
         )
         self.action_timeout_entry.insert(0, str(config.action_timeout_seconds))
@@ -173,6 +182,17 @@ class SettingsDialog(ctk.CTkToplevel):
             placeholder="10, 0 o -1 para ilimitado",
         )
         self.max_selfie_retries_entry.insert(0, str(config.max_selfie_retries))
+
+        # Cuantos paneles se dibujan. No limita cuantos procesos puede lanzar
+        # el agente -eso son los paneles que existan-, solo cuantas tarjetas
+        # se ven: con una o dos, cada una respira.
+        self.visible_slots_menu = self._build_option_menu(
+            body,
+            row=17,
+            label="paneles de proceso visibles",
+            values=["1", "2", "3", "4"],
+        )
+        self.visible_slots_menu.set(str(config.visible_process_slots))
 
         self.last_result_filter_menu = self._build_option_menu(
             body,
@@ -353,6 +373,7 @@ class SettingsDialog(ctk.CTkToplevel):
             "page_timeout_seconds": self.page_timeout_entry.get(),
             "action_timeout_seconds": self.action_timeout_entry.get(),
             "max_selfie_retries": self.max_selfie_retries_entry.get(),
+            "visible_process_slots": self.visible_slots_menu.get(),
             "last_result_filter": self.last_result_filter_menu.get(),
             "theme_mode": self.theme_menu.get(),
         }

@@ -987,7 +987,12 @@ class MainAppWindow(ctk.CTk):
 
     def _persist_local_config(self, config: LocalConfig) -> None:
         previous_theme_mode = self._current_config.theme_mode
+        paneles_antes = self._current_config.visible_process_slots
         self._current_config = self._config_service.save(config)
+        if self._current_config.visible_process_slots != paneles_antes:
+            # Al momento, no al reiniciar: el agente acaba de elegirlo.
+            with contextlib.suppress(Exception):
+                self._layout_slots(self._layout_mode or "wide")
         apply_theme_mode(self._current_config.theme_mode)
         self.refresh_extension_status()
         if previous_theme_mode != self._current_config.theme_mode:
@@ -1078,10 +1083,34 @@ class MainAppWindow(ctk.CTk):
     def _layout_header(self, mode: str) -> None:
         return
 
+    def _slots_visibles(self) -> tuple[str, ...]:
+        """Los paneles que se dibujan, en orden.
+
+        El agente elige cuantos quiere ver en Ajustes. Un panel que esta
+        corriendo NO se oculta aunque sobre: esconder una corrida en marcha
+        la dejaria trabajando sin forma de verla ni de pararla, y el proceso
+        seguiria vivo detras. Asi que el numero elegido es un minimo, no un
+        maximo, mientras queden corridas por encima de el.
+        """
+
+        try:
+            pedidos = int(self._current_config.visible_process_slots)
+        except (TypeError, ValueError):
+            pedidos = len(self.SLOT_IDS)
+        pedidos = max(1, min(len(self.SLOT_IDS), pedidos))
+        visibles = list(self.SLOT_IDS[:pedidos])
+        for slot_id in self.SLOT_IDS[pedidos:]:
+            slot = self._slots.get(slot_id)
+            if slot is not None and slot.thread is not None:
+                visibles.append(slot_id)
+        # Se devuelven en el orden de SLOT_IDS para que la rejilla no baile.
+        return tuple(sid for sid in self.SLOT_IDS if sid in set(visibles))
+
     def _layout_slots(self, mode: str) -> None:
+        visibles = self._slots_visibles()
         # Con mas de dos tarjetas van en rejilla y cada una ocupa media
         # ventana: ahi tienen que ir apretadas o no caben las dos filas.
-        apretadas = len(self.SLOT_IDS) > 2
+        apretadas = len(visibles) > 2
         for slot in self._slots.values():
             slot.panel.grid_forget()
             slot.panel.set_secondary_visual(False)
@@ -1096,18 +1125,24 @@ class MainAppWindow(ctk.CTk):
         # Antes se repartia el alto a partes iguales ("uniform") y en una
         # ventana baja ninguna recibia lo que su contenido necesita, con lo que
         # la fila de botones quedaba cortada.
-        columnas = max(1, self.SLOT_COLUMNS)
+        # Con uno o dos paneles no tiene sentido partir en dos columnas: se
+        # quedaria media ventana vacia.
+        columnas = max(1, min(self.SLOT_COLUMNS, len(visibles)))
+        for columna in range(self.SLOT_COLUMNS):
+            # Las columnas que sobran se desinflan, si no reservan ancho para
+            # un panel que no esta.
+            self.main_column.grid_columnconfigure(columna, weight=0, uniform="")
         for columna in range(columnas):
             # uniform: las columnas miden lo mismo, si no la primera tarjeta se
             # queda con todo el ancho y la de al lado sale espachurrada.
             self.main_column.grid_columnconfigure(
                 columna, weight=1, uniform="slots"
             )
-        total_filas = (len(self.SLOT_IDS) + columnas - 1) // columnas
+        total_filas = (len(visibles) + columnas - 1) // columnas
         for fila in range(total_filas):
             self.main_column.grid_rowconfigure(fila, weight=0)
 
-        for indice, slot_id in enumerate(self.SLOT_IDS):
+        for indice, slot_id in enumerate(visibles):
             fila, columna = divmod(indice, columnas)
             ultima_fila = fila == total_filas - 1
             self._slots[slot_id].panel.grid(
@@ -1254,7 +1289,7 @@ class MainAppWindow(ctk.CTk):
         engine_label = self._flow_engine_label(self._current_config.flow_engine)
         self._header_meta_parts = [
             f"Motor: {engine_label}",
-            f"Activos: {self._active_process_count()}/{self._max_concurrent_processes()}",
+            f"Activos: {self._active_process_count()}/{len(self._slots_visibles())}",
             f"Principal: {slot_title}",
             f"Página: {page_name}",
         ]
@@ -1321,9 +1356,11 @@ class MainAppWindow(ctk.CTk):
         return len(self.SLOT_IDS)
 
     def _slot_process_count_label(self) -> str:
+        # Sobre los paneles que se VEN: decir "2/4" con dos paneles en
+        # pantalla hace pensar que faltan dos por algun motivo.
         return (
             f"Procesos activos: {self._active_process_count()}"
-            f"/{self._max_concurrent_processes()}"
+            f"/{len(self._slots_visibles())}"
         )
 
     def _set_slot_summary(self, slot_id: str, text: str) -> None:
@@ -2642,6 +2679,18 @@ class MainAppWindow(ctk.CTk):
             owner_selfie_path=owner_selfie_path,
         )
 
+    def _parse_visible_slots(self, valor) -> int:
+        """Cuantos paneles ver. Ante cualquier duda, los que ya habia.
+
+        Un numero raro aqui no puede dejar la ventana sin un solo panel.
+        """
+
+        try:
+            pedidos = int(str(valor).strip())
+        except (TypeError, ValueError):
+            return self._current_config.visible_process_slots
+        return max(1, min(len(self.SLOT_IDS), pedidos))
+
     @staticmethod
     def _get_local_device_name() -> str:
         return os.getenv("COMPUTERNAME") or platform.node().strip() or "UNKNOWN_DEVICE"
@@ -2717,6 +2766,9 @@ class MainAppWindow(ctk.CTk):
             browser_window_height=alto_navegador,
             browser_zoom_percent=self._parse_zoom(source.get("browser_zoom", "100%")),
             max_concurrent_processes=self._current_config.max_concurrent_processes,
+            visible_process_slots=self._parse_visible_slots(
+                source.get("visible_process_slots")
+            ),
             hardware_signature=self._current_config.hardware_signature,
             hardware_profile=self._current_config.hardware_profile,
             last_result_filter=(
