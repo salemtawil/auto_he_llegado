@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import contextlib
+
 from tkinter import messagebox
 
 import customtkinter as ctk
@@ -21,10 +23,19 @@ from ui.theme import (
 
 
 class SettingsDialog(ctk.CTkToplevel):
-    def __init__(self, master, config: LocalConfig, on_save, on_launch_updater=None, **kwargs) -> None:
+    def __init__(
+        self,
+        master,
+        config: LocalConfig,
+        on_save,
+        on_launch_updater=None,
+        on_reset_google=None,
+        **kwargs,
+    ) -> None:
         super().__init__(master, fg_color=APP_BG, **kwargs)
         self._on_save = on_save
         self._on_launch_updater = on_launch_updater
+        self._on_reset_google = on_reset_google
         self._initial_data = {
             "agent_name": config.agent_name,
             "automation_version": (
@@ -247,8 +258,42 @@ class SettingsDialog(ctk.CTkToplevel):
             )
             updater_hint.grid(row=1, column=0, padx=16, pady=(8, 0), sticky="w")
 
+        if self._on_reset_google is not None:
+            # La verificacion de Google se pide UNA vez por equipo y luego no
+            # vuelve a salir. Eso esta bien hasta que se queda a medias -la
+            # ventana se cerro sin querer, el navegador no abrio- y entonces
+            # no habia forma de volver a empezar sin entrar a mano en la
+            # carpeta de datos. Este boton es esa forma.
+            self.reset_google_button = ctk.CTkButton(
+                footer,
+                text="Reiniciar verificacion de Google",
+                command=self._handle_reset_google,
+                height=38,
+                corner_radius=12,
+                fg_color="transparent",
+                hover_color=ACCENT_HOVER,
+                border_width=1,
+                border_color=ACCENT,
+                text_color=ACCENT,
+                font=ctk.CTkFont(size=13, weight="bold"),
+            )
+            self.reset_google_button.grid(row=2, column=0, padx=16, pady=(12, 0), sticky="ew")
+
+            self.reset_google_hint = ctk.CTkLabel(
+                footer,
+                text=(
+                    "Olvida la cuenta de Google guardada. La proxima vez que"
+                    " subas un video volvera a pedirla."
+                ),
+                text_color=TEXT_MUTED,
+                font=ctk.CTkFont(size=11),
+                justify="left",
+                wraplength=360,
+            )
+            self.reset_google_hint.grid(row=3, column=0, padx=16, pady=(8, 0), sticky="w")
+
         actions = ctk.CTkFrame(footer, fg_color="transparent")
-        actions.grid(row=2, column=0, padx=16, pady=16, sticky="ew")
+        actions.grid(row=4, column=0, padx=16, pady=16, sticky="ew")
         actions.grid_columnconfigure(0, weight=1)
         actions.grid_columnconfigure(1, weight=1)
 
@@ -377,6 +422,15 @@ class SettingsDialog(ctk.CTkToplevel):
             "last_result_filter": self.last_result_filter_menu.get(),
             "theme_mode": self.theme_menu.get(),
         }
+
+    def _handle_reset_google(self) -> None:
+        if self._on_reset_google is None:
+            return
+        texto = self._on_reset_google()
+        # Se contesta en el propio boton: abrir otra ventana encima de
+        # Ajustes para decir "listo" es mas estorbo que ayuda.
+        with contextlib.suppress(Exception):
+            self.reset_google_hint.configure(text=texto)
 
     def _handle_cancel(self) -> None:
         if self.has_unsaved_changes():

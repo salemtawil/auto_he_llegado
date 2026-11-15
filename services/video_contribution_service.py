@@ -43,7 +43,6 @@ class VideoContributionService:
         review_service: PhotoReviewService | None = None,
         extractor: VideoFrameExtractor | None = None,
         delivery_service: GoogleDriveVideoDeliveryService | None = None,
-        delivery_service_factory=None,
         notification_service: TelegramNotificationService | None = None,
         fingerprint_service: VideoFingerprintService | None = None,
         settings: Settings | None = None,
@@ -51,12 +50,7 @@ class VideoContributionService:
         self._settings = settings or get_settings()
         self._review_service = review_service or PhotoReviewService(settings=self._settings)
         self._extractor = extractor or VideoFrameExtractor()
-        self._delivery_service = delivery_service
-        self._delivery_service_factory = delivery_service_factory or (
-            lambda user_key: GoogleDriveVideoDeliveryService(
-                self._settings, user_key=user_key
-            )
-        )
+        self._delivery_service = delivery_service or GoogleDriveVideoDeliveryService(self._settings)
         self._notification_service = notification_service or TelegramNotificationService(self._settings)
         self._fingerprint_service = fingerprint_service or VideoFingerprintService()
         self._work_dir = self._settings.local_data_dir / "video_frames"
@@ -126,7 +120,7 @@ class VideoContributionService:
         )
         self._emit(progress_callback, "uploading", "Subiendo video completo a Google Drive...")
         try:
-            delivery = self._entrega_para(session).upload_video(
+            delivery = self._delivery_service.upload_video(
                 source,
                 display_name=self._drive_display_name(source, session=session, batch_id=batch.id),
             )
@@ -230,21 +224,6 @@ class VideoContributionService:
         user_label = (session.display_name or session.email or session.user_id).strip()
         safe_user = "".join(char if char.isalnum() or char in ("-", "_", ".") else "_" for char in user_label)
         return f"{safe_user}_{batch_id}_{source.name}"
-
-    def _entrega_para(self, session: AuthSession):
-        """El servicio de Drive de ESTE agente.
-
-        La autorizacion de Google se guarda por agente, no por instalacion:
-        antes, el primero que autorizaba dejaba su cuenta puesta para todos
-        los del equipo -los videos de los demas subian a su Drive- y nadie
-        volvia a ver la pantalla de verificacion.
-
-        Si alguien inyecto un servicio concreto (las pruebas), se respeta.
-        """
-
-        if self._delivery_service is not None:
-            return self._delivery_service
-        return self._delivery_service_factory(getattr(session, "user_id", None))
 
     def _validate_min_duration(self, duration_seconds: float) -> None:
         minimum = max(float(self._settings.video_min_duration_seconds), 0.0)

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import suppress
 from dataclasses import dataclass
 import mimetypes
 from pathlib import Path
@@ -17,37 +18,54 @@ class VideoDeliveryResult:
 
 class GoogleDriveVideoDeliveryService:
     _SCOPES = ("https://www.googleapis.com/auth/drive.file",)
+    # Cuanto se espera a que la persona termine en el navegador. Tres minutos
+    # sobran para autorizar y evitan que un descuido cuelgue la subida.
+    AUTORIZACION_TIMEOUT_S = 180
 
-    def __init__(self, settings: Settings | None = None, *, user_key: str | None = None) -> None:
+    def __init__(self, settings: Settings | None = None) -> None:
         self._settings = settings or get_settings()
-        self._user_key = self._limpiar_user_key(user_key)
-
-    @staticmethod
-    def _limpiar_user_key(valor: str | None) -> str | None:
-        """El identificador del agente, apto para formar un nombre de archivo."""
-
-        if not valor:
-            return None
-        limpio = "".join(c for c in str(valor) if c.isalnum() or c in "-_")
-        return limpio[:64] or None
 
     def _token_file(self) -> Path | None:
-        """Donde se guarda la autorizacion de Google de ESTE agente.
+        """Donde se guarda la autorizacion de Google.
 
-        Era un unico archivo por instalacion, y eso tenia dos consecuencias
-        que nadie queria: el primero que autorizaba dejaba su cuenta puesta
-        para todos los demas del equipo -sus videos subian a la cuenta de
-        otro- y ningun agente posterior volvia a ver la pantalla de
-        verificacion, asi que parecia que la app se la saltaba.
+        UNA por instalacion, a proposito: los videos van todos a la misma
+        carpeta de Drive de la empresa, asi que la cuenta que autoriza tiene
+        que ser la que tiene permiso sobre esa carpeta. Si cada agente
+        autorizara la suya, la mayoria no podria escribir alli.
 
-        Ahora cada agente tiene la suya. Al actualizar, la primera subida de
-        cada uno volvera a pedir la cuenta: eso es lo correcto, no un fallo.
+        Consecuencia buscada: se autoriza una vez y los demas agentes no
+        vuelven a ver la pantalla. Cuando hace falta repetirla -alguien cerro
+        la ventana sin querer, el navegador no abrio- se usa
+        `olvidar_autorizacion()`, no se pide a cada subida.
         """
 
-        base = self._settings.google_drive_oauth_token_file
-        if base is None or self._user_key is None:
-            return base
-        return base.with_name(f"{base.stem}_{self._user_key}{base.suffix}")
+        return self._settings.google_drive_oauth_token_file
+
+    def olvidar_autorizacion(self) -> bool:
+        """Borra la autorizacion guardada para que la proxima subida la pida.
+
+        Es la salida cuando el paso de Google se quedo a medias: la ventana
+        se cerro antes de tiempo, el navegador no llego a abrirse, o la
+        cuenta que se autorizo no era la que toca. Sin esto, la app creia
+        tener una autorizacion -o ninguna- y no habia forma de volver a
+        empezar sin entrar a mano en la carpeta de datos.
+
+        Devuelve True si habia algo que olvidar.
+        """
+
+        token_file = self._token_file()
+        if token_file is None or not token_file.exists():
+            return False
+        # Se renombra en vez de borrarse: si la nueva autorizacion falla,
+        # la anterior todavia se puede recuperar a mano.
+        respaldo = token_file.with_suffix(token_file.suffix + ".anterior")
+        with suppress(Exception):
+            respaldo.unlink()
+        try:
+            token_file.rename(respaldo)
+        except Exception:  # noqa: BLE001 - si no se puede renombrar, se borra
+            token_file.unlink(missing_ok=True)
+        return True
 
     def upload_video(self, video_path: str | Path, *, display_name: str) -> VideoDeliveryResult:
         path = Path(video_path)
@@ -162,7 +180,21 @@ class GoogleDriveVideoDeliveryService:
                 str(client_file),
                 scopes=list(self._SCOPES),
             )
-            credentials = flow.run_local_server(port=0)
+            # CON TIMEOUT. Sin el, `run_local_server` se queda esperando el
+            # redirect para siempre: si el agente cierra la ventana del
+            # navegador sin autorizar -o el navegador nunca llega a abrirse-
+            # el hilo de la subida queda colgado y en pantalla no pasa nada.
+            try:
+                credentials = flow.run_local_server(
+                    port=0, timeout_seconds=self.AUTORIZACION_TIMEOUT_S
+                )
+            except Exception as exc:  # noqa: BLE001 - incluye el timeout
+                raise ErrorParaElAgente(
+                    "No se completo la verificacion de la cuenta de Google."
+                    " Si la ventana no llego a abrirse o la cerraste sin"
+                    " terminar, usa 'Reiniciar verificacion de Google' en"
+                    " Ajustes y vuelve a subir el video."
+                ) from exc
         token_file.parent.mkdir(parents=True, exist_ok=True)
         token_file.write_text(credentials.to_json(), encoding="utf-8")
         return credentials

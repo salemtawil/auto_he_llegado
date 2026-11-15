@@ -640,8 +640,42 @@ class MainAppWindow(ctk.CTk):
             config=self._current_config,
             on_save=self.save_local_config,
             on_launch_updater=self.request_external_update,
+            on_reset_google=self.reiniciar_verificacion_de_google,
         )
         self._settings_dialog.focus()
+
+    def reiniciar_verificacion_de_google(self) -> str:
+        """Olvida la cuenta de Google guardada. Devuelve que decirle al agente.
+
+        La verificacion se pide una vez por equipo y luego no vuelve a salir,
+        que es lo que se quiere. El problema aparece cuando se queda a
+        medias: alguien cierra la ventana del navegador sin terminar, o el
+        navegador no llega a abrirse porque el equipo lo tiene bloqueado.
+        Entonces no habia forma de pedirla otra vez sin entrar a mano en la
+        carpeta de datos.
+
+        No lanza: es un boton de rescate, y uno que falla con una excepcion
+        en pantalla no rescata a nadie.
+        """
+
+        try:
+            from services.video_delivery_service import GoogleDriveVideoDeliveryService
+
+            habia = GoogleDriveVideoDeliveryService().olvidar_autorizacion()
+        except Exception as exc:  # noqa: BLE001
+            return (
+                "No se pudo reiniciar la verificacion."
+                f" ({safe_error_summary(exc, context='reiniciar verificacion de Google')})"
+            )
+        if habia:
+            return (
+                "Listo: se olvido la cuenta de Google. La proxima vez que"
+                " subas un video te la volvera a pedir."
+            )
+        return (
+            "No habia ninguna cuenta de Google guardada, asi que la proxima"
+            " subida ya te la iba a pedir."
+        )
 
     def request_external_update(self) -> None:
         error_message = self._validate_updater_ready()
