@@ -91,6 +91,10 @@ class Settings:
     video_max_candidate_frames: int
     video_jpeg_quality: int
     video_requirement_days: int = 7
+    # "drive" archiva el video entero, "frames" le saca fotos para el pool, y
+    # "both" hace las dos cosas. Las comprobaciones -duracion minima, video
+    # repetido- son comunes a los tres: antes solo existian en "drive", y por
+    # eso "frames" aceptaba el mismo video todas las semanas.
     video_submission_mode: str = "drive"
     video_min_duration_seconds: float = 10.0
     video_duplicate_similarity_threshold: float = 0.72
@@ -205,6 +209,8 @@ def get_settings() -> Settings:
         admin_access_password=_get_env("ADMIN_ACCESS_PASSWORD", "") or "",
         weekly_min_approved_photos=_get_int_env("WEEKLY_MIN_APPROVED_PHOTOS", 20),
         video_requirement_days=_get_int_env("VIDEO_REQUIREMENT_DAYS", 7),
+        # 0 aqui significa "sin configurar", no "todos los fotogramas": quien
+        # lo lee (VideoContributionService) cae a su intervalo por defecto.
         video_frame_interval_seconds=_get_float_env("VIDEO_FRAME_INTERVAL_SECONDS", 0.0),
         video_max_candidate_frames=_get_int_env("VIDEO_MAX_CANDIDATE_FRAMES", 300),
         video_jpeg_quality=_get_int_env("VIDEO_JPEG_QUALITY", 88),

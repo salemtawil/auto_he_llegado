@@ -190,13 +190,22 @@ def test_current_week_start_uses_monday_utc() -> None:
 
 
 def test_video_submission_uploads_extracted_jpg_candidates_only(tmp_path) -> None:
+    """En modo fotogramas tambien se hace la huella del video.
+
+    Antes no: la rama de fotogramas se saltaba la huella, la duracion minima
+    y la deteccion de repetidos, que solo existian en la rama de Drive. Por
+    eso esta prueba pasaba con un .mp4 de mentira que cv2 no puede abrir.
+    """
+
     video = tmp_path / "weekly.mp4"
     video.write_bytes(b"video-data")
     review_service = StubReviewService()
     extractor = StubExtractor(tmp_path)
+    fingerprint_service = StubFingerprintService()
     service = VideoContributionService(
         review_service=review_service,
         extractor=extractor,
+        fingerprint_service=fingerprint_service,
         settings=build_settings(tmp_path),
     )
     session = AuthSession(
@@ -217,7 +226,9 @@ def test_video_submission_uploads_extracted_jpg_candidates_only(tmp_path) -> Non
     ]
     assert len(review_service.candidates) == 2
     assert review_service.candidates[0]["storage_path"] == "candidates/user-1/batch-1/frame_0.jpg"
-    assert review_service.finished == [("batch-1", 2, 2, {})]
+    # El status va explicito tambien sin Drive: es el contrato con la puerta
+    # de acceso (ver tests/test_video_gate_contract.py).
+    assert review_service.finished == [("batch-1", 2, 2, {"status": "pending_review"})]
     assert review_service.failed == []
 
 
@@ -266,10 +277,10 @@ def test_video_submission_uploads_full_video_to_drive_and_notifies(tmp_path) -> 
             0,
             0,
             {
+                "status": "pending_review",
                 "delivery_provider": "google_drive",
                 "delivery_file_id": "drive-file-1",
                 "delivery_url": "https://drive.google.com/file/d/drive-file-1/view",
-                "status": "pending_review",
             },
         )
     ]

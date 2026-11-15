@@ -1,0 +1,188 @@
+"""El video se archiva Y se le sacan fotos: antes era una cosa o la otra.
+
+Y esa exclusion tenia un coste escondido: la rama de fotogramas no hacia la
+huella del video, ni validaba la duracion minima, ni detectaba repetidos.
+Esas tres comprobaciones solo vivian en la rama de Drive. Siendo el video la
+prueba de trabajo semanal, aceptar el mismo cada semana se cargaba el motivo
+de pedirlo.
+"""
+
+from __future__ import annotations
+
+import ast
+from pathlib import Path
+
+RAIZ = Path(__file__).resolve().parents[1]
+SERVICIO = (RAIZ / "services" / "video_contribution_service.py").read_text(encoding="utf-8")
+
+
+def _cuerpo(nombre: str) -> str:
+    for n in ast.walk(ast.parse(SERVICIO)):
+        if isinstance(n, ast.FunctionDef) and n.name == nombre:
+            return ast.unparse(n)
+    raise AssertionError(f"no existe {nombre}")
+
+
+def test_los_dos_caminos_ya_no_se_excluyen() -> None:
+    cuerpo = _cuerpo("submit_video")
+    assert "archivar_en_drive = modo in ('drive', 'both')" in cuerpo
+    assert "extraer_fotogramas = modo in ('frames', 'both')" in cuerpo
+    # Y el atajo viejo, que devolvia antes de comprobar nada, ya no esta.
+    assert "_submit_video_as_frame_candidates" not in SERVICIO
+
+
+def test_las_comprobaciones_valen_para_los_dos_caminos() -> None:
+    """Duracion minima y repetidos, antes de decidir que se hace con el video."""
+
+    cuerpo = _cuerpo("submit_video")
+    for comprobacion in ("_validate_min_duration", "find_duplicate", "_fingerprint_service.build"):
+        assert comprobacion in cuerpo, comprobacion
+
+    # Y ocurren ANTES de tocar Drive o de extraer nada.
+    assert cuerpo.index("_validate_min_duration") < cuerpo.index("archivar_en_drive and")  \
+        if "archivar_en_drive and" in cuerpo else True
+    assert cuerpo.index("find_duplicate") < cuerpo.index("upload_video")
+    assert cuerpo.index("find_duplicate") < cuerpo.index("_extraer_fotogramas")
+
+
+def test_si_falla_la_extraccion_el_video_no_se_pierde() -> None:
+    """El agente ya cumplio: su video esta archivado.
+
+    Tumbar el lote porque no salieron fotos seria cobrarle a el un problema
+    nuestro.
+    """
+
+    cuerpo = _cuerpo("submit_video")
+    assert "extraction_warning" in cuerpo
+    assert "if not archivar_en_drive:" in cuerpo, (
+        "sin Drive de respaldo si tiene que fallar: no quedaria nada"
+    )
+
+
+def test_el_cero_del_intervalo_no_significa_todos_los_fotogramas() -> None:
+    """Es lo que hacia el proceso inservible.
+
+    `should_filter_duplicates = interval > 0`, asi que un 0 recorria el video
+    fotograma a fotograma Y apagaba el filtro de duplicados: miles de fotos
+    casi identicas de un video de medio minuto.
+    """
+
+    cuerpo = _cuerpo("_intervalo_de_fotogramas")
+    assert "INTERVALO_POR_DEFECTO_S" in cuerpo
+    assert "intervalo > 0" in cuerpo
+
+    from services.video_contribution_service import VideoContributionService
+
+    assert VideoContributionService.INTERVALO_POR_DEFECTO_S >= 1.0
+
+
+def test_el_intervalo_por_defecto_deja_un_lote_revisable() -> None:
+    from services.video_contribution_service import VideoContributionService
+
+    intervalo = VideoContributionService.INTERVALO_POR_DEFECTO_S
+    # Un video de 30 s tiene que dejar algo que una persona pueda mirar de un
+    # vistazo, no un muro de imagenes.
+    assert 5 <= (30 / intervalo) <= 30, intervalo
+
+
+def test_el_que_extrae_ya_no_crea_ni_cierra_el_lote() -> None:
+    # Meter eso ahi dentro fue lo que dejo la rama de fotogramas sin
+    # comprobaciones.
+    cuerpo = _cuerpo("_extraer_fotogramas")
+    for prohibido in ("create_batch", "finish_batch", "mark_batch_failed"):
+        assert prohibido not in cuerpo, prohibido
+
+
+def test_el_mensaje_final_dice_lo_que_paso_no_el_modo() -> None:
+    from services.video_contribution_service import VideoContributionService
+
+    resumen = VideoContributionService._resumen_final  # noqa: SLF001
+
+    assert "guardado" in resumen(archivado=True, candidatas=0, extraccion_pedida=False).lower()
+    con_fotos = resumen(archivado=True, candidatas=12, extraccion_pedida=True)
+    assert "12" in con_fotos and "guardado" in con_fotos.lower()
+    sin_fotos = resumen(archivado=True, candidatas=0, extraccion_pedida=True)
+    assert "no se pudo sacar" in sin_fotos
+
+
+def test_en_modo_both_se_archiva_y_se_extrae(tmp_path) -> None:
+    """La prueba de que ya no hay que elegir."""
+
+    import sys
+
+    sys.path.insert(0, str(RAIZ / "tests"))
+    from test_video_contribution_service import (  # noqa: E402
+        StubExtractor,
+        StubFingerprintService,
+        StubReviewService,
+        build_settings,
+    )
+
+    from services.auth_context import AuthSession
+    from services.video_contribution_service import VideoContributionService
+
+    video = tmp_path / "semanal.mp4"
+    video.write_bytes(b"video-data")
+
+    class _Drive:
+        def __init__(self) -> None:
+            self.subidas = []
+
+        def upload_video(self, source, *, display_name):
+            self.subidas.append(display_name)
+            from types import SimpleNamespace
+
+            return SimpleNamespace(provider="drive", file_id="f1", url="https://drive/f1")
+
+    class _Telegram:
+        def __init__(self) -> None:
+            self.avisos = 0
+
+        def send_video_received(self, **_kwargs):
+            self.avisos += 1
+
+    drive = _Drive()
+    telegram = _Telegram()
+    review = StubReviewService()
+    ajustes = build_settings(tmp_path)
+    object.__setattr__(ajustes, "video_submission_mode", "both")
+
+    servicio = VideoContributionService(
+        review_service=review,
+        extractor=StubExtractor(tmp_path),
+        delivery_service=drive,
+        notification_service=telegram,
+        fingerprint_service=StubFingerprintService(),
+        settings=ajustes,
+    )
+    sesion = AuthSession(
+        user_id="user-1",
+        email="agente@example.com",
+        access_token="a",
+        refresh_token="r",
+        approved=True,
+    )
+
+    resultado = servicio.submit_video(video, session=sesion)
+
+    assert drive.subidas, "el video tiene que quedar archivado"
+    assert telegram.avisos == 1, "y el admin enterarse"
+    assert resultado.frames_extracted == 2, "y ademas salir las fotos"
+    assert resultado.candidates_uploaded == 2
+
+
+def test_el_estado_del_lote_sigue_siendo_el_contrato_con_la_puerta() -> None:
+    """No quitar `status="pending_review"` aunque sea el valor por defecto.
+
+    Lo quite yo por parecer ruido y lo cazo test_video_gate_contract: ese
+    literal es el enlace entre dos modulos. Un lote nace en "pending_review"
+    y ese estado tiene que estar en AccessService.ACTIVE_BATCH_STATUSES,
+    porque la revision de fotos esta deshabilitada: si el desbloqueo
+    dependiera de aprobar, los agentes quedarian bloqueados para siempre.
+    """
+
+    from services.access_service import AccessService
+
+    cuerpo = _cuerpo("submit_video")
+    assert "status='pending_review'" in cuerpo
+    assert "pending_review" in AccessService.ACTIVE_BATCH_STATUSES

@@ -66,13 +66,17 @@ class VideoContributionService:
         session = session or require_current_session()
         source = Path(video_path)
         week_start = AccessService.current_week_start()
-        if self._settings.video_submission_mode == "frames":
-            return self._submit_video_as_frame_candidates(
-                source,
-                session=session,
-                week_start=week_start,
-                progress_callback=progress_callback,
-            )
+        # Los dos caminos -archivar el video en Drive y sacarle fotogramas- se
+        # excluian, y eso dejaba la rama de fotogramas SIN la huella, sin la
+        # duracion minima y sin la deteccion de repetidos, que solo vivian en
+        # la de Drive. Con el video como prueba de trabajo semanal, aceptar el
+        # mismo cada semana se cargaba el motivo de pedirlo.
+        #
+        # Ahora las comprobaciones son comunes y cada camino se hace o no se
+        # hace por separado.
+        modo = (self._settings.video_submission_mode or "drive").strip().lower()
+        archivar_en_drive = modo in ("drive", "both")
+        extraer_fotogramas = modo in ("frames", "both")
 
         self._emit(progress_callback, "fingerprinting", "Validando si el video ya fue cargado...")
         fingerprint = self._fingerprint_service.build(source)
@@ -118,106 +122,181 @@ class VideoContributionService:
             current=0,
             total=1,
         )
-        self._emit(progress_callback, "uploading", "Subiendo video completo a Google Drive...")
-        try:
-            delivery = self._delivery_service.upload_video(
-                source,
-                display_name=self._drive_display_name(source, session=session, batch_id=batch.id),
-            )
-        except Exception as exc:
-            message = f"No se pudo subir el video a Google Drive: {exc}"
-            self._review_service.mark_batch_failed(batch.id, message)
-            self._emit(progress_callback, "failed", message, current=0, total=1)
-            raise RuntimeError(message) from exc
+        delivery = None
+        if archivar_en_drive:
+            self._emit(progress_callback, "uploading", "Subiendo video completo a Google Drive...")
+            try:
+                delivery = self._delivery_service.upload_video(
+                    source,
+                    display_name=self._drive_display_name(
+                        source, session=session, batch_id=batch.id
+                    ),
+                )
+            except Exception as exc:
+                message = f"No se pudo subir el video a Google Drive: {exc}"
+                self._review_service.mark_batch_failed(batch.id, message)
+                self._emit(progress_callback, "failed", message, current=0, total=1)
+                raise ErrorParaElAgente(message) from exc
+
+        frames_extracted = 0
+        candidates_uploaded = 0
+        if extraer_fotogramas:
+            # Si la extraccion falla, el video YA esta archivado en Drive y el
+            # agente ya cumplio: no se tumba el lote por eso. Se anota y se
+            # sigue, que es lo que separa "no tengo tus fotos" de "no tengo tu
+            # video".
+            try:
+                frames_extracted, candidates_uploaded = self._extraer_fotogramas(
+                    source,
+                    batch_id=batch.id,
+                    user_id=session.user_id,
+                    progress_callback=progress_callback,
+                )
+            except Exception as exc:  # noqa: BLE001
+                if not archivar_en_drive:
+                    self._review_service.mark_batch_failed(batch.id, str(exc))
+                    raise
+                self._emit(
+                    progress_callback,
+                    "extraction_warning",
+                    f"El video quedo guardado, pero no se pudieron sacar las fotos: {exc}",
+                    current=0,
+                    total=1,
+                )
+
+        # Los datos de Drive solo se mandan si hubo Drive: `finish_batch` ya
+        # ignora los None, pero pasarlos igual hace creer que siempre hay
+        # entrega.
+        entrega = {}
+        if delivery is not None:
+            entrega = {
+                "delivery_provider": delivery.provider,
+                "delivery_file_id": delivery.file_id,
+                "delivery_url": delivery.url,
+            }
+        # `status` SI va explicito aunque coincida con el valor por defecto de
+        # finish_batch: es el contrato con la puerta de acceso. Un lote nace en
+        # "pending_review" y ese estado tiene que estar en
+        # AccessService.ACTIVE_BATCH_STATUSES, porque la revision de fotos esta
+        # deshabilitada y si el desbloqueo dependiera de aprobar, los agentes
+        # quedarian bloqueados para siempre. Lo vigila
+        # tests/test_video_gate_contract.py leyendo este literal.
         final_batch = self._review_service.finish_batch(
             batch_id=batch.id,
-            frames_extracted=0,
-            candidates_uploaded=0,
-            delivery_provider=delivery.provider,
-            delivery_file_id=delivery.file_id,
-            delivery_url=delivery.url,
+            frames_extracted=frames_extracted,
+            candidates_uploaded=candidates_uploaded,
             status="pending_review",
+            **entrega,
         )
-        try:
-            self._notification_service.send_video_received(
-                user_label=session.display_name or session.email or session.user_id,
-                original_name=source.name,
-                size_bytes=fingerprint.size_bytes,
-                duration_seconds=fingerprint.duration_seconds,
-                drive_url=delivery.url,
-            )
-        except Exception as exc:
-            self._emit(
-                progress_callback,
-                "notification_warning",
-                f"Video subido a Google Drive, pero fallo Telegram: {exc}",
-                current=1,
-                total=1,
-            )
+        if delivery is not None:
+            try:
+                self._notification_service.send_video_received(
+                    user_label=session.display_name or session.email or session.user_id,
+                    original_name=source.name,
+                    size_bytes=fingerprint.size_bytes,
+                    duration_seconds=fingerprint.duration_seconds,
+                    drive_url=delivery.url,
+                )
+            except Exception as exc:
+                self._emit(
+                    progress_callback,
+                    "notification_warning",
+                    f"Video subido a Google Drive, pero fallo Telegram: {exc}",
+                    current=1,
+                    total=1,
+                )
+
         self._emit(
             progress_callback,
             "done",
-            "Video subido a Google Drive. Admin notificado por Telegram.",
+            self._resumen_final(
+                archivado=delivery is not None,
+                candidatas=candidates_uploaded,
+                extraccion_pedida=extraer_fotogramas,
+            ),
             current=1,
             total=1,
         )
         return VideoContributionResult(
             batch=final_batch,
-            frames_extracted=0,
-            candidates_uploaded=0,
+            frames_extracted=frames_extracted,
+            candidates_uploaded=candidates_uploaded,
         )
 
-    def _submit_video_as_frame_candidates(
+    @staticmethod
+    def _resumen_final(*, archivado: bool, candidatas: int, extraccion_pedida: bool) -> str:
+        """Lo que se le dice al agente al terminar: lo que paso, no el modo."""
+
+        partes = []
+        if archivado:
+            partes.append("Video guardado y admin notificado")
+        if extraccion_pedida:
+            if candidatas:
+                partes.append(f"{candidatas} foto(s) sacadas del video")
+            else:
+                partes.append("no se pudo sacar ninguna foto util del video")
+        if not partes:
+            return "Video recibido."
+        return ". ".join(partes) + "."
+
+    def _extraer_fotogramas(
         self,
         source: Path,
         *,
-        session: AuthSession,
-        week_start,
+        batch_id: str,
+        user_id: str,
         progress_callback: Callable[[VideoContributionProgress], None] | None = None,
-    ) -> VideoContributionResult:
-        batch = self._review_service.create_batch(
-            user_id=session.user_id,
-            week_start=week_start,
-            original_video_name=source.name,
-        )
-        batch_dir = self._work_dir / batch.id
+    ) -> tuple[int, int]:
+        """Saca las fotos utiles del video y las sube como candidatas.
+
+        Solo eso: ni crea el lote ni lo cierra ni decide si el video vale.
+        Esas tres cosas son comunes a los dos caminos y viven en
+        `submit_video`, porque meterlas aqui fue lo que dejo a la rama de
+        fotogramas sin huella, sin duracion minima y sin repetidos.
+
+        Devuelve (fotogramas extraidos, candidatas subidas).
+        """
+
+        batch_dir = self._work_dir / batch_id
         self._emit(progress_callback, "extracting", "Extrayendo fotos utiles del video...")
         try:
             frames = self._extractor.extract(
                 source,
                 batch_dir,
-                interval_seconds=self._settings.video_frame_interval_seconds,
+                interval_seconds=self._intervalo_de_fotogramas(),
                 max_frames=self._settings.video_max_candidate_frames,
                 jpeg_quality=self._settings.video_jpeg_quality,
             )
-            uploaded_count = self._upload_frames(
+            subidas = self._upload_frames(
                 frames,
-                batch_id=batch.id,
-                user_id=session.user_id,
+                batch_id=batch_id,
+                user_id=user_id,
                 progress_callback=progress_callback,
             )
-            final_batch = self._review_service.finish_batch(
-                batch_id=batch.id,
-                frames_extracted=len(frames),
-                candidates_uploaded=uploaded_count,
-            )
-            self._emit(
-                progress_callback,
-                "done",
-                f"Video recibido. {uploaded_count} foto(s) quedaron pendientes de revision.",
-                current=uploaded_count,
-                total=uploaded_count,
-            )
-            return VideoContributionResult(
-                batch=final_batch,
-                frames_extracted=len(frames),
-                candidates_uploaded=uploaded_count,
-            )
-        except Exception as exc:
-            self._review_service.mark_batch_failed(batch.id, str(exc))
-            raise
+            return len(frames), subidas
         finally:
             shutil.rmtree(batch_dir, ignore_errors=True)
+
+    def _intervalo_de_fotogramas(self) -> float:
+        """Cada cuantos segundos se mira un fotograma.
+
+        El 0 NO significa "todos": significa que nadie lo configuro. Tomarlo
+        al pie de la letra recorre el video fotograma a fotograma Y APAGA el
+        filtro de duplicados -`should_filter_duplicates = interval > 0`-, con
+        lo que de un video de 30 s salian miles de fotos casi identicas y
+        revisarlas era imposible. Por eso aqui el 0 cae al valor por defecto.
+        """
+
+        try:
+            intervalo = float(self._settings.video_frame_interval_seconds)
+        except (TypeError, ValueError):
+            intervalo = 0.0
+        return intervalo if intervalo > 0 else self.INTERVALO_POR_DEFECTO_S
+
+    # Un fotograma cada dos segundos: suficiente para que dos fotos seguidas
+    # no sean la misma cara en la misma pose, y deja ~15 candidatas de un
+    # video de medio minuto.
+    INTERVALO_POR_DEFECTO_S = 2.0
 
     @staticmethod
     def _drive_display_name(source: Path, *, session: AuthSession, batch_id: str) -> str:
