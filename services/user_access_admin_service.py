@@ -10,6 +10,21 @@ from services.photo_pool_policy_service import PhotoPoolPolicy, PhotoPoolPolicyS
 from storage.supabase_client import SupabaseClientProvider
 
 
+def _a_segundos(valor) -> float | None:
+    """La duracion como numero, o None si no viene o no se entiende.
+
+    None no es cero: un video sin duracion registrada no es un video de cero
+    segundos, es uno del que no se sabe cuanto dura.
+    """
+
+    if valor is None or valor == "":
+        return None
+    try:
+        return float(valor)
+    except (TypeError, ValueError):
+        return None
+
+
 @dataclass(frozen=True)
 class WeeklyVideoRecord:
     id: str
@@ -22,6 +37,9 @@ class WeeklyVideoRecord:
     status: str
     error_message: str | None = None
     created_at: str | None = None
+    # Hace falta para saber cuantos dias vale este video: con la politica por
+    # duracion, uno largo vale mas dias que uno corto.
+    video_duration_seconds: float | None = None
 
 
 @dataclass(frozen=True)
@@ -376,4 +394,5 @@ class UserAccessAdminService:
             status=str(row.get("status") or ""),
             error_message=row.get("error_message"),
             created_at=str(row.get("created_at") or "") or None,
+            video_duration_seconds=_a_segundos(row.get("video_duration_seconds")),
         )

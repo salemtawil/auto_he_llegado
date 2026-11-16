@@ -7,6 +7,9 @@ from concurrent.futures import ThreadPoolExecutor
 
 import customtkinter as ctk
 
+from datetime import datetime, timedelta
+
+from services.access_service import AccessService
 from services.auth_context import get_current_session
 from services.user_access_admin_service import UserAccessAdminService, UserAccessRecord
 from services.access_service import VideoRequirementPolicy
@@ -46,11 +49,89 @@ def texto_buscable(user: UserAccessRecord) -> str:
     return " ".join(parte for parte in partes if parte).lower()
 
 
+#: Claves de color que devuelve `texto_de_vencimiento`. El calculo no sabe
+#: nada de la paleta: el panel traduce la clave a un color.
+COLOR_NEUTRO = "neutro"
+COLOR_AL_DIA = "al_dia"
+COLOR_POR_VENCER = "por_vencer"
+COLOR_VENCIDO = "vencido"
+
+#: A partir de aqui se avisa en ambar. Menos de esto y el agente tiene que
+#: ponerse con ello hoy o mañana.
+DIAS_DE_AVISO = 3
+
+
+def texto_de_vencimiento(
+    user: UserAccessRecord,
+    policy: VideoRequirementPolicy | None,
+    now: datetime | None = None,
+) -> tuple[str, str]:
+    """Cuanto le queda al video de este agente, en una linea.
+
+    La cuenta sale de `AccessService.tiempo_restante_del_video`, la misma que
+    decide si la app le deja entrar. No se recalcula aqui a proposito: dos
+    formulas parecidas acabarian discrepando, y no hay nada peor que un panel
+    que dice "te quedan 2 dias" el mismo dia que la app te deja fuera.
+    """
+
+    if user.disabled:
+        return "sin vencimiento: el acceso esta deshabilitado", COLOR_NEUTRO
+    if user.video_exempt:
+        return "sin vencimiento: exento del video", COLOR_NEUTRO
+    if str(user.role).strip().lower() == "admin":
+        return "sin vencimiento: es admin", COLOR_NEUTRO
+    if policy is not None and not policy.enabled:
+        return "sin vencimiento: el video no se exige ahora", COLOR_NEUTRO
+
+    video = user.weekly_video
+    if video is None:
+        return "sin video: no puede usar la app", COLOR_VENCIDO
+    if str(video.status).strip().lower() == "rejected":
+        return "video rechazado: tiene que subir otro", COLOR_VENCIDO
+
+    dias = policy.days_for_duration(video.video_duration_seconds) if policy is not None else 7
+    restante = AccessService.tiempo_restante_del_video(video.created_at, dias, now=now)
+    if restante is None:
+        return f"vence a los {dias} dias, pero no hay fecha del video", COLOR_NEUTRO
+    if restante <= timedelta(0):
+        vencido_hace = -restante
+        return f"vencido hace {_texto_de_plazo(vencido_hace)}", COLOR_VENCIDO
+    color = COLOR_POR_VENCER if restante < timedelta(days=DIAS_DE_AVISO) else COLOR_AL_DIA
+    return f"le quedan {_texto_de_plazo(restante)}", color
+
+
+def _texto_de_plazo(plazo: timedelta) -> str:
+    """Un plazo en palabras, sin redondear a cero.
+
+    Media hora que queda se dice "menos de 1 hora", nunca "0 horas": decirle a
+    alguien que le quedan cero cuando todavia puede trabajar es un error mas
+    caro que decirle que le queda poco.
+    """
+
+    segundos = max(int(plazo.total_seconds()), 0)
+    if segundos >= 86400:
+        # Techo, no suelo. Un video subido hace un instante tiene 6 dias y 23
+        # horas de vida, y decirle al agente "te quedan 6 dias" el mismo dia
+        # que lo subio parece una cuenta rota. Por debajo de un dia se dan
+        # horas, que es donde la precision importa de verdad.
+        dias = -(-segundos // 86400)
+        return "1 dia" if dias == 1 else f"{dias} dias"
+    horas = segundos // 3600
+    if horas >= 1:
+        return "1 hora" if horas == 1 else f"{horas} horas"
+    return "menos de 1 hora"
+
+
 def filtrar_usuarios(
     usuarios: list[UserAccessRecord],
     filtro: str,
+    extra: dict[str, str] | None = None,
 ) -> list[UserAccessRecord]:
     """Filtra en memoria. Escribir en el buscador no toca la red.
+
+    `extra` añade texto buscable por usuario que no sale de sus propios
+    campos: lo usa el panel para que "vencido" encuentre a quien tiene el
+    video caducado, que es un calculo, no un dato guardado.
 
     Vive fuera de la clase a proposito: asi tiene pruebas que corren en
     Windows, donde las de interfaz se saltan por no haber DISPLAY.
@@ -60,10 +141,14 @@ def filtrar_usuarios(
     if not normalizado:
         return list(usuarios)
     terminos = normalizado.split()
+    anadidos = extra or {}
     return [
         usuario
         for usuario in usuarios
-        if all(termino in texto_buscable(usuario) for termino in terminos)
+        if all(
+            termino in (texto_buscable(usuario) + " " + anadidos.get(usuario.id, "").lower())
+            for termino in terminos
+        )
     ]
 
 
@@ -90,6 +175,12 @@ class UserAccessPanel(ctk.CTkFrame):
         # La lista completa que vino de Supabase. El buscador filtra sobre
         # esto, en memoria: no se vuelve a pedir nada a la red por escribir.
         self._todos_los_usuarios: list[UserAccessRecord] = []
+        # La politica vigente, para poder calcular cuanto le queda al video de
+        # cada agente sin volver a preguntarla una vez por fila.
+        self._politica_de_video: VideoRequirementPolicy | None = None
+        # Texto de vencimiento ya calculado, por usuario: lo pinta la fila y
+        # ademas lo busca el buscador ("vencido" encuentra a los caducados).
+        self._vencimientos: dict[str, tuple[str, str]] = {}
         self._filtro = ""
         self._trabajo_de_busqueda: str | None = None
         # Solo un usuario desplegado a la vez. Los controles son el 80% del
@@ -443,6 +534,10 @@ class UserAccessPanel(ctk.CTkFrame):
         pool_policy: PhotoPoolPolicy,
         pool_buckets: list[str],
     ) -> None:
+        # La politica primero: `_apply_users` la necesita para calcular los
+        # vencimientos, y si llegara despues la primera pintada saldria con la
+        # politica de antes.
+        self._politica_de_video = policy
         self._apply_policy(policy)
         self._apply_pool_policy(pool_policy, pool_buckets)
         self._apply_users(users)
@@ -484,10 +579,15 @@ class UserAccessPanel(ctk.CTkFrame):
         self._is_loading = False
         self.refresh_button.configure(state="normal", text="Refrescar")
         self._todos_los_usuarios = list(users)
+        self._vencimientos = {
+            usuario.id: texto_de_vencimiento(usuario, self._politica_de_video)
+            for usuario in users
+        }
         self._repintar_lista()
 
     def _usuarios_filtrados(self) -> list[UserAccessRecord]:
-        return filtrar_usuarios(self._todos_los_usuarios, self._filtro)
+        buscable = {uid: texto for uid, (texto, _) in self._vencimientos.items()}
+        return filtrar_usuarios(self._todos_los_usuarios, self._filtro, buscable)
 
     def _repintar_lista(self) -> None:
         usuarios = self._usuarios_filtrados()
@@ -523,6 +623,13 @@ class UserAccessPanel(ctk.CTkFrame):
         if self._filtro:
             texto = f"{texto} | mostrando {len(mostrados)} de {len(todos)}"
         self.status_label.configure(text=texto, text_color=TEXT_MUTED)
+
+    _COLORES_DE_VENCIMIENTO = {
+        COLOR_AL_DIA: SUCCESS,
+        COLOR_POR_VENCER: WARNING,
+        COLOR_VENCIDO: ERROR,
+        COLOR_NEUTRO: TEXT_MUTED,
+    }
 
     # Una fila plegada son 5 widgets; desplegada pasa de 40. Medido en el
     # contenedor: 67 ms por fila completa contra ~12 ms plegada, y con 100
@@ -595,7 +702,18 @@ class UserAccessPanel(ctk.CTkFrame):
             font=self._fuente_etiqueta,
             anchor="w",
             justify="left",
-        ).grid(row=2, column=0, padx=10, pady=(0, 8), sticky="ew")
+        ).grid(row=2, column=0, padx=10, pady=(0, 2), sticky="ew")
+        vencimiento, clave = self._vencimientos.get(
+            user.id,
+            texto_de_vencimiento(user, self._politica_de_video),
+        )
+        ctk.CTkLabel(
+            row,
+            text=vencimiento,
+            text_color=self._COLORES_DE_VENCIMIENTO.get(clave, TEXT_MUTED),
+            font=self._fuente_etiqueta,
+            anchor="w",
+        ).grid(row=3, column=0, padx=10, pady=(0, 8), sticky="ew")
         boton = ctk.CTkButton(
             row,
             text="Acciones",
@@ -610,7 +728,7 @@ class UserAccessPanel(ctk.CTkFrame):
         boton.configure(
             command=lambda actual=user, fila=row, b=boton: self._alternar_controles(actual, fila, b)
         )
-        boton.grid(row=0, column=1, rowspan=3, padx=10, pady=8, sticky="e")
+        boton.grid(row=0, column=1, rowspan=4, padx=10, pady=8, sticky="e")
         return row
 
     def _alternar_controles(
@@ -631,7 +749,7 @@ class UserAccessPanel(ctk.CTkFrame):
         if ya_estaba:
             return
         marco = self._construir_controles(user, row)
-        marco.grid(row=3, column=0, columnspan=2, padx=10, pady=(0, 10), sticky="ew")
+        marco.grid(row=4, column=0, columnspan=2, padx=10, pady=(0, 10), sticky="ew")
         boton.configure(text="Cerrar")
         self._desplegado = user.id
         self._controles_desplegados = (marco, boton)

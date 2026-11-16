@@ -389,20 +389,44 @@ class AccessService:
             threshold = 25.0
         return max(min(threshold, 3600.0), 0.0)
 
+    @classmethod
+    def tiempo_restante_del_video(
+        cls,
+        raw_created_at,
+        days: int,
+        now: datetime | None = None,
+    ) -> timedelta | None:
+        """Cuanto le queda a un video antes de dejar de valer.
+
+        Negativo si ya vencio. None si la fecha no se sabe o no se entiende,
+        que no es lo mismo que cero: ante una fecha ilegible no se le quita el
+        acceso a nadie.
+
+        Es la UNICA cuenta de vencimiento del proyecto. La puerta de acceso
+        (`_batch_is_within_days`) y el panel de admin salen las dos de aqui, a
+        proposito: dos formulas parecidas acabarian discrepando, y el agente
+        veria "te quedan 2 dias" el mismo dia que la app lo deja fuera.
+        """
+
+        if not raw_created_at:
+            return None
+        try:
+            created_at = datetime.fromisoformat(str(raw_created_at).replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        if created_at.tzinfo is None:
+            created_at = created_at.replace(tzinfo=timezone.utc)
+        vence = created_at + timedelta(days=cls._normalize_requirement_days(days))
+        return vence - (now or datetime.now(timezone.utc))
+
     @staticmethod
     def _batch_is_within_days(batch: dict | None, days: int) -> bool:
         if not batch:
             return False
-        raw_created_at = batch.get("created_at")
-        if not raw_created_at:
+        restante = AccessService.tiempo_restante_del_video(batch.get("created_at"), days)
+        if restante is None:
             return True
-        try:
-            created_at = datetime.fromisoformat(str(raw_created_at).replace("Z", "+00:00"))
-        except ValueError:
-            return True
-        if created_at.tzinfo is None:
-            created_at = created_at.replace(tzinfo=timezone.utc)
-        return created_at >= datetime.now(timezone.utc) - timedelta(days=AccessService._normalize_requirement_days(days))
+        return restante >= timedelta(0)
 
     @staticmethod
     def _duration_policy_text(policy: VideoRequirementPolicy, effective_days: int) -> str:

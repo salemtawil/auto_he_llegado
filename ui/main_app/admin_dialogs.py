@@ -10,6 +10,7 @@ from services.storage_health_service import StorageHealthService
 from ui.main_app.current_result_panel import CurrentResultPanel
 from ui.main_app.extension_status_panel import ExtensionStatusPanel
 from ui.main_app.photo_review_panel import PhotoReviewPanel
+from ui.main_app.activity_panel import ActivityPanel
 from ui.main_app.user_access_panel import UserAccessPanel
 from ui.shared.dialogs import confirm_destructive_action
 from ui.shared.errors import safe_error_summary
@@ -183,12 +184,20 @@ class AdminUploaderDialog(ctk.CTkToplevel):
         self.tabs = ctk.CTkTabview(container, corner_radius=20)
         self.tabs.grid(row=0, column=0, sticky="nsew")
         self.tabs.add("Usuarios")
+        self.tabs.add("Actividad")
         self.tabs.add("Carga")
         self.tabs.add("Revision fotos")
         self.tabs.add("Limpieza fotos")
         self.tabs.add("Diagnostico")
 
-        for tab_name in ("Usuarios", "Carga", "Revision fotos", "Limpieza fotos", "Diagnostico"):
+        for tab_name in (
+            "Usuarios",
+            "Actividad",
+            "Carga",
+            "Revision fotos",
+            "Limpieza fotos",
+            "Diagnostico",
+        ):
             self._build_lazy_tab_placeholder(self.tabs.tab(tab_name), tab_name)
         self.tabs.configure(command=self._handle_tab_selected)
         self.after(80, self._handle_tab_selected)
@@ -226,6 +235,8 @@ class AdminUploaderDialog(ctk.CTkToplevel):
             child.destroy()
         if tab_name == "Usuarios":
             self._build_user_access_tab(tab)
+        elif tab_name == "Actividad":
+            self._build_activity_tab(tab)
         elif tab_name == "Carga":
             self._build_upload_tab(tab, self._uploader_service)
         elif tab_name == "Revision fotos":
@@ -236,6 +247,11 @@ class AdminUploaderDialog(ctk.CTkToplevel):
             self._build_diagnostics_tab(tab)
             self._set_diagnostics_idle_state()
         self._built_tabs.add(tab_name)
+
+    def _build_activity_tab(self, master) -> None:
+        master.grid_columnconfigure(0, weight=1)
+        master.grid_rowconfigure(0, weight=1)
+        ActivityPanel(master).grid(row=0, column=0, sticky="nsew")
 
     def _build_user_access_tab(self, master) -> None:
         master.grid_columnconfigure(0, weight=1)
