@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import threading
 import tkinter as tk
+from contextlib import suppress
 from concurrent.futures import ThreadPoolExecutor
 
 import customtkinter as ctk
@@ -29,6 +30,43 @@ from ui.theme import (
 )
 
 
+def texto_buscable(user: UserAccessRecord) -> str:
+    """Todo lo que el buscador considera de un usuario, en minusculas."""
+
+    estado = "deshabilitado" if user.disabled else ("aprobado" if user.approved else "pendiente")
+    partes = [
+        user.display_name,
+        user.email,
+        user.login_id,
+        user.role,
+        estado,
+        "exento" if user.video_exempt else "",
+        user.weekly_video.status if user.weekly_video is not None else "sin video",
+    ]
+    return " ".join(parte for parte in partes if parte).lower()
+
+
+def filtrar_usuarios(
+    usuarios: list[UserAccessRecord],
+    filtro: str,
+) -> list[UserAccessRecord]:
+    """Filtra en memoria. Escribir en el buscador no toca la red.
+
+    Vive fuera de la clase a proposito: asi tiene pruebas que corren en
+    Windows, donde las de interfaz se saltan por no haber DISPLAY.
+    """
+
+    normalizado = (filtro or "").strip().lower()
+    if not normalizado:
+        return list(usuarios)
+    terminos = normalizado.split()
+    return [
+        usuario
+        for usuario in usuarios
+        if all(termino in texto_buscable(usuario) for termino in terminos)
+    ]
+
+
 class UserAccessPanel(ctk.CTkFrame):
     def __init__(
         self,
@@ -49,12 +87,24 @@ class UserAccessPanel(ctk.CTkFrame):
         self._fuente_etiqueta = ctk.CTkFont(size=12)
         self._fuente_campo = ctk.CTkFont(size=11, weight="bold")
         self._pendientes_de_pintar: list[UserAccessRecord] = []
+        # La lista completa que vino de Supabase. El buscador filtra sobre
+        # esto, en memoria: no se vuelve a pedir nada a la red por escribir.
+        self._todos_los_usuarios: list[UserAccessRecord] = []
+        self._filtro = ""
+        self._trabajo_de_busqueda: str | None = None
+        # Solo un usuario desplegado a la vez. Los controles son el 80% del
+        # coste de una fila, asi que como mucho existe un juego de ellos.
+        self._desplegado = ""
+        self._controles_desplegados: tuple[ctk.CTkFrame, ctk.CTkButton] | None = None
+        # Pintar por tandas deja llamadas en cola. Si entretanto cambia el
+        # filtro, las tandas viejas pintarian sobre la lista nueva.
+        self._generacion = 0
         # Para no ofrecer borrarse a uno mismo: la politica de la base tambien
         # lo impide, pero un boton que siempre falla es un boton roto.
         sesion = get_current_session()
         self._mi_user_id = str(getattr(sesion, "user_id", "") or "")
         self.grid_columnconfigure(0, weight=1)
-        self.grid_rowconfigure(2, weight=1)
+        self.grid_rowconfigure(3, weight=1)
         self._build_header()
         self._build_controls()
         self._build_list()
@@ -291,6 +341,40 @@ class UserAccessPanel(ctk.CTkFrame):
         self.save_pool_policy_button.grid(row=2, column=2, padx=14, pady=(0, 12), sticky="e")
 
     def _build_list(self) -> None:
+        buscador = ctk.CTkFrame(self, fg_color="transparent")
+        buscador.grid(row=2, column=0, pady=(0, 8), sticky="ew")
+        buscador.grid_columnconfigure(1, weight=1)
+        ctk.CTkLabel(
+            buscador,
+            text="Buscar",
+            text_color=TEXT_MUTED,
+            font=self._fuente_campo,
+        ).grid(row=0, column=0, padx=(2, 8), sticky="w")
+        self.search_var = tk.StringVar()
+        self.search_var.trace_add("write", self._busqueda_cambiada)
+        self.search_entry = ctk.CTkEntry(
+            buscador,
+            textvariable=self.search_var,
+            height=32,
+            corner_radius=9,
+            font=self._fuente_etiqueta,
+            placeholder_text="nombre, correo, usuario, rol o estado",
+        )
+        self.search_entry.grid(row=0, column=1, sticky="ew")
+        self.clear_search_button = ctk.CTkButton(
+            buscador,
+            text="Limpiar",
+            command=self._limpiar_busqueda,
+            height=32,
+            width=84,
+            corner_radius=9,
+            font=self._fuente_etiqueta,
+            fg_color=NEUTRAL_BUTTON,
+            hover_color=NEUTRAL_BUTTON_HOVER,
+            text_color=TEXT_PRIMARY,
+        )
+        self.clear_search_button.grid(row=0, column=2, padx=(8, 2), sticky="e")
+
         self.scroll = ctk.CTkScrollableFrame(
             self,
             fg_color=CARD_ALT_BG,
@@ -298,8 +382,27 @@ class UserAccessPanel(ctk.CTkFrame):
             border_width=1,
             border_color=BORDER,
         )
-        self.scroll.grid(row=2, column=0, sticky="nsew")
+        self.scroll.grid(row=3, column=0, sticky="nsew")
         self.scroll.grid_columnconfigure(0, weight=1)
+
+    def _busqueda_cambiada(self, *_args) -> None:
+        # Repintar en cada tecla seria repintar la lista entera cinco veces
+        # por palabra. Se espera a que pare de escribir.
+        if self._trabajo_de_busqueda is not None:
+            with suppress(Exception):
+                self.after_cancel(self._trabajo_de_busqueda)
+        self._trabajo_de_busqueda = self.after(180, self._aplicar_busqueda)
+
+    def _aplicar_busqueda(self) -> None:
+        self._trabajo_de_busqueda = None
+        nuevo = self.search_var.get().strip().lower()
+        if nuevo == self._filtro:
+            return
+        self._filtro = nuevo
+        self._repintar_lista()
+
+    def _limpiar_busqueda(self) -> None:
+        self.search_var.set("")
 
     def refresh(self) -> None:
         if self._is_loading:
@@ -380,50 +483,87 @@ class UserAccessPanel(ctk.CTkFrame):
     def _apply_users(self, users: list[UserAccessRecord]) -> None:
         self._is_loading = False
         self.refresh_button.configure(state="normal", text="Refrescar")
-        approved = sum(1 for user in users if user.approved and not user.disabled)
-        pending = sum(1 for user in users if not user.approved and not user.disabled)
-        disabled = sum(1 for user in users if user.disabled)
-        self.status_label.configure(
-            text=f"Aprobados {approved} | Pendientes {pending} | Deshabilitados {disabled}",
-            text_color=TEXT_MUTED,
-        )
+        self._todos_los_usuarios = list(users)
+        self._repintar_lista()
+
+    def _usuarios_filtrados(self) -> list[UserAccessRecord]:
+        return filtrar_usuarios(self._todos_los_usuarios, self._filtro)
+
+    def _repintar_lista(self) -> None:
+        usuarios = self._usuarios_filtrados()
+        self._actualizar_contadores(usuarios)
+        self._generacion += 1
+        self._desplegado = ""
+        self._controles_desplegados = None
         for child in self.scroll.winfo_children():
             child.destroy()
-        if not users:
-            ctk.CTkLabel(
-                self.scroll,
-                text="No hay perfiles registrados.",
-                text_color=TEXT_MUTED,
-                font=ctk.CTkFont(size=12),
-            ).grid(
-                row=0,
-                column=0,
-                padx=12,
-                pady=12,
-                sticky="w",
-            )
+        if not self._todos_los_usuarios:
+            self._mensaje_en_la_lista("No hay perfiles registrados.")
             return
-        # Por tandas: cada fila son 26 widgets, asi que dibujar cien de golpe
-        # congela la ventana. Se pintan las primeras y el resto en cuanto Tk
-        # tiene un hueco, de modo que el panel aparece util de inmediato.
-        self._pendientes_de_pintar = list(users)
-        self._pintar_siguiente_tanda(0)
+        if not usuarios:
+            self._mensaje_en_la_lista("Ningun usuario coincide con la busqueda.")
+            return
+        self._pendientes_de_pintar = usuarios
+        self._pintar_siguiente_tanda(0, self._generacion)
 
-    _FILAS_POR_TANDA = 12
+    def _mensaje_en_la_lista(self, texto: str) -> None:
+        ctk.CTkLabel(
+            self.scroll,
+            text=texto,
+            text_color=TEXT_MUTED,
+            font=self._fuente_etiqueta,
+        ).grid(row=0, column=0, padx=12, pady=12, sticky="w")
 
-    def _pintar_siguiente_tanda(self, desde: int) -> None:
+    def _actualizar_contadores(self, mostrados: list[UserAccessRecord]) -> None:
+        todos = self._todos_los_usuarios
+        approved = sum(1 for user in todos if user.approved and not user.disabled)
+        pending = sum(1 for user in todos if not user.approved and not user.disabled)
+        disabled = sum(1 for user in todos if user.disabled)
+        texto = f"Aprobados {approved} | Pendientes {pending} | Deshabilitados {disabled}"
+        if self._filtro:
+            texto = f"{texto} | mostrando {len(mostrados)} de {len(todos)}"
+        self.status_label.configure(text=texto, text_color=TEXT_MUTED)
+
+    # Una fila plegada son 5 widgets; desplegada pasa de 40. Medido en el
+    # contenedor: 67 ms por fila completa contra ~12 ms plegada, y con 100
+    # usuarios eso era pintar el panel en 8,6 s sin haber tocado la red.
+    _FILAS_POR_TANDA = 15
+
+    def _pintar_siguiente_tanda(self, desde: int, generacion: int) -> None:
+        if generacion != self._generacion:
+            return
         pendientes = self._pendientes_de_pintar
         if desde >= len(pendientes):
             return
         hasta = min(desde + self._FILAS_POR_TANDA, len(pendientes))
         for indice in range(desde, hasta):
-            self._user_row(pendientes[indice]).grid(
+            self._fila_plegada(pendientes[indice]).grid(
                 row=indice, column=0, padx=6, pady=5, sticky="ew"
             )
         if hasta < len(pendientes):
-            self.after(1, lambda siguiente=hasta: self._pintar_siguiente_tanda(siguiente))
+            self.after(
+                1,
+                lambda siguiente=hasta, gen=generacion: self._pintar_siguiente_tanda(siguiente, gen),
+            )
 
-    def _user_row(self, user: UserAccessRecord) -> ctk.CTkFrame:
+    @staticmethod
+    def _titulo_de(user: UserAccessRecord) -> str:
+        identifier = user.email if "@" in user.email else ""
+        if user.login_id:
+            identifier = f"{identifier} | usuario: {user.login_id}" if identifier else f"usuario: {user.login_id}"
+        title = identifier or user.email or user.id
+        if user.display_name:
+            title = f"{user.display_name} | {title}"
+        return title
+
+    @staticmethod
+    def _estado_de(user: UserAccessRecord) -> tuple[str, object]:
+        state = "deshabilitado" if user.disabled else ("aprobado" if user.approved else "pendiente")
+        color = ERROR if user.disabled else (SUCCESS if user.approved else WARNING)
+        exento = " | exento de video" if user.video_exempt else ""
+        return f"{state} | rol {user.role}{exento}", color
+
+    def _fila_plegada(self, user: UserAccessRecord) -> ctk.CTkFrame:
         row = ctk.CTkFrame(
             self.scroll,
             fg_color=CARD_BG,
@@ -432,30 +572,21 @@ class UserAccessPanel(ctk.CTkFrame):
             border_color=BORDER,
         )
         row.grid_columnconfigure(0, weight=1)
-        state = "deshabilitado" if user.disabled else ("aprobado" if user.approved else "pendiente")
-        state_color = ERROR if user.disabled else (SUCCESS if user.approved else WARNING)
-        identifier = user.email if "@" in user.email else ""
-        if user.login_id:
-            identifier = f"{identifier} | usuario: {user.login_id}" if identifier else f"usuario: {user.login_id}"
-        title = identifier or user.email or user.id
-        if user.display_name:
-            title = f"{user.display_name} | {title}"
         ctk.CTkLabel(
             row,
-            text=title,
+            text=self._titulo_de(user),
             text_color=TEXT_PRIMARY,
             font=self._fuente_titulo,
             anchor="w",
         ).grid(row=0, column=0, padx=10, pady=(8, 1), sticky="ew")
-        video_exempt_text = " | exento de video" if user.video_exempt else ""
+        estado_texto, estado_color = self._estado_de(user)
         ctk.CTkLabel(
             row,
-            text=f"{state} | rol {user.role}{video_exempt_text}",
-            text_color=state_color,
+            text=estado_texto,
+            text_color=estado_color,
             font=self._fuente_etiqueta,
             anchor="w",
         ).grid(row=1, column=0, padx=10, pady=(0, 7), sticky="ew")
-
         video_text, video_color = self._weekly_video_text(user)
         ctk.CTkLabel(
             row,
@@ -464,10 +595,60 @@ class UserAccessPanel(ctk.CTkFrame):
             font=self._fuente_etiqueta,
             anchor="w",
             justify="left",
-        ).grid(row=2, column=0, padx=10, pady=(0, 7), sticky="ew")
+        ).grid(row=2, column=0, padx=10, pady=(0, 8), sticky="ew")
+        boton = ctk.CTkButton(
+            row,
+            text="Acciones",
+            height=30,
+            width=96,
+            corner_radius=9,
+            font=self._fuente_etiqueta,
+            fg_color=NEUTRAL_BUTTON,
+            hover_color=NEUTRAL_BUTTON_HOVER,
+            text_color=TEXT_PRIMARY,
+        )
+        boton.configure(
+            command=lambda actual=user, fila=row, b=boton: self._alternar_controles(actual, fila, b)
+        )
+        boton.grid(row=0, column=1, rowspan=3, padx=10, pady=8, sticky="e")
+        return row
 
-        login_frame = ctk.CTkFrame(row, fg_color="transparent")
-        login_frame.grid(row=3, column=0, padx=10, pady=(0, 8), sticky="ew")
+    def _alternar_controles(
+        self,
+        user: UserAccessRecord,
+        row: ctk.CTkFrame,
+        boton: ctk.CTkButton,
+    ) -> None:
+        ya_estaba = self._desplegado == user.id
+        if self._controles_desplegados is not None:
+            marco_anterior, boton_anterior = self._controles_desplegados
+            with suppress(Exception):
+                marco_anterior.destroy()
+            with suppress(Exception):
+                boton_anterior.configure(text="Acciones")
+            self._controles_desplegados = None
+            self._desplegado = ""
+        if ya_estaba:
+            return
+        marco = self._construir_controles(user, row)
+        marco.grid(row=3, column=0, columnspan=2, padx=10, pady=(0, 10), sticky="ew")
+        boton.configure(text="Cerrar")
+        self._desplegado = user.id
+        self._controles_desplegados = (marco, boton)
+
+    def _construir_controles(self, user: UserAccessRecord, row: ctk.CTkFrame) -> ctk.CTkFrame:
+        """Lo caro de una fila: el campo de usuario y los ocho botones.
+
+        Se construye solo cuando el admin abre esa fila, y solo hay uno
+        abierto a la vez. Antes se construia para los cien usuarios al abrir
+        el panel, se pulsara o no.
+        """
+
+        contenedor = ctk.CTkFrame(row, fg_color="transparent")
+        contenedor.grid_columnconfigure(0, weight=1)
+
+        login_frame = ctk.CTkFrame(contenedor, fg_color="transparent")
+        login_frame.grid(row=0, column=0, pady=(0, 8), sticky="ew")
         login_frame.grid_columnconfigure(1, weight=1)
         ctk.CTkLabel(
             login_frame,
@@ -497,34 +678,34 @@ class UserAccessPanel(ctk.CTkFrame):
             text_color=TEXT_PRIMARY,
         ).grid(row=0, column=2, padx=(7, 0), sticky="e")
 
-        actions = ctk.CTkFrame(row, fg_color="transparent")
-        actions.grid(row=0, column=1, rowspan=4, padx=10, pady=8, sticky="e")
+        actions = ctk.CTkFrame(contenedor, fg_color="transparent")
+        actions.grid(row=1, column=0, sticky="ew")
+        actions.grid_columnconfigure(0, weight=1)
+        actions.grid_columnconfigure(1, weight=1)
 
         ctk.CTkButton(
             actions,
             text="Aprobar",
             command=lambda current=user: self._run_action("approve", current),
             height=30,
-            width=82,
             corner_radius=9,
             font=self._fuente_etiqueta,
             fg_color=ACCENT,
             text_color=ON_ACCENT,
             hover_color=ACCENT_HOVER,
             state="disabled" if user.approved and not user.disabled else "normal",
-        ).grid(row=0, column=0, padx=(0, 8))
+        ).grid(row=0, column=0, padx=(0, 8), sticky="ew")
         ctk.CTkButton(
             actions,
             text="Deshabilitar" if not user.disabled else "Habilitar",
             command=lambda current=user: self._run_action("disable" if not user.disabled else "enable", current),
             height=30,
-            width=98,
             corner_radius=9,
             font=self._fuente_etiqueta,
             fg_color=NEUTRAL_BUTTON,
             hover_color=NEUTRAL_BUTTON_HOVER,
             text_color=TEXT_PRIMARY,
-        ).grid(row=0, column=1, padx=(0, 0))
+        ).grid(row=0, column=1, sticky="ew")
         has_video = user.weekly_video is not None
         video_accepted = has_video and user.weekly_video.status == "accepted"
         video_rejected = has_video and user.weekly_video.status == "rejected"
@@ -533,27 +714,25 @@ class UserAccessPanel(ctk.CTkFrame):
             text="Aprobar video",
             command=lambda current=user: self._run_action("approve_video", current),
             height=30,
-            width=98,
             corner_radius=9,
             font=self._fuente_etiqueta,
             fg_color=ACCENT,
             text_color=ON_ACCENT,
             hover_color=ACCENT_HOVER,
             state="disabled" if not has_video or video_accepted else "normal",
-        ).grid(row=1, column=0, padx=(0, 8), pady=(8, 0))
+        ).grid(row=1, column=0, padx=(0, 8), pady=(8, 0), sticky="ew")
         ctk.CTkButton(
             actions,
             text="Rechazar video",
             command=lambda current=user: self._run_action("reject_video", current),
             height=30,
-            width=98,
             corner_radius=9,
             font=self._fuente_etiqueta,
             fg_color=NEUTRAL_BUTTON,
             hover_color=NEUTRAL_BUTTON_HOVER,
             text_color=TEXT_PRIMARY,
             state="disabled" if not has_video or video_rejected else "normal",
-        ).grid(row=1, column=1, pady=(8, 0))
+        ).grid(row=1, column=1, pady=(8, 0), sticky="ew")
         ctk.CTkButton(
             actions,
             text="Exigir video" if user.video_exempt else "Eximir video",
@@ -562,7 +741,6 @@ class UserAccessPanel(ctk.CTkFrame):
                 current,
             ),
             height=30,
-            width=98,
             corner_radius=9,
             font=self._fuente_etiqueta,
             fg_color=NEUTRAL_BUTTON,
@@ -579,7 +757,6 @@ class UserAccessPanel(ctk.CTkFrame):
                 current,
             ),
             height=30,
-            width=98,
             corner_radius=9,
             font=self._fuente_etiqueta,
             fg_color=NEUTRAL_BUTTON,
@@ -593,7 +770,6 @@ class UserAccessPanel(ctk.CTkFrame):
             text="Borrar",
             command=lambda current=user: self._run_action("delete", current),
             height=30,
-            width=98,
             corner_radius=9,
             font=self._fuente_etiqueta,
             fg_color=ERROR,
@@ -601,7 +777,7 @@ class UserAccessPanel(ctk.CTkFrame):
             text_color=ON_ACCENT,
             state="disabled" if soy_yo else "normal",
         ).grid(row=3, column=1, pady=(8, 0), sticky="ew")
-        return row
+        return contenedor
 
     def _run_login_id_update(self, user: UserAccessRecord, login_id: str) -> None:
         self.status_label.configure(text="Guardando usuario...", text_color=TEXT_MUTED)

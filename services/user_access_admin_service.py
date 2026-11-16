@@ -286,6 +286,14 @@ class UserAccessAdminService:
         )
         return self._weekly_video_from_row(rows[0]) if rows else None
 
+    # Los identificadores de `in_` viajan en la query string. Con cien
+    # usuarios son varios miles de caracteres en una sola URL, y una URL
+    # demasiado larga la rechaza el servidor o un proxy por el camino. Esa
+    # negativa caia al plan B -una consulta por usuario- y el panel se quedaba
+    # colgado haciendo cien idas y vueltas en fila sin decir nada. En tandas,
+    # la URL no se dispara y un fallo solo afecta a su propia tanda.
+    _USUARIOS_POR_CONSULTA = 40
+
     def _latest_weekly_videos(
         self,
         user_ids: list[str],
@@ -295,20 +303,32 @@ class UserAccessAdminService:
         normalized_user_ids = [user_id for user_id in dict.fromkeys(user_ids) if user_id]
         if not normalized_user_ids:
             return {}
+        latest_by_user: dict[str, WeeklyVideoRecord] = {}
+        for inicio in range(0, len(normalized_user_ids), self._USUARIOS_POR_CONSULTA):
+            tanda = normalized_user_ids[inicio : inicio + self._USUARIOS_POR_CONSULTA]
+            for user_id, weekly_video in self._weekly_videos_de_una_tanda(tanda, cutoff_iso).items():
+                latest_by_user.setdefault(user_id, weekly_video)
+        return latest_by_user
+
+    def _weekly_videos_de_una_tanda(
+        self,
+        user_ids: list[str],
+        cutoff_iso: str,
+    ) -> dict[str, WeeklyVideoRecord]:
         try:
             query = (
                 self._client_provider.client.table(self._batches_table)
                 .select("*")
-                .in_("user_id", normalized_user_ids)
+                .in_("user_id", user_ids)
                 .gte("created_at", cutoff_iso)
                 .order("created_at", desc=True)
-                .limit(max(len(normalized_user_ids) * 3, 1))
+                .limit(max(len(user_ids) * 3, 1))
             )
             rows = self._client_provider.execute(query)
         except Exception:
             return {
                 user_id: weekly_video
-                for user_id in normalized_user_ids
+                for user_id in user_ids
                 if (weekly_video := self._latest_weekly_video(user_id, cutoff_iso=cutoff_iso)) is not None
             }
         latest_by_user: dict[str, WeeklyVideoRecord] = {}
