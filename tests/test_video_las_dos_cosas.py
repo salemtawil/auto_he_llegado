@@ -186,3 +186,54 @@ def test_el_estado_del_lote_sigue_siendo_el_contrato_con_la_puerta() -> None:
     cuerpo = _cuerpo("submit_video")
     assert "status='pending_review'" in cuerpo
     assert "pending_review" in AccessService.ACTIVE_BATCH_STATUSES
+
+
+def test_la_deteccion_de_repetidos_compara_contra_algo_de_verdad() -> None:
+    """Estuvo muerta y nadie se entero.
+
+    El filtro de quien llama se quedaba con los lotes que tuvieran
+    `delivery_file_id`, pero `list_video_fingerprint_candidates` NUNCA pidio
+    esa columna. Resultado: la lista se vaciaba siempre, `find_duplicate`
+    recibia cero lotes, y cualquiera podia subir el mismo video todas las
+    semanas. En cualquier modo, desde que se escribio.
+    """
+
+    cuerpo = _cuerpo("submit_video")
+    # El filtro que decide contra que se compara. `delivery_file_id` sigue
+    # apareciendo mas abajo, al cerrar el lote, y eso esta bien: lo que no
+    # puede es volver a ser el criterio de la comparacion.
+    filtro = cuerpo[cuerpo.index("comparables = ") : cuerpo.index("find_duplicate")]
+    assert "delivery_file_id" not in filtro, "vuelve a filtrar por una columna que no se pide"
+    assert "status" in filtro
+
+    repositorio = (RAIZ / "services" / "photo_review_service.py").read_text(encoding="utf-8")
+    inicio = repositorio.index("def list_video_fingerprint_candidates")
+    consulta = repositorio[inicio : inicio + 900]
+    # Lo que se filtra tiene que venir en el select, o el filtro no filtra.
+    assert "status" in consulta, "se filtra por estado: hay que pedirlo"
+
+
+def test_un_lote_fallido_no_bloquea_reintentar_ese_video() -> None:
+    """Reconcilia las dos decisiones que habia escritas y en conflicto.
+
+    Una prueba pedia comparar contra TODOS los lotes (16/10, para que un
+    video subido una vez cuente como repetido aunque su lote quedara a
+    medias) y otra pedia que un lote fallido NO bloqueara el reintento. Se
+    cumplen las dos mirando el estado: solo se excluye lo explicitamente
+    fallido; lo que quedo a medias sigue contando.
+    """
+
+    from services.video_contribution_service import VideoContributionService
+
+    fallidos = VideoContributionService._ESTADOS_FALLIDOS  # noqa: SLF001
+
+    assert "rejected" in fallidos, "mark_batch_failed deja el lote en 'rejected'"
+    assert "processing" not in fallidos, "un lote a medias SI cuenta como subido"
+    assert "pending_review" not in fallidos, "y uno terminado, mas todavia"
+
+
+def test_el_aviso_por_telegram_tambien_llega_sin_respaldo_en_drive() -> None:
+    # Si no, al quitar Drive te quedas sin enterarte de que alguien subio.
+    cuerpo = _cuerpo("submit_video")
+    assert "if delivery is not None:\n        try:\n            self._notification_service" not in cuerpo
+    assert "fotos_subidas=" in cuerpo

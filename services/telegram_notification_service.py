@@ -21,7 +21,8 @@ class TelegramNotificationService:
         original_name: str,
         size_bytes: int,
         duration_seconds: float,
-        drive_url: str,
+        drive_url: str = "",
+        fotos_subidas: int | None = None,
         duplicate_score: float | None = None,
     ) -> None:
         if not self.is_configured:
@@ -33,8 +34,14 @@ class TelegramNotificationService:
             f"Archivo: {original_name}",
             f"Tamano: {self._format_bytes(size_bytes)}",
             f"Duracion: {self._format_duration(duration_seconds)}",
-            f"Drive: {drive_url or 'sin enlace'}",
         ]
+        # Sin respaldo en Drive no hay enlace que dar, y poner "sin enlace"
+        # parecia un fallo. Lo que interesa saber entonces es cuantas fotos
+        # salieron.
+        if drive_url:
+            lines.append(f"Drive: {drive_url}")
+        if fotos_subidas is not None:
+            lines.append(f"Fotos para revisar: {fotos_subidas}")
         if duplicate_score is not None:
             lines.append(f"Similitud visual: {duplicate_score:.0%}")
         self.send_message("\n".join(lines))

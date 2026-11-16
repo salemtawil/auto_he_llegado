@@ -252,7 +252,15 @@ class PhotoReviewService:
     ) -> list[dict]:
         query = (
             self._client_provider.client.table(self._batches_table)
-            .select("id,user_id,video_sha256,video_fingerprint,original_video_name,created_at")
+            # `status` hace falta para no bloquear el reintento de un video
+            # cuyo lote fallo. Antes el filtro de quien llama miraba
+            # `delivery_file_id`, que esta consulta NUNCA pidio: el filtro
+            # vaciaba la lista siempre y la deteccion de repetidos quedaba
+            # muerta sin que nada se quejara.
+            .select(
+                "id,user_id,status,video_sha256,video_fingerprint,"
+                "original_video_name,created_at"
+            )
             .not_.is_("video_fingerprint", "null")
             .order("created_at", desc=True)
             .limit(max(int(limit), 1))

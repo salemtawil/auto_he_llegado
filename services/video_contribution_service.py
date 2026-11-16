@@ -56,6 +56,10 @@ class VideoContributionService:
         self._work_dir = self._settings.local_data_dir / "video_frames"
         self._work_dir.mkdir(parents=True, exist_ok=True)
 
+    # Lotes que no cuentan como "este video ya se subio": su subida nunca
+    # llego a buen puerto, asi que el agente tiene que poder reintentarla.
+    _ESTADOS_FALLIDOS = frozenset({"rejected", "failed", "deleted"})
+
     def submit_video(
         self,
         video_path: str | Path,
@@ -82,14 +86,26 @@ class VideoContributionService:
         fingerprint = self._fingerprint_service.build(source)
         self._validate_min_duration(fingerprint.duration_seconds)
         existing_batches = self._review_service.list_video_fingerprint_candidates()
-        # A failed upload still has a fingerprint, but must not block its retry.
-        delivered_batches = [
-            row for row in existing_batches
-            if str(row.get("delivery_file_id") or "").strip()
+        # Contra que se compara. Aqui habia un filtro que se quedaba solo con
+        # los lotes "entregados" -los que tenian delivery_file_id- y eso
+        # dejaba la deteccion de repetidos MUERTA: la consulta ni siquiera
+        # pedia esa columna, asi que el filtro vaciaba la lista SIEMPRE y
+        # `find_duplicate` recibia cero lotes con los que comparar. En
+        # cualquier modo, desde que se escribio. Y sin respaldo en Drive no
+        # habria delivery_file_id nunca, asi que el fallo se volvia
+        # permanente.
+        #
+        # Lo que queda reconcilia las dos decisiones escritas en las pruebas:
+        # un lote que FALLO no bloquea reintentar ese video -su subida nunca
+        # conto-, y cualquier otro si, aunque se quedara a medias.
+        comparables = [
+            row
+            for row in existing_batches
+            if str(row.get("status") or "").strip().lower() not in self._ESTADOS_FALLIDOS
         ]
         duplicate = self._fingerprint_service.find_duplicate(
             fingerprint,
-            delivered_batches,
+            comparables,
             similarity_threshold=self._settings.video_duplicate_similarity_threshold,
             hamming_threshold=self._settings.video_duplicate_hamming_threshold,
         )
@@ -188,23 +204,26 @@ class VideoContributionService:
             status="pending_review",
             **entrega,
         )
-        if delivery is not None:
-            try:
-                self._notification_service.send_video_received(
-                    user_label=session.display_name or session.email or session.user_id,
-                    original_name=source.name,
-                    size_bytes=fingerprint.size_bytes,
-                    duration_seconds=fingerprint.duration_seconds,
-                    drive_url=delivery.url,
-                )
-            except Exception as exc:
-                self._emit(
-                    progress_callback,
-                    "notification_warning",
-                    f"Video subido a Google Drive, pero fallo Telegram: {exc}",
-                    current=1,
-                    total=1,
-                )
+        # El aviso se manda haya Drive o no: es como te enteras de que alguien
+        # subio su video. Antes solo salia si habia entrega, asi que sin
+        # respaldo te quedabas sin enterarte de nada.
+        try:
+            self._notification_service.send_video_received(
+                user_label=session.display_name or session.email or session.user_id,
+                original_name=source.name,
+                size_bytes=fingerprint.size_bytes,
+                duration_seconds=fingerprint.duration_seconds,
+                drive_url=delivery.url if delivery is not None else "",
+                fotos_subidas=candidates_uploaded if extraer_fotogramas else None,
+            )
+        except Exception as exc:
+            self._emit(
+                progress_callback,
+                "notification_warning",
+                f"El video se guardo, pero fallo el aviso por Telegram: {exc}",
+                current=1,
+                total=1,
+            )
 
         self._emit(
             progress_callback,
