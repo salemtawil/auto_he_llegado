@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta, timezone
 
 from config.settings import Settings, get_settings
+from core.app_version import APP_VERSION, version_es_suficiente
 from services.auth_context import AuthSession, set_current_session
 from storage.supabase_client import SupabaseClientProvider
 
@@ -17,6 +18,13 @@ class AccessSnapshot:
     week_start: date
     profile: dict
     latest_batch: dict | None = None
+
+
+@dataclass(frozen=True)
+class ComprobacionDeVersion:
+    suficiente: bool
+    minima: str
+    mensaje: str
 
 
 @dataclass(frozen=True)
@@ -145,6 +153,40 @@ class AccessService:
             display_name=clean_display_name,
             needs_email_confirmation=getattr(response, "session", None) is None,
         )
+
+    _MENSAJE_DE_VERSION_VIEJA = (
+        "Esta version de la aplicacion ya no se puede usar. Instala la ultima"
+        " version y vuelve a entrar. Pidele el instalador a tu administrador."
+    )
+
+    def comprobar_version_de_la_app(self) -> ComprobacionDeVersion:
+        """Si esta instalacion llega al minimo que exige el servidor.
+
+        Ante la duda, deja pasar. Si la funcion todavia no existe en Supabase,
+        si la red falla, o si el minimo esta mal escrito, nadie se queda fuera
+        por eso.
+
+        Esto NO es el candado. El candado son las politicas de la base, que no
+        dependen de que el cliente se moleste en preguntar -una version vieja
+        no pregunta-. Esto existe para que a quien tiene una version al dia se
+        le pueda decir con todas las letras por que no entra, en vez de
+        dejarle un error de permisos que no explica nada.
+        """
+
+        try:
+            rows = self._client_provider.execute(
+                self._client_provider.client.rpc("get_min_app_version", {})
+            )
+        except Exception:
+            return ComprobacionDeVersion(True, "", "")
+        row = dict(rows[0]) if rows else {}
+        minima = str(row.get("version") or "").strip()
+        if not bool(row.get("enabled")):
+            return ComprobacionDeVersion(True, minima, "")
+        if version_es_suficiente(APP_VERSION, minima):
+            return ComprobacionDeVersion(True, minima, "")
+        mensaje = str(row.get("mensaje") or "").strip() or self._MENSAJE_DE_VERSION_VIEJA
+        return ComprobacionDeVersion(False, minima, mensaje)
 
     def send_password_reset(self, identifier: str) -> str:
         """Pide a Supabase el correo para restablecer la contrasena.

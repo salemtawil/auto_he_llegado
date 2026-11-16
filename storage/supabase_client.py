@@ -16,6 +16,7 @@ if TYPE_CHECKING:  # pragma: no cover - solo para anotaciones
     from supabase import Client, ClientOptions
 
 from config.settings import Settings, get_settings
+from core.app_version import APP_VERSION, CABECERA_DE_VERSION
 from core.exceptions import RepositoryError, SupabaseClientError
 from services.auth_context import get_current_session, update_current_session_tokens
 
@@ -86,13 +87,30 @@ class SupabaseClientProvider:
 
     @staticmethod
     def _client_options_for_current_session() -> ClientOptions | None:
+        """Las opciones del cliente, con la version de la app siempre puesta.
+
+        La cabecera de version viaja en TODAS las peticiones, haya sesion o
+        no: el servidor la usa para distinguir una instalacion al dia de una
+        vieja, y una app vieja simplemente no la manda. Por eso tambien va en
+        el cliente sin sesion, que es el que hace el login.
+
+        Las dos ramas siguen separadas a proposito. La rama con sesion lleva
+        `auto_refresh_token=False` y `persist_session=False` porque los tokens
+        los administra la app; ponerselos tambien al cliente del login
+        cambiaria como se comporta el inicio de sesion, y eso no es lo que
+        este cambio viene a hacer.
+        """
+
         from supabase import ClientOptions
 
         current_session = get_current_session()
         if current_session is None or not current_session.access_token:
-            return None
+            return ClientOptions(headers={CABECERA_DE_VERSION: APP_VERSION})
         return ClientOptions(
-            headers={"Authorization": f"Bearer {current_session.access_token}"},
+            headers={
+                "Authorization": f"Bearer {current_session.access_token}",
+                CABECERA_DE_VERSION: APP_VERSION,
+            },
             auto_refresh_token=False,
             persist_session=False,
         )

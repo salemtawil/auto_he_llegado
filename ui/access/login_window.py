@@ -395,6 +395,16 @@ class LoginWindow(ctk.CTk):
                 identifier=identifier,
                 password=password,
             )
+            # Antes de nada: si esta instalacion ya no sirve, decirlo claro.
+            # La base tambien lo va a rechazar, pero con un error de permisos
+            # que no le dice nada a quien esta delante.
+            comprobacion = self._access_service.comprobar_version_de_la_app()
+            if not comprobacion.suficiente:
+                self.after(
+                    0,
+                    lambda mensaje=comprobacion.mensaje: self._finish_error(mensaje),
+                )
+                return
             self._save_remembered_login(identifier, password)
             snapshot = self._access_service.get_access_snapshot(session)
             self.after(0, lambda: self._finish_login(session, snapshot))
