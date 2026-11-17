@@ -142,7 +142,12 @@ class VideoFrameExtractor:
 
         mediciones: list[_Medicion] = []
         vistos: set[str] = set()
-        filtrar_repetidos = intervalo > 0
+        # El filtro de repetidos ya NO depende del intervalo. Estaban atados
+        # -`filtrar_repetidos = intervalo > 0`- y eso convertia "mirar todos
+        # los fotogramas" en "mirar todos Y quedarselos todos", de donde
+        # salian miles de fotos casi identicas. Son dos decisiones distintas:
+        # cada cuanto se mira, y si se guardan dos fotogramas iguales. Con
+        # esto, mirar mas de cerca ya no castiga a quien revisa.
         indice = 0
         while total <= 0 or indice < total:
             if len(mediciones) >= tope_de_muestras:
@@ -151,12 +156,11 @@ class VideoFrameExtractor:
             ok, frame = capture.read()
             if not ok:
                 break
-            if filtrar_repetidos:
-                huella = self._simple_frame_hash(cv2, frame)
-                if huella in vistos:
-                    indice += paso
-                    continue
-                vistos.add(huella)
+            huella = self._simple_frame_hash(cv2, frame)
+            if huella in vistos:
+                indice += paso
+                continue
+            vistos.add(huella)
             gris = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
             mediciones.append(
                 _Medicion(

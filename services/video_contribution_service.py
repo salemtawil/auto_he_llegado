@@ -299,11 +299,15 @@ class VideoContributionService:
     def _intervalo_de_fotogramas(self) -> float:
         """Cada cuantos segundos se mira un fotograma.
 
-        El 0 NO significa "todos": significa que nadie lo configuro. Tomarlo
-        al pie de la letra recorre el video fotograma a fotograma Y APAGA el
-        filtro de duplicados -`should_filter_duplicates = interval > 0`-, con
-        lo que de un video de 30 s salian miles de fotos casi identicas y
-        revisarlas era imposible. Por eso aqui el 0 cae al valor por defecto.
+        El 0 NO significa "todos": significa que nadie lo configuro, y cae al
+        valor por defecto.
+
+        Ese valor era 2 segundos, y de un video de 10 s salian SEIS fotos: el
+        extractor no elegia las mejores seis, se quedaba con las unicas seis
+        que habia mirado. Mirar de cerca es barato -se mide en memoria y solo
+        se escriben al disco las elegidas-, asi que ahora se mira cinco veces
+        por segundo y quien decide cuantas salen es el tope de candidatas,
+        no el intervalo.
         """
 
         try:
@@ -315,7 +319,7 @@ class VideoContributionService:
     # Un fotograma cada dos segundos: suficiente para que dos fotos seguidas
     # no sean la misma cara en la misma pose, y deja ~15 candidatas de un
     # video de medio minuto.
-    INTERVALO_POR_DEFECTO_S = 2.0
+    INTERVALO_POR_DEFECTO_S = 0.2
 
     @staticmethod
     def _drive_display_name(source: Path, *, session: AuthSession, batch_id: str) -> str:

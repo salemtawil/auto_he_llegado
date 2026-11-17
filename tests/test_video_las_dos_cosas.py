@@ -59,13 +59,8 @@ def test_si_falla_la_extraccion_el_video_no_se_pierde() -> None:
     )
 
 
-def test_el_cero_del_intervalo_no_significa_todos_los_fotogramas() -> None:
-    """Es lo que hacia el proceso inservible.
-
-    `should_filter_duplicates = interval > 0`, asi que un 0 recorria el video
-    fotograma a fotograma Y apagaba el filtro de duplicados: miles de fotos
-    casi identicas de un video de medio minuto.
-    """
+def test_el_cero_del_intervalo_sigue_cayendo_al_valor_por_defecto() -> None:
+    """El 0 significa "nadie lo configuro", no "todos los fotogramas"."""
 
     cuerpo = _cuerpo("_intervalo_de_fotogramas")
     assert "INTERVALO_POR_DEFECTO_S" in cuerpo
@@ -73,16 +68,54 @@ def test_el_cero_del_intervalo_no_significa_todos_los_fotogramas() -> None:
 
     from services.video_contribution_service import VideoContributionService
 
-    assert VideoContributionService.INTERVALO_POR_DEFECTO_S >= 1.0
+    assert VideoContributionService.INTERVALO_POR_DEFECTO_S > 0
 
 
-def test_el_intervalo_por_defecto_deja_un_lote_revisable() -> None:
+def test_se_mira_lo_bastante_de_cerca_como_para_poder_elegir() -> None:
+    """De un video de 10 s salian SEIS fotos.
+
+    No las seis mejores: las unicas seis que se habian mirado, porque el
+    intervalo era de 2 segundos. Con tan pocas muestras, ordenar por cara y
+    por nitidez no decide nada. Mirar es barato -se mide en memoria y solo se
+    escriben al disco las elegidas-, asi que el intervalo tiene que dejar un
+    monton del que elegir, aunque el video sea corto.
+    """
+
     from services.video_contribution_service import VideoContributionService
 
-    intervalo = VideoContributionService.INTERVALO_POR_DEFECTO_S
-    # Un video de 30 s tiene que dejar algo que una persona pueda mirar de un
-    # vistazo, no un muro de imagenes.
-    assert 5 <= (30 / intervalo) <= 30, intervalo
+    muestras_en_diez_segundos = 10 / VideoContributionService.INTERVALO_POR_DEFECTO_S
+    assert muestras_en_diez_segundos >= 25, VideoContributionService.INTERVALO_POR_DEFECTO_S
+
+
+def test_cuantas_salen_lo_decide_el_tope_y_no_el_intervalo() -> None:
+    """Quien limita el lote es `video_max_candidate_frames`.
+
+    Mientras el intervalo decidia cuantas fotos salian, subir la densidad
+    para elegir mejor significaba inundar a quien revisa. Son dos perillas
+    distintas y el extractor tiene que recibirlas por separado.
+    """
+
+    cuerpo = _cuerpo("_extraer_fotogramas")
+    assert "max_frames=self._settings.video_max_candidate_frames" in cuerpo
+    assert "interval_seconds=self._intervalo_de_fotogramas()" in cuerpo
+
+
+def test_los_repetidos_se_filtran_siempre() -> None:
+    """Estaban atados al intervalo, y esa es la atadura que hacia daño.
+
+    `filtrar_repetidos = intervalo > 0` convertia "mirar de cerca" en "mirar
+    de cerca y quedarselo todo". Mirar mas no puede castigar a quien revisa.
+    """
+
+    import inspect
+
+    from services.video_frame_extractor import VideoFrameExtractor
+
+    cuerpo = inspect.getsource(VideoFrameExtractor._medir)
+    # El comentario que explica por que se quito si menciona el nombre; lo
+    # que no puede volver es la condicion.
+    assert "if filtrar_repetidos" not in cuerpo
+    assert "_simple_frame_hash" in cuerpo
 
 
 def test_el_que_extrae_ya_no_crea_ni_cierra_el_lote() -> None:
