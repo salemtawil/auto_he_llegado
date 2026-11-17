@@ -222,6 +222,23 @@ class PhotosRepository:
         response = self._client_provider.execute_response(query)
         return int(getattr(response, "count", 0) or 0)
 
+    def contar_consumidas_pendientes_de_limpieza(self) -> int:
+        """Cuantas fotos gastadas siguen ocupando sitio en el almacenamiento.
+
+        Los mismos filtros que `list_consumed_pending_cleanup`, pero contando
+        en vez de traer filas: es el numero que decide cuando toca pulsar
+        "limpiar consumidas", y sin el ese boton se pulsa a ciegas.
+        """
+
+        response = self._client_provider.execute_response(
+            self._client_provider.client.table(self._table)
+            .select("id", count="exact")
+            .eq("status", PhotoStatus.CONSUMED.value)
+            .not_.is_("file_path", "null")
+            .is_("storage_deleted_at", "null")
+        )
+        return int(getattr(response, "count", 0) or 0)
+
     def count_cleanup_errors(self) -> int:
         response = self._client_provider.execute_response(
             self._client_provider.client.table(self._table)

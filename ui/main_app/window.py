@@ -129,6 +129,10 @@ class MainAppWindow(ctk.CTk):
         self._auth_session = get_current_session()
         self._access_snapshot: AccessSnapshot | None = None
         self._aviso_de_video = ""
+        # Solo para admins. La limpieza de fotos consumidas es manual a
+        # proposito, pero acordarse no puede serlo: sin este numero a la
+        # vista, el almacenamiento crece mientras nadie mira.
+        self._pendientes_de_limpieza = 0
         self._process_access_block_reason = "Validando acceso por video..."
         self._video_upload_running = False
 
@@ -961,6 +965,18 @@ class MainAppWindow(ctk.CTk):
             on_export_debug=self._handle_admin_export_debug,
         )
         self._apply_pending_admin_tab()
+        # Al cerrar el panel puede haber limpiado: el numero de la cabecera
+        # tiene que reflejarlo sin tener que reiniciar la app.
+        with contextlib.suppress(Exception):
+            self._admin_uploader_dialog.bind(
+                "<Destroy>",
+                lambda evento: (
+                    self.refrescar_pendientes_de_limpieza()
+                    if evento.widget is self._admin_uploader_dialog
+                    else None
+                ),
+                add="+",
+            )
         self._admin_uploader_dialog.focus()
         self._broadcast_status_message("Acceso Admin concedido. Modulo de carga abierto.", color=SUCCESS)
 
@@ -1331,7 +1347,28 @@ class MainAppWindow(ctk.CTk):
         ]
         if getattr(self, "_aviso_de_video", ""):
             self._header_meta_parts.insert(1, self._aviso_de_video)
+        aviso_de_limpieza = self._texto_de_limpieza_pendiente(
+            getattr(self, "_pendientes_de_limpieza", 0)
+        )
+        if aviso_de_limpieza:
+            self._header_meta_parts.append(aviso_de_limpieza)
         self._apply_header_width(self.winfo_width())
+
+    @staticmethod
+    def _texto_de_limpieza_pendiente(pendientes: int) -> str:
+        """Cuantas fotos gastadas esperan al boton de limpiar.
+
+        Vacio cuando no hay nada: un aviso que esta siempre puesto deja de
+        leerse, y entonces no avisa de nada.
+        """
+
+        try:
+            cuantas = int(pendientes)
+        except (TypeError, ValueError):
+            return ""
+        if cuantas <= 0:
+            return ""
+        return f"Limpieza: {cuantas:,} fotos".replace(",", ".")
 
     def _refresh_widget_tree(self, widget) -> None:
         theme_keys = (
@@ -1498,7 +1535,13 @@ class MainAppWindow(ctk.CTk):
         if session is None or session.is_admin:
             self._access_snapshot = None
             self._process_access_block_reason = ""
+            self._aviso_de_video = ""
             self._sync_run_button_state()
+            if session is not None and session.is_admin:
+                self.refrescar_pendientes_de_limpieza()
+            else:
+                self._pendientes_de_limpieza = 0
+                self._refresh_header_summary()
             return
         self._process_access_block_reason = "Validando acceso por video..."
         self._sync_run_button_state()
@@ -1510,6 +1553,32 @@ class MainAppWindow(ctk.CTk):
             self._safe_after(0, lambda current=snapshot: self._apply_process_access_snapshot(current))
         except Exception as exc:
             self._safe_after(0, lambda error=exc: self._apply_process_access_error(error))
+
+    def refrescar_pendientes_de_limpieza(self) -> None:
+        """Cuantas fotos consumidas esperan al boton de limpiar.
+
+        Se consulta en segundo plano y en silencio: si falla, el numero
+        anterior se queda y la cabecera no se llena de errores por un dato
+        que es informativo.
+        """
+
+        if self._is_closing:
+            return
+
+        def trabajo() -> None:
+            try:
+                from services.photo_cleanup_service import PhotoCleanupService
+
+                pendientes = PhotoCleanupService().contar_pendientes_de_limpieza()
+            except Exception:  # noqa: BLE001
+                return
+            self._safe_after(0, lambda n=pendientes: self._aplicar_pendientes_de_limpieza(n))
+
+        threading.Thread(target=trabajo, daemon=True).start()
+
+    def _aplicar_pendientes_de_limpieza(self, pendientes: int) -> None:
+        self._pendientes_de_limpieza = max(int(pendientes), 0)
+        self._refresh_header_summary()
 
     def _apply_process_access_snapshot(self, snapshot: AccessSnapshot) -> None:
         self._access_snapshot = snapshot

@@ -97,6 +97,16 @@ class PhotoCleanupService:
     def count_db_error_after_storage_delete(self) -> int:
         return self._photos_repository.count_db_error_after_storage_delete()
 
+    def contar_pendientes_de_limpieza(self) -> int:
+        """Cuantas fotos consumidas esperan a que un admin pulse el boton.
+
+        La limpieza es manual a proposito. Lo que no puede ser manual es
+        acordarse: sin este numero a la vista, el almacenamiento crece
+        mientras nadie mira.
+        """
+
+        return self._photos_repository.contar_consumidas_pendientes_de_limpieza()
+
     def cleanup_consumed_photos(
         self,
         limit: int = 100,
