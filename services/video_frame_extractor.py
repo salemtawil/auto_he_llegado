@@ -59,6 +59,12 @@ class VideoFrameExtractor:
     # Para buscar caras no hace falta la resolucion entera: a 480 px de ancho
     # se detecta igual y cuesta una fraccion.
     ANCHO_DE_ANALISIS = 480
+    #: Cada cuantos fotogramas se busca la cara de verdad. Detectarla es el
+    #: 75% del tiempo de procesar un video, y una cara no aparece y desaparece
+    #: entre dos fotogramas seguidos: a 30 fps esto son seis comprobaciones
+    #: por segundo, de sobra para notar que alguien se giro. Los fotogramas de
+    #: en medio heredan la ultima medida.
+    DETECTAR_CARA_CADA = 5
 
     _CASCADAS = ("haarcascade_frontalface_alt2.xml", "haarcascade_profileface.xml")
 
@@ -104,6 +110,7 @@ class VideoFrameExtractor:
                 interval_seconds=interval_seconds,
                 max_frames=max_frames,
                 tamano_de_huella=tamano_de_huella,
+                umbral_cara=umbral_cara,
             )
             elegidas = self._elegir(
                 mediciones,
@@ -134,6 +141,7 @@ class VideoFrameExtractor:
         interval_seconds: float,
         max_frames: int,
         tamano_de_huella: int = 0,
+        umbral_cara: float = 0.0,
     ) -> list[_Medicion]:
         """Recorre el video midiendo. NO escribe ningun JPG todavia.
 
@@ -161,10 +169,17 @@ class VideoFrameExtractor:
         # cada cuanto se mira, y si se guardan dos fotogramas iguales. Con
         # esto, mirar mas de cerca ya no castiga a quien revisa.
         indice = 0
+        medidos = 0
+        ultima_cara = 0.0
         while total <= 0 or indice < total:
             if len(mediciones) >= tope_de_muestras:
                 break
-            capture.set(cv2.CAP_PROP_POS_FRAMES, indice)
+            # Saltar cuesta: pedirle al decodificador que se coloque en un
+            # fotograma concreto lo obliga a rebobinar al keyframe anterior y
+            # volver a decodificar hasta ahi. Cuando se miran todos -que es lo
+            # normal ahora- no hay nada que saltar, asi que se lee seguido.
+            if paso > 1:
+                capture.set(cv2.CAP_PROP_POS_FRAMES, indice)
             ok, frame = capture.read()
             if not ok:
                 break
@@ -176,13 +191,16 @@ class VideoFrameExtractor:
                 continue
             vistos.add(huella)
             gris = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            if medidos % max(int(self.DETECTAR_CARA_CADA), 1) == 0:
+                ultima_cara = self._ratio_de_cara(cv2, gris, umbral_cara)
+            medidos += 1
             mediciones.append(
                 _Medicion(
                     frame_index=indice,
                     timestamp_seconds=round(float(indice / fps), 2),
                     blur_score=round(float(cv2.Laplacian(gris, cv2.CV_64F).var()), 2),
                     brightness_score=round(float(gris.mean()), 2),
-                    face_score=round(self._ratio_de_cara(cv2, gris), 4),
+                    face_score=round(ultima_cara, 4),
                 )
             )
             indice += paso
@@ -263,12 +281,18 @@ class VideoFrameExtractor:
 
     # -- la cara ---------------------------------------------------------
 
-    def _ratio_de_cara(self, cv2, gris) -> float:
+    def _ratio_de_cara(self, cv2, gris, umbral: float = 0.0) -> float:
         """Ancho de la cara mas grande / ancho del fotograma. 0 si no hay.
 
         Se prueba de frente y, si no, de perfil en los dos sentidos: el
         clasificador de perfil solo mira hacia un lado, asi que la imagen
         espejada es la unica forma de ver el otro.
+
+        `umbral` es el tamano minimo que luego se va a exigir. Decirselo al
+        clasificador le ahorra recorrer las escalas pequenas buscando caras
+        que de todas formas se iban a descartar, y eso era el 78% del tiempo
+        de procesar un video. No cambia el resultado: lo que se poda es justo
+        lo que `_elegir` tiraba despues.
         """
 
         detectores = self._cargar_detectores(cv2)
@@ -288,6 +312,10 @@ class VideoFrameExtractor:
         except Exception:  # noqa: BLE001 - si no se puede igualar, se busca igual
             pass
         ancho_analisis = float(pequeno.shape[1]) or 1.0
+        # Con un margen por debajo del umbral: un clasificador no mide al
+        # pixel, y no vale la pena perder una cara que esta justo en el
+        # limite por apurar la poda.
+        minimo = max(int(ancho_analisis * max(float(umbral), 0.0) * 0.9), 24)
 
         frontal, perfil = detectores
         intentos = [(frontal, pequeno)]
@@ -297,7 +325,7 @@ class VideoFrameExtractor:
         for clasificador, imagen in intentos:
             try:
                 caras = clasificador.detectMultiScale(
-                    imagen, scaleFactor=1.1, minNeighbors=5, minSize=(24, 24)
+                    imagen, scaleFactor=1.1, minNeighbors=5, minSize=(minimo, minimo)
                 )
             except Exception:  # noqa: BLE001 - un clasificador roto no tumba el video
                 continue
