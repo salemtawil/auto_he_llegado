@@ -65,6 +65,20 @@ class VideoFrameExtractor:
     #: por segundo, de sobra para notar que alguien se giro. Los fotogramas de
     #: en medio heredan la ultima medida.
     DETECTAR_CARA_CADA = 5
+    #: Tamano de cara con el que se busca en la primera pasada.
+    #:
+    #: El umbral hace dos trabajos: decide que fotogramas cuentan, y le dice
+    #: al detector lo pequena que puede ser una cara. Lo segundo se paga caro
+    #: -con un 7% se rastrean tamanos diminutos buscando caras que el filtro
+    #: iba a tirar igual-, pero subirlo sin mas seria cambiar lo primero, y
+    #: eso no se puede decidir con un solo video de muestra.
+    #:
+    #: Asi que no se cambia el umbral: se busca rapido primero y, si no
+    #: aparece ni una cara, se vuelve a mirar con el umbral de verdad. En un
+    #: selfie normal -la cara ocupa del 60% para arriba- gana la primera
+    #: pasada. En un video grabado de lejos la segunda lo arregla, y lo unico
+    #: que cuesta es tiempo en el video raro, no fotos en todos los demas.
+    UMBRAL_DE_BUSQUEDA_RAPIDA = 0.20
 
     _CASCADAS = ("haarcascade_frontalface_alt2.xml", "haarcascade_profileface.xml")
 
@@ -104,14 +118,33 @@ class VideoFrameExtractor:
             raise ValueError(f"No se pudo abrir el video: {source.name}")
 
         try:
+            umbral_rapido = max(umbral_cara, self.UMBRAL_DE_BUSQUEDA_RAPIDA)
             mediciones = self._medir(
                 cv2,
                 capture,
                 interval_seconds=interval_seconds,
                 max_frames=max_frames,
                 tamano_de_huella=tamano_de_huella,
-                umbral_cara=umbral_cara,
+                umbral_cara=umbral_rapido,
             )
+            if umbral_rapido > umbral_cara and not any(
+                medicion.face_score >= umbral_cara for medicion in mediciones
+            ):
+                # Ni una cara con la busqueda rapida. Puede ser un video sin
+                # caras, o uno grabado de lejos: mirar otra vez con el umbral
+                # de verdad es lo que distingue una cosa de la otra.
+                capture.release()
+                capture = cv2.VideoCapture(str(source))
+                if not capture.isOpened():
+                    raise ValueError(f"No se pudo abrir el video: {source.name}")
+                mediciones = self._medir(
+                    cv2,
+                    capture,
+                    interval_seconds=interval_seconds,
+                    max_frames=max_frames,
+                    tamano_de_huella=tamano_de_huella,
+                    umbral_cara=umbral_cara,
+                )
             elegidas = self._elegir(
                 mediciones,
                 max_frames=max_frames,

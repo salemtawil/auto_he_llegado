@@ -210,3 +210,46 @@ def test_con_huella_perceptual_salen_menos_fotos(tmp_path, extractor) -> None:
         tamano_de_huella=12,
     )
     assert len(agrupadas) <= len(todas)
+
+
+def test_la_busqueda_rapida_no_pierde_caras_pequenas(tmp_path, extractor) -> None:
+    """La red de seguridad de las dos pasadas.
+
+    El umbral hace dos trabajos: decide que fotogramas cuentan, y le dice al
+    detector lo pequena que puede ser una cara. Lo segundo se paga caro, pero
+    subirlo sin mas seria cambiar lo primero.
+
+    Por eso se busca rapido primero y, si no aparece NI UNA cara, se vuelve a
+    mirar con el umbral de verdad. Un video grabado de lejos tiene que dar
+    exactamente las mismas fotos que daba antes: lo unico que puede costar es
+    tiempo.
+    """
+
+    # Una cara por debajo del umbral rapido pero por encima del de verdad.
+    ancho, alto = 640, 480
+    radio = int(ancho * 0.06)  # ~12% de ancho de cara
+    cuadros = [_cara(ancho, alto, radio=radio, cx=ancho // 2, cy=alto // 2) for _ in range(12)]
+    video = _video(tmp_path / "lejos.mp4", cuadros, fps=10)
+
+    con_rapida = extractor.extract(
+        video, tmp_path / "con", interval_seconds=0, max_frames=300, jpeg_quality=85
+    )
+
+    sin_rapida = VideoFrameExtractor()
+    sin_rapida.UMBRAL_DE_BUSQUEDA_RAPIDA = 0.0
+    assert sin_rapida._cargar_detectores(cv2)
+    directo = sin_rapida.extract(
+        video, tmp_path / "sin", interval_seconds=0, max_frames=300, jpeg_quality=85
+    )
+
+    assert len(con_rapida) == len(directo), "la busqueda rapida no puede costar fotos"
+
+
+def test_la_busqueda_rapida_no_puede_quedar_por_debajo_del_umbral() -> None:
+    """Si fuera mas baja que el umbral no ahorraria nada.
+
+    Y si el umbral se subiera algun dia por encima de ella, la primera pasada
+    tiene que seguir siendo al menos tan estricta como el filtro.
+    """
+
+    assert VideoFrameExtractor.UMBRAL_DE_BUSQUEDA_RAPIDA > VideoFrameExtractor.MIN_FACE_RATIO
