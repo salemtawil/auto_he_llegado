@@ -59,32 +59,31 @@ def test_si_falla_la_extraccion_el_video_no_se_pierde() -> None:
     )
 
 
-def test_el_cero_del_intervalo_sigue_cayendo_al_valor_por_defecto() -> None:
-    """El 0 significa "nadie lo configuro", no "todos los fotogramas"."""
+def test_el_cero_del_intervalo_ya_si_significa_todos_los_fotogramas() -> None:
+    """Antes no podia significarlo, y esa es toda la historia.
 
-    cuerpo = _cuerpo("_intervalo_de_fotogramas")
-    assert "INTERVALO_POR_DEFECTO_S" in cuerpo
-    assert "intervalo > 0" in cuerpo
+    El 0 apagaba de paso el filtro de repetidos -estaban atados-, asi que
+    pedir "todos los fotogramas" significaba ademas "quedatelos todos" y
+    salian miles de fotos casi identicas. Alguien subio el intervalo a 2
+    segundos para esquivarlo, y de un video de 10 s empezaron a salir SEIS.
 
-    from services.video_contribution_service import VideoContributionService
-
-    assert VideoContributionService.INTERVALO_POR_DEFECTO_S > 0
-
-
-def test_se_mira_lo_bastante_de_cerca_como_para_poder_elegir() -> None:
-    """De un video de 10 s salian SEIS fotos.
-
-    No las seis mejores: las unicas seis que se habian mirado, porque el
-    intervalo era de 2 segundos. Con tan pocas muestras, ordenar por cara y
-    por nitidez no decide nada. Mirar es barato -se mide en memoria y solo se
-    escriben al disco las elegidas-, asi que el intervalo tiene que dejar un
-    monton del que elegir, aunque el video sea corto.
+    Desatados, mirar todos es lo que mas fotos da, que es lo que el pool
+    necesita.
     """
 
     from services.video_contribution_service import VideoContributionService
 
-    muestras_en_diez_segundos = 10 / VideoContributionService.INTERVALO_POR_DEFECTO_S
-    assert muestras_en_diez_segundos >= 25, VideoContributionService.INTERVALO_POR_DEFECTO_S
+    assert VideoContributionService.INTERVALO_POR_DEFECTO_S == 0.0
+
+
+def test_mirar_todos_no_puede_volver_a_apagar_el_filtro() -> None:
+    import inspect
+
+    from services.video_frame_extractor import VideoFrameExtractor
+
+    cuerpo = inspect.getsource(VideoFrameExtractor._medir)
+    assert "if filtrar_repetidos" not in cuerpo
+    assert "_simple_frame_hash" in cuerpo
 
 
 def test_cuantas_salen_lo_decide_el_tope_y_no_el_intervalo() -> None:
@@ -98,24 +97,6 @@ def test_cuantas_salen_lo_decide_el_tope_y_no_el_intervalo() -> None:
     cuerpo = _cuerpo("_extraer_fotogramas")
     assert "max_frames=self._settings.video_max_candidate_frames" in cuerpo
     assert "interval_seconds=self._intervalo_de_fotogramas()" in cuerpo
-
-
-def test_los_repetidos_se_filtran_siempre() -> None:
-    """Estaban atados al intervalo, y esa es la atadura que hacia daño.
-
-    `filtrar_repetidos = intervalo > 0` convertia "mirar de cerca" en "mirar
-    de cerca y quedarselo todo". Mirar mas no puede castigar a quien revisa.
-    """
-
-    import inspect
-
-    from services.video_frame_extractor import VideoFrameExtractor
-
-    cuerpo = inspect.getsource(VideoFrameExtractor._medir)
-    # El comentario que explica por que se quito si menciona el nombre; lo
-    # que no puede volver es la condicion.
-    assert "if filtrar_repetidos" not in cuerpo
-    assert "_simple_frame_hash" in cuerpo
 
 
 def test_el_que_extrae_ya_no_crea_ni_cierra_el_lote() -> None:

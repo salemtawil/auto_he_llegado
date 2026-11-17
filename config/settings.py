@@ -96,6 +96,11 @@ class Settings:
     # repetido- son comunes a los tres: antes solo existian en "drive", y por
     # eso "frames" aceptaba el mismo video todas las semanas.
     video_submission_mode: str = "drive"
+    # 0 = solo se descartan fotogramas identicos. Un numero N usa una huella
+    # perceptual de NxN, que agrupa los PARECIDOS y reduce mucho el lote: con
+    # 12 -lo que habia antes fijo- una persona quieta daba quince fotos por
+    # mucho que se mirara.
+    video_frame_dedupe_size: int = 0
     video_min_duration_seconds: float = 10.0
     video_duplicate_similarity_threshold: float = 0.72
     video_duplicate_hamming_threshold: int = 10
@@ -213,6 +218,7 @@ def get_settings() -> Settings:
         # lo lee (VideoContributionService) cae a su intervalo por defecto.
         video_frame_interval_seconds=_get_float_env("VIDEO_FRAME_INTERVAL_SECONDS", 0.0),
         video_max_candidate_frames=_get_int_env("VIDEO_MAX_CANDIDATE_FRAMES", 300),
+        video_frame_dedupe_size=_get_int_env("VIDEO_FRAME_DEDUPE_SIZE", 0),
         video_jpeg_quality=_get_int_env("VIDEO_JPEG_QUALITY", 88),
         video_submission_mode=(
             _get_env("VIDEO_SUBMISSION_MODE", "drive") or "drive"

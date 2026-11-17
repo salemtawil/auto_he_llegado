@@ -163,3 +163,50 @@ def test_sin_clasificadores_sigue_funcionando(tmp_path, monkeypatch) -> None:
 
     assert fotos
     assert all(not f.has_face for f in fotos)
+
+
+def test_la_huella_por_defecto_solo_tira_los_identicos(extractor) -> None:
+    """El techo real no era el muestreo, era la huella.
+
+    La de 12x12 agrupa fotogramas PARECIDOS. Para un pool de selfies eso esta
+    mal planteado: dos fotos casi iguales de la misma cara son dos selfies
+    validas, y cada una se gasta una sola vez. Por defecto solo se descarta
+    lo que es identico de verdad.
+    """
+
+    limpia = _cara(320, 240, radio=54, cx=160, cy=120)
+    generador = np.random.default_rng(11)
+    con_ruido = np.clip(
+        limpia.astype(np.int16) + generador.integers(-4, 5, limpia.shape), 0, 255
+    ).astype(np.uint8)
+
+    # Una copia exacta se descarta: de eso, y solo de eso, se ocupa.
+    assert extractor._simple_frame_hash(cv2, limpia.copy()) == extractor._simple_frame_hash(
+        cv2, limpia
+    )
+    # Y el ruido del sensor ya las separa, que es lo que pasa en una camara
+    # de verdad aunque la persona no se mueva.
+    assert extractor._simple_frame_hash(cv2, limpia) != extractor._simple_frame_hash(
+        cv2, con_ruido
+    )
+
+
+def test_con_huella_perceptual_salen_menos_fotos(tmp_path, extractor) -> None:
+    # La perilla existe por si algun dia hay que apretar el grifo.
+    cuadros = []
+    for i in range(40):
+        cuadros.append(_cara(320, 240, radio=54, cx=158 + i % 5, cy=120))
+    video = _video(tmp_path / "v.mp4", cuadros, fps=10)
+
+    todas = extractor.extract(
+        video, tmp_path / "todas", interval_seconds=0, max_frames=300, jpeg_quality=85
+    )
+    agrupadas = extractor.extract(
+        video,
+        tmp_path / "agrupadas",
+        interval_seconds=0,
+        max_frames=300,
+        jpeg_quality=85,
+        tamano_de_huella=12,
+    )
+    assert len(agrupadas) <= len(todas)

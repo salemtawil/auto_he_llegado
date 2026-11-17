@@ -23,6 +23,8 @@ semanal del agente:
 
 from __future__ import annotations
 
+import hashlib
+
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -75,6 +77,7 @@ class VideoFrameExtractor:
         min_brightness: float = 35.0,
         max_brightness: float = 230.0,
         min_face_ratio: float | None = None,
+        tamano_de_huella: int = 0,
     ) -> list[ExtractedFrame]:
         try:
             import cv2
@@ -100,6 +103,7 @@ class VideoFrameExtractor:
                 capture,
                 interval_seconds=interval_seconds,
                 max_frames=max_frames,
+                tamano_de_huella=tamano_de_huella,
             )
             elegidas = self._elegir(
                 mediciones,
@@ -122,7 +126,15 @@ class VideoFrameExtractor:
 
     # -- paso 1: mirar sin escribir -------------------------------------
 
-    def _medir(self, cv2, capture, *, interval_seconds: float, max_frames: int) -> list[_Medicion]:
+    def _medir(
+        self,
+        cv2,
+        capture,
+        *,
+        interval_seconds: float,
+        max_frames: int,
+        tamano_de_huella: int = 0,
+    ) -> list[_Medicion]:
         """Recorre el video midiendo. NO escribe ningun JPG todavia.
 
         Antes se escribia cada fotograma al disco y se borraba si no pasaba el
@@ -156,7 +168,9 @@ class VideoFrameExtractor:
             ok, frame = capture.read()
             if not ok:
                 break
-            huella = self._simple_frame_hash(cv2, frame)
+            huella = self._simple_frame_hash(
+                cv2, frame, tamano_de_huella=tamano_de_huella
+            )
             if huella in vistos:
                 indice += paso
                 continue
@@ -315,9 +329,25 @@ class VideoFrameExtractor:
         return self._detectores
 
     @staticmethod
-    def _simple_frame_hash(cv2, frame) -> str:
-        small = cv2.resize(frame, (12, 12))
-        gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
-        average = float(gray.mean())
-        bits = ["1" if value > average else "0" for row in gray for value in row]
-        return "".join(bits)
+    def _simple_frame_hash(cv2, frame, *, tamano_de_huella: int = 0) -> str:
+        """La huella con la que se decide si dos fotogramas son el mismo.
+
+        Con `tamano_de_huella` en 0 -lo normal- se compara el fotograma ENTERO:
+        solo caen los identicos de verdad, que los hay y tirarlos es ganancia
+        pura.
+
+        Con un numero se usa una huella perceptual de NxN, que agrupa los
+        PARECIDOS. Eso era lo que habia antes, fijo en 12x12, y es un techo
+        durisimo: una persona quieta se reduce a unas quince fotos por mucho
+        que se mire. Para un pool de selfies ese criterio esta mal planteado
+        -dos fotos casi iguales de la misma cara son dos selfies validas, y
+        cada una se gasta una sola vez-, pero se deja a mano por si algun dia
+        hay que apretar el grifo.
+        """
+
+        if tamano_de_huella and tamano_de_huella > 0:
+            small = cv2.resize(frame, (tamano_de_huella, tamano_de_huella))
+            gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
+            average = float(gray.mean())
+            return "".join("1" if value > average else "0" for row in gray for value in row)
+        return hashlib.blake2b(frame.tobytes(), digest_size=16).hexdigest()

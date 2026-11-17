@@ -285,6 +285,7 @@ class VideoContributionService:
                 interval_seconds=self._intervalo_de_fotogramas(),
                 max_frames=self._settings.video_max_candidate_frames,
                 jpeg_quality=self._settings.video_jpeg_quality,
+                tamano_de_huella=self._settings.video_frame_dedupe_size,
             )
             subidas = self._upload_frames(
                 frames,
@@ -299,15 +300,16 @@ class VideoContributionService:
     def _intervalo_de_fotogramas(self) -> float:
         """Cada cuantos segundos se mira un fotograma.
 
-        El 0 NO significa "todos": significa que nadie lo configuro, y cae al
-        valor por defecto.
+        Ahora el valor por defecto es 0, y 0 SI significa todos.
 
-        Ese valor era 2 segundos, y de un video de 10 s salian SEIS fotos: el
-        extractor no elegia las mejores seis, se quedaba con las unicas seis
-        que habia mirado. Mirar de cerca es barato -se mide en memoria y solo
-        se escriben al disco las elegidas-, asi que ahora se mira cinco veces
-        por segundo y quien decide cuantas salen es el tope de candidatas,
-        no el intervalo.
+        Antes no podia significarlo: el 0 apagaba de paso el filtro de
+        repetidos, porque estaban atados. Desatados, mirar todos los
+        fotogramas es lo que mas fotos da, que es lo que el pool necesita.
+
+        Historia de los numeros: 2 segundos daba SEIS fotos de un video de
+        10 s -no las seis mejores, las unicas seis miradas-. Bajarlo a 0.2
+        subio a treinta y pico, y ahi se vio que el techo real no era el
+        muestreo sino la huella de repetidos.
         """
 
         try:
@@ -319,7 +321,7 @@ class VideoContributionService:
     # Un fotograma cada dos segundos: suficiente para que dos fotos seguidas
     # no sean la misma cara en la misma pose, y deja ~15 candidatas de un
     # video de medio minuto.
-    INTERVALO_POR_DEFECTO_S = 0.2
+    INTERVALO_POR_DEFECTO_S = 0.0
 
     @staticmethod
     def _drive_display_name(source: Path, *, session: AuthSession, batch_id: str) -> str:
