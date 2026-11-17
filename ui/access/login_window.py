@@ -7,12 +7,15 @@ from tkinter import filedialog
 
 import customtkinter as ctk
 
+from datetime import timedelta
+
 from services.access_service import AccessService, AccessSnapshot
 from services.auth_context import AuthSession
 from services.background_video_status import set_video_status
 from services.login_credentials_store import LoginCredentialsStore
 from services.video_contribution_service import VideoContributionProgress, VideoContributionService
 from ui.shared.errors import safe_error_summary
+from ui.shared.plazos import texto_de_plazo
 from ui.theme import (
     ACCENT,
     ON_ACCENT,
@@ -472,7 +475,9 @@ class LoginWindow(ctk.CTk):
         self._session = session
         self._snapshot = snapshot
         if snapshot.can_use_app:
-            self.status_label.configure(text=snapshot.reason, text_color=SUCCESS)
+            self.status_label.configure(
+                text=self._texto_de_acceso(snapshot), text_color=SUCCESS
+            )
             self._result = session
             self.after(400, self.destroy)
             return
@@ -482,6 +487,19 @@ class LoginWindow(ctk.CTk):
             self.after(400, self.destroy)
             return
         self.status_label.configure(text=snapshot.reason, text_color=ERROR)
+
+    @staticmethod
+    def _texto_de_acceso(snapshot: AccessSnapshot) -> str:
+        """El motivo del acceso, con el plazo del video si lo hay.
+
+        Es el primer sitio donde el agente puede enterarse, y hasta ahora
+        solo se le decia algo cuando ya estaba bloqueado.
+        """
+
+        restante = snapshot.tiempo_restante
+        if restante is None or restante <= timedelta(0):
+            return snapshot.reason
+        return f"{snapshot.reason} Te quedan {texto_de_plazo(restante)} para subir el proximo."
 
     def _select_video(self) -> None:
         selected = filedialog.askopenfilename(

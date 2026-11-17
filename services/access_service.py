@@ -18,6 +18,13 @@ class AccessSnapshot:
     week_start: date
     profile: dict
     latest_batch: dict | None = None
+    #: Cuanto le queda al video antes de dejar de valer. Negativo si ya
+    #: vencio, None si no se le exige video o no se puede saber.
+    #:
+    #: Se calcula aqui, donde estan a la vez la politica y el lote, y viaja
+    #: en el snapshot para que el agente y el administrador lean el mismo
+    #: numero. Antes el agente solo se enteraba cuando ya estaba bloqueado.
+    tiempo_restante: timedelta | None = None
 
 
 @dataclass(frozen=True)
@@ -293,6 +300,9 @@ class AccessService:
             )
         elif latest_status in self.ACTIVE_BATCH_STATUSES:
             effective_days = policy.days_for_duration((latest_batch or {}).get("video_duration_seconds"))
+            restante = self.tiempo_restante_del_video(
+                (latest_batch or {}).get("created_at"), effective_days
+            )
             if self._batch_is_within_days(latest_batch, effective_days):
                 duration_text = self._duration_policy_text(policy, effective_days)
                 return AccessSnapshot(
@@ -302,6 +312,7 @@ class AccessService:
                     week_start=period_start,
                     profile=profile,
                     latest_batch=latest_batch,
+                    tiempo_restante=restante,
                 )
             return AccessSnapshot(
                 can_use_app=False,
@@ -310,6 +321,7 @@ class AccessService:
                 week_start=period_start,
                 profile=profile,
                 latest_batch=latest_batch,
+                tiempo_restante=restante,
             )
         return AccessSnapshot(
             can_use_app=False,

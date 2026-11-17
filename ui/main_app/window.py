@@ -11,7 +11,7 @@ import subprocess
 import sys
 import threading
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from time import monotonic
 from tkinter import filedialog, messagebox
@@ -49,6 +49,7 @@ from ui.main_app.settings_dialog import SettingsDialog
 from ui.admin_auth import is_admin_password_valid
 from ui.shared.dialogs import confirm_destructive_action
 from ui.shared.errors import safe_error_summary
+from ui.shared.plazos import texto_de_plazo
 from ui.theme import (
     SECONDARY_BUTTON,
     SECONDARY_BUTTON_HOVER,
@@ -127,6 +128,7 @@ class MainAppWindow(ctk.CTk):
         self._pending_admin_tab: str | None = None
         self._auth_session = get_current_session()
         self._access_snapshot: AccessSnapshot | None = None
+        self._aviso_de_video = ""
         self._process_access_block_reason = "Validando acceso por video..."
         self._video_upload_running = False
 
@@ -1327,6 +1329,8 @@ class MainAppWindow(ctk.CTk):
             f"Principal: {slot_title}",
             f"Página: {page_name}",
         ]
+        if getattr(self, "_aviso_de_video", ""):
+            self._header_meta_parts.insert(1, self._aviso_de_video)
         self._apply_header_width(self.winfo_width())
 
     def _refresh_widget_tree(self, widget) -> None:
@@ -1510,12 +1514,34 @@ class MainAppWindow(ctk.CTk):
     def _apply_process_access_snapshot(self, snapshot: AccessSnapshot) -> None:
         self._access_snapshot = snapshot
         self._process_access_block_reason = "" if snapshot.can_use_app else snapshot.reason
+        self._aviso_de_video = self._texto_del_aviso_de_video(snapshot)
+        self._refresh_header_summary()
         self._sync_run_button_state()
         if not snapshot.can_use_app:
             self._broadcast_status_message(snapshot.reason, color=WARNING)
 
+    @staticmethod
+    def _texto_del_aviso_de_video(snapshot: AccessSnapshot) -> str:
+        """Cuanto le queda al agente antes de tener que subir otro video.
+
+        Va en la cabecera, siempre a la vista. Antes el agente solo se
+        enteraba del video cuando ya estaba bloqueado y no podia trabajar:
+        para entonces el aviso ya no sirve de aviso.
+        """
+
+        restante = snapshot.tiempo_restante
+        if restante is None:
+            if snapshot.needs_weekly_video:
+                return "Video: tienes que subir uno"
+            return ""
+        if restante <= timedelta(0):
+            return "Video: VENCIDO"
+        return f"Video: te quedan {texto_de_plazo(restante)}"
+
     def _apply_process_access_error(self, exc: Exception) -> None:
         self._access_snapshot = None
+        self._aviso_de_video = ""
+        self._refresh_header_summary()
         self._process_access_block_reason = f"No se pudo validar el acceso por video. Revisa tu conexión y vuelve a intentar. ({safe_error_summary(exc, context='acceso por video')})"
         self._sync_run_button_state()
         self._broadcast_status_message(self._process_access_block_reason, color=ERROR)

@@ -15,6 +15,7 @@ from services.user_access_admin_service import UserAccessAdminService, UserAcces
 from services.access_service import VideoRequirementPolicy
 from services.photo_pool_policy_service import PhotoPoolPolicy
 from ui.shared.dialogs import confirm_destructive_action
+from ui.shared.plazos import texto_de_plazo
 from ui.shared.errors import safe_error_summary
 from ui.theme import (
     ACCENT,
@@ -95,31 +96,9 @@ def texto_de_vencimiento(
         return f"vence a los {dias} dias, pero no hay fecha del video", COLOR_NEUTRO
     if restante <= timedelta(0):
         vencido_hace = -restante
-        return f"vencido hace {_texto_de_plazo(vencido_hace)}", COLOR_VENCIDO
+        return f"vencido hace {texto_de_plazo(vencido_hace)}", COLOR_VENCIDO
     color = COLOR_POR_VENCER if restante < timedelta(days=DIAS_DE_AVISO) else COLOR_AL_DIA
-    return f"le quedan {_texto_de_plazo(restante)}", color
-
-
-def _texto_de_plazo(plazo: timedelta) -> str:
-    """Un plazo en palabras, sin redondear a cero.
-
-    Media hora que queda se dice "menos de 1 hora", nunca "0 horas": decirle a
-    alguien que le quedan cero cuando todavia puede trabajar es un error mas
-    caro que decirle que le queda poco.
-    """
-
-    segundos = max(int(plazo.total_seconds()), 0)
-    if segundos >= 86400:
-        # Techo, no suelo. Un video subido hace un instante tiene 6 dias y 23
-        # horas de vida, y decirle al agente "te quedan 6 dias" el mismo dia
-        # que lo subio parece una cuenta rota. Por debajo de un dia se dan
-        # horas, que es donde la precision importa de verdad.
-        dias = -(-segundos // 86400)
-        return "1 dia" if dias == 1 else f"{dias} dias"
-    horas = segundos // 3600
-    if horas >= 1:
-        return "1 hora" if horas == 1 else f"{horas} horas"
-    return "menos de 1 hora"
+    return f"le quedan {texto_de_plazo(restante)}", color
 
 
 def filtrar_usuarios(
