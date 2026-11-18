@@ -10,6 +10,10 @@ from __future__ import annotations
 
 from datetime import timedelta
 
+#: A partir de aqui se avisa en ambar. Por debajo de esto el agente tiene que
+#: ponerse con ello hoy o mañana, y el aviso deja de ser informativo.
+DIAS_DE_AVISO = 3
+
 
 def texto_de_plazo(plazo: timedelta) -> str:
     """Un plazo en palabras, sin redondear a cero.

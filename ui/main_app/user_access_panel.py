@@ -15,7 +15,7 @@ from services.user_access_admin_service import UserAccessAdminService, UserAcces
 from services.access_service import VideoRequirementPolicy
 from services.photo_pool_policy_service import PhotoPoolPolicy
 from ui.shared.dialogs import confirm_destructive_action
-from ui.shared.plazos import texto_de_plazo
+from ui.shared.plazos import DIAS_DE_AVISO, texto_de_plazo
 from ui.shared.errors import safe_error_summary
 from ui.theme import (
     ACCENT,
@@ -56,11 +56,6 @@ COLOR_NEUTRO = "neutro"
 COLOR_AL_DIA = "al_dia"
 COLOR_POR_VENCER = "por_vencer"
 COLOR_VENCIDO = "vencido"
-
-#: A partir de aqui se avisa en ambar. Menos de esto y el agente tiene que
-#: ponerse con ello hoy o mañana.
-DIAS_DE_AVISO = 3
-
 
 def texto_de_vencimiento(
     user: UserAccessRecord,

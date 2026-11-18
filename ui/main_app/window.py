@@ -49,7 +49,7 @@ from ui.main_app.settings_dialog import SettingsDialog
 from ui.admin_auth import is_admin_password_valid
 from ui.shared.dialogs import confirm_destructive_action
 from ui.shared.errors import safe_error_summary
-from ui.shared.plazos import texto_de_plazo
+from ui.shared.plazos import DIAS_DE_AVISO, texto_de_plazo
 from ui.theme import (
     SECONDARY_BUTTON,
     SECONDARY_BUTTON_HOVER,
@@ -128,7 +128,7 @@ class MainAppWindow(ctk.CTk):
         self._pending_admin_tab: str | None = None
         self._auth_session = get_current_session()
         self._access_snapshot: AccessSnapshot | None = None
-        self._aviso_de_video = ""
+        self._aviso_de_video: tuple[str, str] = ("", "")
         # Solo para admins. La limpieza de fotos consumidas es manual a
         # proposito, pero acordarse no puede serlo: sin este numero a la
         # vista, el almacenamiento crece mientras nadie mira.
@@ -189,6 +189,21 @@ class MainAppWindow(ctk.CTk):
         )
         self.title_label.grid(row=0, column=0, sticky="w")
 
+        # El plazo del video, pegado al titulo y con color propio. No va en la
+        # linea gris de abajo a proposito: ahi seria un dato mas entre cinco,
+        # y esto es lo unico de esa cabecera que, si se cumple, deja al agente
+        # sin poder trabajar.
+        self.video_badge = ctk.CTkLabel(
+            self.title_wrap,
+            text="",
+            font=ctk.CTkFont(size=12, weight="bold"),
+            text_color=TEXT_MUTED,
+            anchor="w",
+            justify="left",
+        )
+        self.video_badge.grid(row=1, column=0, pady=(2, 0), sticky="w")
+        self.video_badge.grid_remove()
+
         self.header_meta_label = ctk.CTkLabel(
             self.title_wrap,
             text=f"Motor: Tradicional | {self._slot_process_count_label()}",
@@ -197,7 +212,7 @@ class MainAppWindow(ctk.CTk):
             anchor="w",
             justify="left",
         )
-        self.header_meta_label.grid(row=1, column=0, pady=(2, 0), sticky="ew")
+        self.header_meta_label.grid(row=2, column=0, pady=(2, 0), sticky="ew")
         # Texto completo del resumen; lo que se pinta se acorta segun el ancho real.
         self._header_meta_parts: list[str] = []
 
@@ -1345,8 +1360,6 @@ class MainAppWindow(ctk.CTk):
             f"Principal: {slot_title}",
             f"Página: {page_name}",
         ]
-        if getattr(self, "_aviso_de_video", ""):
-            self._header_meta_parts.insert(1, self._aviso_de_video)
         aviso_de_limpieza = self._texto_de_limpieza_pendiente(
             getattr(self, "_pendientes_de_limpieza", 0)
         )
@@ -1535,7 +1548,8 @@ class MainAppWindow(ctk.CTk):
         if session is None or session.is_admin:
             self._access_snapshot = None
             self._process_access_block_reason = ""
-            self._aviso_de_video = ""
+            self._aviso_de_video = ("", "")
+            self._pintar_aviso_de_video()
             self._sync_run_button_state()
             if session is not None and session.is_admin:
                 self.refrescar_pendientes_de_limpieza()
@@ -1584,32 +1598,56 @@ class MainAppWindow(ctk.CTk):
         self._access_snapshot = snapshot
         self._process_access_block_reason = "" if snapshot.can_use_app else snapshot.reason
         self._aviso_de_video = self._texto_del_aviso_de_video(snapshot)
+        self._pintar_aviso_de_video()
         self._refresh_header_summary()
         self._sync_run_button_state()
         if not snapshot.can_use_app:
             self._broadcast_status_message(snapshot.reason, color=WARNING)
 
     @staticmethod
-    def _texto_del_aviso_de_video(snapshot: AccessSnapshot) -> str:
-        """Cuanto le queda al agente antes de tener que subir otro video.
+    def _texto_del_aviso_de_video(snapshot: AccessSnapshot) -> tuple[str, str]:
+        """Cuanto le queda al agente, y con que color decirselo.
 
-        Va en la cabecera, siempre a la vista. Antes el agente solo se
+        Va pegado al titulo y siempre a la vista. Antes el agente solo se
         enteraba del video cuando ya estaba bloqueado y no podia trabajar:
         para entonces el aviso ya no sirve de aviso.
+
+        El color va con el plazo, no con el gusto: verde mientras sobra,
+        ambar cuando hay que ponerse, rojo cuando ya no se puede trabajar.
+        Devuelve una clave y no un color para poder probarlo sin levantar la
+        interfaz.
         """
 
         restante = snapshot.tiempo_restante
         if restante is None:
             if snapshot.needs_weekly_video:
-                return "Video: tienes que subir uno"
-            return ""
+                return "Video: tienes que subir uno", "vencido"
+            return "", ""
         if restante <= timedelta(0):
-            return "Video: VENCIDO"
-        return f"Video: te quedan {texto_de_plazo(restante)}"
+            return "Video: VENCIDO", "vencido"
+        if restante < timedelta(days=DIAS_DE_AVISO):
+            return f"Video: te quedan {texto_de_plazo(restante)}", "por_vencer"
+        return f"Video: te quedan {texto_de_plazo(restante)}", "al_dia"
+
+    _COLORES_DEL_AVISO = {"al_dia": SUCCESS, "por_vencer": WARNING, "vencido": ERROR}
+
+    def _pintar_aviso_de_video(self) -> None:
+        if not hasattr(self, "video_badge"):
+            return
+        texto, clave = self._aviso_de_video
+        if not texto:
+            self.video_badge.grid_remove()
+            return
+        self.video_badge.configure(
+            text=texto,
+            text_color=self._COLORES_DEL_AVISO.get(clave, TEXT_MUTED),
+        )
+        self.video_badge.grid()
 
     def _apply_process_access_error(self, exc: Exception) -> None:
         self._access_snapshot = None
-        self._aviso_de_video = ""
+        self._aviso_de_video = ("", "")
+        self._pintar_aviso_de_video()
         self._refresh_header_summary()
         self._process_access_block_reason = f"No se pudo validar el acceso por video. Revisa tu conexión y vuelve a intentar. ({safe_error_summary(exc, context='acceso por video')})"
         self._sync_run_button_state()

@@ -62,37 +62,65 @@ def test_nunca_dice_cero_mientras_quede_algo() -> None:
 # --- la cabecera de la app ---------------------------------------------
 
 
-def _aviso(snapshot) -> str:
+def _aviso(snapshot):
     from ui.main_app.window import MainAppWindow
 
     return MainAppWindow._texto_del_aviso_de_video(snapshot)
 
 
-def test_la_cabecera_cuenta_los_dias() -> None:
-    assert _aviso(_snapshot(tiempo_restante=timedelta(days=3))) == "Video: te quedan 3 dias"
+def test_la_insignia_cuenta_los_dias_en_verde() -> None:
+    assert _aviso(_snapshot(tiempo_restante=timedelta(days=5))) == (
+        "Video: te quedan 5 dias",
+        "al_dia",
+    )
 
 
-def test_la_cabecera_avisa_de_las_ultimas_horas() -> None:
-    assert _aviso(_snapshot(tiempo_restante=timedelta(hours=4))) == "Video: te quedan 4 horas"
+def test_por_debajo_de_tres_dias_pasa_a_ambar() -> None:
+    # Es el momento en que informar deja de bastar: el agente tiene que
+    # ponerse con ello hoy o mañana.
+    assert _aviso(_snapshot(tiempo_restante=timedelta(days=2))) == (
+        "Video: te quedan 2 dias",
+        "por_vencer",
+    )
 
 
-def test_la_cabecera_dice_vencido() -> None:
+def test_las_ultimas_horas_siguen_en_ambar() -> None:
+    assert _aviso(_snapshot(tiempo_restante=timedelta(hours=4))) == (
+        "Video: te quedan 4 horas",
+        "por_vencer",
+    )
+
+
+def test_vencido_va_en_rojo() -> None:
     vencido = _snapshot(
         tiempo_restante=timedelta(days=-2), can_use_app=False, needs_weekly_video=True
     )
-    assert _aviso(vencido) == "Video: VENCIDO"
+    assert _aviso(vencido) == ("Video: VENCIDO", "vencido")
 
 
-def test_sin_video_se_pide_sin_contar_nada() -> None:
+def test_sin_video_se_pide_en_rojo() -> None:
     sin_video = _snapshot(
         tiempo_restante=None, can_use_app=False, needs_weekly_video=True
     )
-    assert _aviso(sin_video) == "Video: tienes que subir uno"
+    assert _aviso(sin_video) == ("Video: tienes que subir uno", "vencido")
 
 
-def test_a_quien_no_se_le_exige_video_no_se_le_pone_nada_en_la_cabecera() -> None:
+def test_a_quien_no_se_le_exige_video_no_se_le_pone_insignia() -> None:
     # Un admin o un exento no tienen por que ver un contador que no les toca.
-    assert _aviso(_snapshot(tiempo_restante=None, needs_weekly_video=False)) == ""
+    assert _aviso(_snapshot(tiempo_restante=None, needs_weekly_video=False)) == ("", "")
+
+
+def test_el_umbral_del_ambar_es_el_mismo_en_las_dos_pantallas() -> None:
+    """El agente y el administrador tienen que pasar a ambar el mismo dia.
+
+    Dos numeros sueltos acabarian separandose, y el panel del admin diria que
+    un agente va sobrado el mismo dia que a el se le pone la cabecera naranja.
+    """
+
+    from ui.main_app import user_access_panel
+    from ui.shared import plazos
+
+    assert user_access_panel.DIAS_DE_AVISO is plazos.DIAS_DE_AVISO
 
 
 # --- el mismo numero en los dos sitios ---------------------------------
@@ -110,7 +138,7 @@ def test_el_plazo_sale_del_snapshot_y_no_de_una_cuenta_aparte() -> None:
     ahora = datetime(2026, 11, 17, 12, 0, tzinfo=timezone.utc)
     restante = AccessService.tiempo_restante_del_video(creado.isoformat(), 7, now=ahora)
     assert restante == timedelta(days=5)
-    assert _aviso(_snapshot(tiempo_restante=restante)) == "Video: te quedan 5 dias"
+    assert _aviso(_snapshot(tiempo_restante=restante))[0] == "Video: te quedan 5 dias"
 
 
 def test_una_fecha_ilegible_no_inventa_un_plazo() -> None:
